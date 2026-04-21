@@ -183,31 +183,51 @@ const Assistant = () => {
 
               {/* Messages */}
               <div className="flex-1 space-y-5 overflow-y-auto px-5 py-6">
-                {/* AI bubble */}
+                {fromScan && (
+                  <div className="flex items-center justify-center">
+                    <div className="inline-flex items-center gap-2 rounded-full border border-border bg-secondary/60 px-3 py-1 text-[11px] text-muted-foreground">
+                      <Sparkles className="h-3 w-3 text-primary" />
+                      Imported from Scan · {scan.product} · HS {scan.hsCode}
+                    </div>
+                  </div>
+                )}
+
+                {/* AI bubble — opening */}
                 <div className="flex items-start gap-3 animate-fade-in-up">
                   <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-primary text-primary-foreground">
                     <Sparkles className="h-4 w-4" />
                   </div>
                   <div className="max-w-[80%]">
                     <div className="rounded-2xl rounded-tl-md bg-secondary px-4 py-3 text-[14px] leading-relaxed text-foreground">
-                      Great — your business identity and product details are confirmed ✅. Let's check eligibility for tariff reductions under ATIGA.
+                      {fromScan ? (
+                        <>
+                          I've analyzed your product: <strong>{scan.product}</strong> (HS Code: <strong>{scan.hsCode}</strong>).
+                          <br />
+                          Let's get your export ready step-by-step.
+                          <br />
+                          First, I need to confirm: <strong>Is your business registered with SSM?</strong>
+                        </>
+                      ) : (
+                        <>Great — your business identity and product details are confirmed ✅. Let's check eligibility for tariff reductions under ATIGA.</>
+                      )}
                     </div>
-                    <div className="mt-1 px-1 text-[10px] text-muted-foreground">Architect AI · 10:42</div>
+                    <div className="mt-1 px-1 text-[10px] text-muted-foreground">Architect AI · just now</div>
                   </div>
                 </div>
 
-                {/* User bubble */}
-                <div className="flex items-start justify-end gap-3 animate-fade-in-up" style={{ animationDelay: "120ms" }}>
-                  <div className="max-w-[75%]">
-                    <div className="rounded-2xl rounded-tr-md bg-primary px-4 py-3 text-[14px] leading-relaxed text-primary-foreground">
-                      Yes, please continue — exporting to Singapore.
+                {!fromScan && (
+                  <div className="flex items-start justify-end gap-3 animate-fade-in-up" style={{ animationDelay: "120ms" }}>
+                    <div className="max-w-[75%]">
+                      <div className="rounded-2xl rounded-tr-md bg-primary px-4 py-3 text-[14px] leading-relaxed text-primary-foreground">
+                        Yes, please continue — exporting to Singapore.
+                      </div>
+                      <div className="mt-1 px-1 text-right text-[10px] text-muted-foreground">You · 10:42</div>
                     </div>
-                    <div className="mt-1 px-1 text-right text-[10px] text-muted-foreground">You · 10:42</div>
+                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-primary to-primary-glow text-xs font-semibold text-primary-foreground">
+                      AR
+                    </div>
                   </div>
-                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-primary to-primary-glow text-xs font-semibold text-primary-foreground">
-                    AR
-                  </div>
-                </div>
+                )}
 
                 {/* AI question with selectable buttons */}
                 <div className="flex items-start gap-3 animate-fade-in-up" style={{ animationDelay: "240ms" }}>
@@ -216,7 +236,11 @@ const Assistant = () => {
                   </div>
                   <div className="max-w-[80%] space-y-3">
                     <div className="rounded-2xl rounded-tl-md bg-secondary px-4 py-3 text-[14px] leading-relaxed text-foreground">
-                      Is your product <strong>100% made in Malaysia</strong>? This affects your eligibility for tariff reduction.
+                      {fromScan ? (
+                        <>Quick check — <strong>is your business SSM-registered</strong> and active? This determines which export permits you can apply for.</>
+                      ) : (
+                        <>Is your product <strong>100% made in Malaysia</strong>? This affects your eligibility for tariff reduction.</>
+                      )}
                     </div>
 
                     {/* Selectable buttons */}

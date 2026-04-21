@@ -255,7 +255,9 @@ const Assistant = () => {
                               : "border-border bg-card text-foreground hover:border-primary/40 hover:bg-primary-soft"
                           }`}
                         >
-                          {v === "yes" ? "✓ Yes, fully local" : "✕ No, has imports"}
+                          {fromScan
+                            ? v === "yes" ? "✓ Yes, SSM registered" : "✕ Not yet"
+                            : v === "yes" ? "✓ Yes, fully local" : "✕ No, has imports"}
                         </button>
                       ))}
                     </div>

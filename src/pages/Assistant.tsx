@@ -16,17 +16,35 @@ type ScanState = {
   confidence?: string;
 };
 
-const steps = [
-  { id: 1, title: "Business Identity", subtitle: "SSM Verification", icon: Building2, status: "completed" as StepStatus },
-  { id: 2, title: "Product Details", subtitle: "HS Code & specs", icon: Package, status: "completed" as StepStatus },
-  { id: 3, title: "Export Permits", subtitle: "MITI / SIRIM", icon: FileCheck2, status: "active" as StepStatus },
-  { id: 4, title: "Destination Compliance", subtitle: "Target market rules", icon: Globe2, status: "pending" as StepStatus },
-  { id: 5, title: "Origin Certification", subtitle: "ATIGA / FTA", icon: Award, status: "pending" as StepStatus },
-  { id: 6, title: "Logistics Readiness", subtitle: "Packaging & labels", icon: Truck, status: "pending" as StepStatus },
-  { id: 7, title: "Pre-Clearance Report", subtitle: "Final review", icon: FileSearch, status: "pending" as StepStatus },
+const baseSteps = [
+  { id: 1, title: "Business Identity", subtitle: "SSM Verification", icon: Building2 },
+  { id: 2, title: "Product Details", subtitle: "HS Code & specs", icon: Package },
+  { id: 3, title: "Export Permits", subtitle: "MITI / SIRIM", icon: FileCheck2 },
+  { id: 4, title: "Destination Compliance", subtitle: "Target market rules", icon: Globe2 },
+  { id: 5, title: "Origin Certification", subtitle: "ATIGA / FTA", icon: Award },
+  { id: 6, title: "Logistics Readiness", subtitle: "Packaging & labels", icon: Truck },
+  { id: 7, title: "Pre-Clearance Report", subtitle: "Final review", icon: FileSearch },
 ];
 
 const Assistant = () => {
+  const location = useLocation();
+  const scan = (location.state ?? {}) as ScanState;
+  const fromScan = scan.from === "scan";
+
+  // When arriving from a scan: only Product Details is pre-filled (completed),
+  // and we start at Business Identity (SSM). Otherwise, original demo state.
+  const steps = baseSteps.map((s) => {
+    let status: StepStatus = "pending";
+    if (fromScan) {
+      if (s.id === 2) status = "completed";
+      else if (s.id === 1) status = "active";
+    } else {
+      if (s.id === 1 || s.id === 2) status = "completed";
+      else if (s.id === 3) status = "active";
+    }
+    return { ...s, status };
+  });
+
   const completed = steps.filter((s) => s.status === "completed").length;
   const total = steps.length;
   const progress = Math.round((completed / total) * 100);

@@ -171,7 +171,9 @@ const Assistant = () => {
                   </div>
                   <div>
                     <div className="text-sm font-semibold text-foreground">Architect AI</div>
-                    <div className="text-[11px] text-muted-foreground">Step 3 · Export Permits</div>
+                    <div className="text-[11px] text-muted-foreground">
+                      {fromScan ? "Step 1 · Business Identity" : "Step 3 · Export Permits"}
+                    </div>
                   </div>
                 </div>
                 <button className="rounded-lg border border-border bg-secondary/50 px-2.5 py-1 text-xs font-medium text-muted-foreground hover:text-foreground transition-base">

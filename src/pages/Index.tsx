@@ -24,7 +24,7 @@ const modules: ModuleCard[] = [
     description: "Check if your product can be exported.",
     icon: ScanLine,
     cta: "Start Scan",
-    to: "/assistant",
+    to: "/scan",
     accent: "primary",
     meta: "AI Vision · HS Code",
     step: "Step 01",

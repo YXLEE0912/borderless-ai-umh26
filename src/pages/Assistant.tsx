@@ -1,12 +1,20 @@
 import { useState } from "react";
+import { useLocation } from "react-router-dom";
 import TopNav from "@/components/TopNav";
 import {
   Building2, Package, FileCheck2, Globe2, Award, Truck, FileSearch,
-  CheckCircle2, Circle, Sparkles, Paperclip, Mic, ArrowUp,
+  CheckCircle2, Sparkles, Paperclip, Mic, ArrowUp,
   TrendingDown, Info, ChevronDown
 } from "lucide-react";
 
 type StepStatus = "completed" | "active" | "pending";
+
+type ScanState = {
+  from?: string;
+  product?: string;
+  hsCode?: string;
+  confidence?: string;
+};
 
 const steps = [
   { id: 1, title: "Business Identity", subtitle: "SSM Verification", icon: Building2, status: "completed" as StepStatus },

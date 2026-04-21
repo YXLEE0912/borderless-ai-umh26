@@ -1,24 +1,50 @@
 import { useState } from "react";
+import { useLocation } from "react-router-dom";
 import TopNav from "@/components/TopNav";
 import {
   Building2, Package, FileCheck2, Globe2, Award, Truck, FileSearch,
-  CheckCircle2, Circle, Sparkles, Paperclip, Mic, ArrowUp,
+  CheckCircle2, Sparkles, Paperclip, Mic, ArrowUp,
   TrendingDown, Info, ChevronDown
 } from "lucide-react";
 
 type StepStatus = "completed" | "active" | "pending";
 
-const steps = [
-  { id: 1, title: "Business Identity", subtitle: "SSM Verification", icon: Building2, status: "completed" as StepStatus },
-  { id: 2, title: "Product Details", subtitle: "HS Code & specs", icon: Package, status: "completed" as StepStatus },
-  { id: 3, title: "Export Permits", subtitle: "MITI / SIRIM", icon: FileCheck2, status: "active" as StepStatus },
-  { id: 4, title: "Destination Compliance", subtitle: "Target market rules", icon: Globe2, status: "pending" as StepStatus },
-  { id: 5, title: "Origin Certification", subtitle: "ATIGA / FTA", icon: Award, status: "pending" as StepStatus },
-  { id: 6, title: "Logistics Readiness", subtitle: "Packaging & labels", icon: Truck, status: "pending" as StepStatus },
-  { id: 7, title: "Pre-Clearance Report", subtitle: "Final review", icon: FileSearch, status: "pending" as StepStatus },
+type ScanState = {
+  from?: string;
+  product?: string;
+  hsCode?: string;
+  confidence?: string;
+};
+
+const baseSteps = [
+  { id: 1, title: "Business Identity", subtitle: "SSM Verification", icon: Building2 },
+  { id: 2, title: "Product Details", subtitle: "HS Code & specs", icon: Package },
+  { id: 3, title: "Export Permits", subtitle: "MITI / SIRIM", icon: FileCheck2 },
+  { id: 4, title: "Destination Compliance", subtitle: "Target market rules", icon: Globe2 },
+  { id: 5, title: "Origin Certification", subtitle: "ATIGA / FTA", icon: Award },
+  { id: 6, title: "Logistics Readiness", subtitle: "Packaging & labels", icon: Truck },
+  { id: 7, title: "Pre-Clearance Report", subtitle: "Final review", icon: FileSearch },
 ];
 
 const Assistant = () => {
+  const location = useLocation();
+  const scan = (location.state ?? {}) as ScanState;
+  const fromScan = scan.from === "scan";
+
+  // When arriving from a scan: only Product Details is pre-filled (completed),
+  // and we start at Business Identity (SSM). Otherwise, original demo state.
+  const steps = baseSteps.map((s) => {
+    let status: StepStatus = "pending";
+    if (fromScan) {
+      if (s.id === 2) status = "completed";
+      else if (s.id === 1) status = "active";
+    } else {
+      if (s.id === 1 || s.id === 2) status = "completed";
+      else if (s.id === 3) status = "active";
+    }
+    return { ...s, status };
+  });
+
   const completed = steps.filter((s) => s.status === "completed").length;
   const total = steps.length;
   const progress = Math.round((completed / total) * 100);
@@ -145,7 +171,9 @@ const Assistant = () => {
                   </div>
                   <div>
                     <div className="text-sm font-semibold text-foreground">Architect AI</div>
-                    <div className="text-[11px] text-muted-foreground">Step 3 · Export Permits</div>
+                    <div className="text-[11px] text-muted-foreground">
+                      {fromScan ? "Step 1 · Business Identity" : "Step 3 · Export Permits"}
+                    </div>
                   </div>
                 </div>
                 <button className="rounded-lg border border-border bg-secondary/50 px-2.5 py-1 text-xs font-medium text-muted-foreground hover:text-foreground transition-base">
@@ -155,31 +183,51 @@ const Assistant = () => {
 
               {/* Messages */}
               <div className="flex-1 space-y-5 overflow-y-auto px-5 py-6">
-                {/* AI bubble */}
+                {fromScan && (
+                  <div className="flex items-center justify-center">
+                    <div className="inline-flex items-center gap-2 rounded-full border border-border bg-secondary/60 px-3 py-1 text-[11px] text-muted-foreground">
+                      <Sparkles className="h-3 w-3 text-primary" />
+                      Imported from Scan · {scan.product} · HS {scan.hsCode}
+                    </div>
+                  </div>
+                )}
+
+                {/* AI bubble — opening */}
                 <div className="flex items-start gap-3 animate-fade-in-up">
                   <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-primary text-primary-foreground">
                     <Sparkles className="h-4 w-4" />
                   </div>
                   <div className="max-w-[80%]">
                     <div className="rounded-2xl rounded-tl-md bg-secondary px-4 py-3 text-[14px] leading-relaxed text-foreground">
-                      Great — your business identity and product details are confirmed ✅. Let's check eligibility for tariff reductions under ATIGA.
+                      {fromScan ? (
+                        <>
+                          I've analyzed your product: <strong>{scan.product}</strong> (HS Code: <strong>{scan.hsCode}</strong>).
+                          <br />
+                          Let's get your export ready step-by-step.
+                          <br />
+                          First, I need to confirm: <strong>Is your business registered with SSM?</strong>
+                        </>
+                      ) : (
+                        <>Great — your business identity and product details are confirmed ✅. Let's check eligibility for tariff reductions under ATIGA.</>
+                      )}
                     </div>
-                    <div className="mt-1 px-1 text-[10px] text-muted-foreground">Architect AI · 10:42</div>
+                    <div className="mt-1 px-1 text-[10px] text-muted-foreground">Architect AI · just now</div>
                   </div>
                 </div>
 
-                {/* User bubble */}
-                <div className="flex items-start justify-end gap-3 animate-fade-in-up" style={{ animationDelay: "120ms" }}>
-                  <div className="max-w-[75%]">
-                    <div className="rounded-2xl rounded-tr-md bg-primary px-4 py-3 text-[14px] leading-relaxed text-primary-foreground">
-                      Yes, please continue — exporting to Singapore.
+                {!fromScan && (
+                  <div className="flex items-start justify-end gap-3 animate-fade-in-up" style={{ animationDelay: "120ms" }}>
+                    <div className="max-w-[75%]">
+                      <div className="rounded-2xl rounded-tr-md bg-primary px-4 py-3 text-[14px] leading-relaxed text-primary-foreground">
+                        Yes, please continue — exporting to Singapore.
+                      </div>
+                      <div className="mt-1 px-1 text-right text-[10px] text-muted-foreground">You · 10:42</div>
                     </div>
-                    <div className="mt-1 px-1 text-right text-[10px] text-muted-foreground">You · 10:42</div>
+                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-primary to-primary-glow text-xs font-semibold text-primary-foreground">
+                      AR
+                    </div>
                   </div>
-                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-primary to-primary-glow text-xs font-semibold text-primary-foreground">
-                    AR
-                  </div>
-                </div>
+                )}
 
                 {/* AI question with selectable buttons */}
                 <div className="flex items-start gap-3 animate-fade-in-up" style={{ animationDelay: "240ms" }}>
@@ -188,7 +236,11 @@ const Assistant = () => {
                   </div>
                   <div className="max-w-[80%] space-y-3">
                     <div className="rounded-2xl rounded-tl-md bg-secondary px-4 py-3 text-[14px] leading-relaxed text-foreground">
-                      Is your product <strong>100% made in Malaysia</strong>? This affects your eligibility for tariff reduction.
+                      {fromScan ? (
+                        <>Quick check — <strong>is your business SSM-registered</strong> and active? This determines which export permits you can apply for.</>
+                      ) : (
+                        <>Is your product <strong>100% made in Malaysia</strong>? This affects your eligibility for tariff reduction.</>
+                      )}
                     </div>
 
                     {/* Selectable buttons */}
@@ -203,7 +255,9 @@ const Assistant = () => {
                               : "border-border bg-card text-foreground hover:border-primary/40 hover:bg-primary-soft"
                           }`}
                         >
-                          {v === "yes" ? "✓ Yes, fully local" : "✕ No, has imports"}
+                          {fromScan
+                            ? v === "yes" ? "✓ Yes, SSM registered" : "✕ Not yet"
+                            : v === "yes" ? "✓ Yes, fully local" : "✕ No, has imports"}
                         </button>
                       ))}
                     </div>

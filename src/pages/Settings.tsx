@@ -1,26 +1,19 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowLeft, Bell, Globe2, Lock, Moon, Shield, Sun } from "lucide-react";
 import { toast } from "sonner";
 import TopNav from "@/components/TopNav";
+import { useTheme } from "@/hooks/use-theme";
 
 const Settings = () => {
   const navigate = useNavigate();
-  const [theme, setTheme] = useState<"light" | "dark">(() =>
-    typeof window !== "undefined" && document.documentElement.classList.contains("dark")
-      ? "dark"
-      : "light",
-  );
+  const { theme, setTheme } = useTheme();
   const [emailAlerts, setEmailAlerts] = useState(true);
   const [pushAlerts, setPushAlerts] = useState(true);
   const [weeklyDigest, setWeeklyDigest] = useState(false);
   const [twoFA, setTwoFA] = useState(true);
   const [language, setLanguage] = useState("English");
   const [currency, setCurrency] = useState("MYR");
-
-  useEffect(() => {
-    document.documentElement.classList.toggle("dark", theme === "dark");
-  }, [theme]);
 
   return (
     <div className="min-h-screen bg-background">

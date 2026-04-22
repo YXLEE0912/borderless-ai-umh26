@@ -20,7 +20,6 @@ import {
   LogOut,
   Moon,
   Sun,
-  Command as CommandIcon,
 } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
@@ -43,6 +42,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useTheme } from "@/hooks/use-theme";
 
 const navItems = [
   { label: "Dashboard", to: "/" },
@@ -92,10 +92,7 @@ const TopNav = () => {
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [notifications, setNotifications] = useState<Notification[]>(initialNotifications);
-  const [theme, setTheme] = useState<"light" | "dark">(() => {
-    if (typeof window === "undefined") return "light";
-    return document.documentElement.classList.contains("dark") ? "dark" : "light";
-  });
+  const { theme, toggleTheme: toggleThemeCtx } = useTheme();
 
   const unreadCount = notifications.filter((n) => !n.read).length;
 
@@ -122,9 +119,8 @@ const TopNav = () => {
 
 
   const toggleTheme = () => {
+    toggleThemeCtx();
     const next = theme === "light" ? "dark" : "light";
-    setTheme(next);
-    document.documentElement.classList.toggle("dark", next === "dark");
     toast(`Switched to ${next} mode`);
   };
 
@@ -346,11 +342,6 @@ const TopNav = () => {
                     <Sun className="mr-2 h-4 w-4" />
                   )}
                   <span>{theme === "light" ? "Dark mode" : "Light mode"}</span>
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => setOpen(true)}>
-                  <CommandIcon className="mr-2 h-4 w-4" />
-                  <span>Command palette</span>
-                  <DropdownMenuShortcutInline>⌘K</DropdownMenuShortcutInline>
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => navigate("/support")}>
                   <LifeBuoy className="mr-2 h-4 w-4" />

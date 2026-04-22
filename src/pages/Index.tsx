@@ -4,6 +4,7 @@ import {
   ScanLine, Map, Calculator, ArrowRight, Sparkles, TrendingUp,
   CheckCircle2, Clock, Globe, Truck, ShieldCheck
 } from "lucide-react";
+import { LiveTradeIntelligence } from "@/components/LiveTradeIntelligence";
 
 type ModuleCard = {
   id: string;
@@ -158,8 +159,8 @@ const Index = () => {
         </section>
 
         {/* Recent activity */}
-        <section className="mt-10 grid grid-cols-1 gap-5 lg:grid-cols-3">
-          <div className="rounded-2xl border border-border bg-card p-6 shadow-xs lg:col-span-2">
+        <section className="mt-10 grid grid-cols-1 gap-5 lg:grid-cols-2">
+          <div className="rounded-2xl border border-border bg-card p-6 shadow-xs">
             <div className="flex items-center justify-between">
               <h3 className="text-base font-semibold text-foreground">Recent shipments</h3>
               <button className="text-xs font-medium text-primary hover:underline">View all</button>
@@ -186,7 +187,11 @@ const Index = () => {
             </div>
           </div>
 
+          <div className="rounded-2xl border border-border bg-card shadow-xs overflow-hidden max-h-[320px]">
+            <LiveTradeIntelligence />
+          </div>
         </section>
+
       </main>
     </div>
   );

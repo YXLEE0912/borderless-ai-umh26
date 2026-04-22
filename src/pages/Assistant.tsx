@@ -1,15 +1,14 @@
 import { useState, useRef, useEffect } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import TopNav from "@/components/TopNav";
 import {
-  Building2, Package, FileCheck2, Globe2, Award, Truck, FileSearch,
+  Building2, FileCheck2, Award, FileSearch,
   ShieldCheck, Sparkles, Mic, ArrowUp, Loader2, Paperclip,
   Cog, Link2, AlertTriangle, ExternalLink, Upload, ArrowRight,
   CheckCircle2, Lock, FileText, FileSpreadsheet, Ship, ClipboardList,
   Stamp, Leaf, Download, TrendingDown, Info, KeyRound,
 } from "lucide-react";
 
-type StepStatus = "completed" | "active" | "locked";
 type ChecklistStatus = "REQUIRED" | "PENDING" | "COMPLETED";
 
 type Step = {
@@ -69,10 +68,7 @@ type ActionButton = { label: string; icon: React.ElementType; intent: "primary" 
 
 const genId = () => Math.random().toString(36).slice(2);
 
-const STEP_FLOW: Record<number, {
-  intro: Message;
-  onComplete: Message;
-}> = {
+const STEP_FLOW: Record<number, { intro: Message; onComplete: Message }> = {
   0: {
     intro: {
       id: "i0", role: "assistant", kind: "checklist",
@@ -172,6 +168,7 @@ const STEP_FLOW: Record<number, {
 };
 
 export default function AssistantPage() {
+  const navigate = useNavigate();
   const [completed, setCompleted] = useState<Set<number>>(new Set());
   const [activeStep, setActiveStep] = useState(0);
   const [messages, setMessages] = useState<Message[]>([
@@ -198,6 +195,9 @@ export default function AssistantPage() {
   const readyDocs = docsWithStatus.filter((d) => d.status === "ready");
   const partialDocs = docsWithStatus.filter((d) => d.status === "partial");
   const lockedDocs = docsWithStatus.filter((d) => d.status === "locked");
+
+  const allReadyGenerated =
+    readyDocs.length > 0 && readyDocs.every((d) => generatedIds.has(d.id));
 
   const handleGenerate = (id: string) => {
     if (generatedIds.has(id) || generatingId) return;
@@ -258,7 +258,6 @@ export default function AssistantPage() {
 
   return (
     <div className="min-h-screen bg-secondary/30">
-      {/* ── Top Nav (replaces the inline header from doc4) ── */}
       <TopNav />
 
       <main className="mx-auto max-w-7xl px-4 py-6">
@@ -617,8 +616,27 @@ export default function AssistantPage() {
               </div>
             </div>
           </aside>
+
         </div>
       </main>
+
+      {/* ── Proceed to Logistics FAB ── */}
+      {allReadyGenerated && (
+        <div className="pointer-events-none fixed bottom-6 right-6 z-50 flex flex-col items-end gap-2">
+          <span className="absolute inset-0 -z-10 animate-ping rounded-2xl bg-primary opacity-20" />
+          <button
+            onClick={() => navigate("/logistics")}
+            className="pointer-events-auto flex items-center gap-3 rounded-2xl bg-gradient-primary px-5 py-3.5 text-sm font-semibold text-primary-foreground shadow-[0_8px_32px_rgba(0,0,0,0.25)] ring-1 ring-primary/40 transition-all hover:scale-[1.03] hover:shadow-[0_12px_40px_rgba(0,0,0,0.35)] active:scale-[0.98]"
+          >
+            <Ship className="h-4 w-4" />
+            Proceed to Logistics
+            <ArrowRight className="h-4 w-4" />
+          </button>
+          <p className="pointer-events-auto text-center text-[10px] text-muted-foreground">
+            All export documents ready
+          </p>
+        </div>
+      )}
     </div>
   );
 }

@@ -120,9 +120,6 @@ const TopNav = () => {
     toast.success("All notifications marked as read");
   };
 
-  const clearNotification = (id: string) => {
-    setNotifications((prev) => prev.filter((n) => n.id !== id));
-  };
 
   const toggleTheme = () => {
     const next = theme === "light" ? "dark" : "light";

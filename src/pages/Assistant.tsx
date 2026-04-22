@@ -7,6 +7,7 @@ import {
   Cog, Link2, AlertTriangle, ExternalLink, Upload, ArrowRight,
   CheckCircle2, Lock, FileText, FileSpreadsheet, Ship, ClipboardList,
   Stamp, Leaf, Download, TrendingDown, Info, KeyRound,
+  UserSquare2, Coins, PackageSearch, PenLine,
 } from "lucide-react";
 
 type ChecklistStatus = "REQUIRED" | "PENDING" | "COMPLETED";
@@ -20,11 +21,14 @@ type Step = {
 
 const STEPS: Step[] = [
   { id: 0, title: "Entity Verification", subtitle: "SSM & BRN Registration", icon: Building2 },
-  { id: 1, title: "Classification", subtitle: "HS Code & Duty Lookup", icon: FileSearch },
-  { id: 2, title: "Special Permits", subtitle: "SIRIM / Halal / MITI", icon: Award },
-  { id: 3, title: "Digital Access", subtitle: "MyCIEDS & Dagang Net", icon: KeyRound },
-  { id: 4, title: "Trade Docs", subtitle: "Invoice & Packing List", icon: FileText },
-  { id: 5, title: "Customs Submission", subtitle: "K2 Form Preview", icon: FileCheck2 },
+  { id: 1, title: "Consignee Details", subtitle: "Buyer & Importer Info", icon: UserSquare2 },
+  { id: 2, title: "Classification", subtitle: "HS Code & Duty Lookup", icon: FileSearch },
+  { id: 3, title: "Special Permits", subtitle: "SIRIM / Halal / MITI", icon: Award },
+  { id: 4, title: "Digital Access", subtitle: "MyCIEDS & Dagang Net", icon: KeyRound },
+  { id: 5, title: "Financial Valuation", subtitle: "FOB, Freight & FX", icon: Coins },
+  { id: 6, title: "Logistics & Metrics", subtitle: "Mode, Vessel, Weight", icon: PackageSearch },
+  { id: 7, title: "Trade Docs & Signatory", subtitle: "Invoice, B/L, Declaration", icon: FileText },
+  { id: 8, title: "Customs Submission", subtitle: "K2 Form Preview", icon: FileCheck2 },
 ];
 
 type ChecklistItem = { label: string; status: ChecklistStatus };
@@ -36,22 +40,23 @@ type ExportDoc = {
   sublabel: string;
   icon: React.ElementType;
   requiredSteps: number[];
+  gating?: boolean;
 };
 
 const EXPORT_DOCS: ExportDoc[] = [
-  { id: "commercial-invoice", label: "Commercial Invoice", sublabel: "Buyer & seller details, goods value", icon: FileText, requiredSteps: [0, 1] },
-  { id: "packing-list", label: "Packing List", sublabel: "Item weights, dimensions & quantities", icon: FileSpreadsheet, requiredSteps: [0, 1] },
-  { id: "bol", label: "Bill of Lading / Air Waybill", sublabel: "Carrier & routing information", icon: Ship, requiredSteps: [0, 1, 4] },
-  { id: "k2", label: "K2 Declaration Form", sublabel: "Customs export declaration", icon: ClipboardList, requiredSteps: [0, 1, 2, 3] },
-  { id: "coo", label: "Certificate of Origin", sublabel: "ATIGA / FTA Form D", icon: Stamp, requiredSteps: [0, 1, 2] },
-  { id: "sirim", label: "SIRIM Certificate", sublabel: "Standards & quality compliance", icon: ShieldCheck, requiredSteps: [0, 1, 2] },
-  { id: "halal", label: "Halal Certificate", sublabel: "JAKIM-recognised certification", icon: Leaf, requiredSteps: [0, 1, 2, 3] },
+  { id: "commercial-invoice", label: "Commercial Invoice", sublabel: "Buyer & seller details, FOB value, FX", icon: FileText, requiredSteps: [0, 1, 2, 5], gating: true },
+  { id: "packing-list", label: "Packing List", sublabel: "Item weights, dimensions & quantities", icon: FileSpreadsheet, requiredSteps: [0, 1, 2, 6], gating: true },
+  { id: "bol", label: "Bill of Lading / Air Waybill", sublabel: "Carrier, vessel & routing information", icon: Ship, requiredSteps: [0, 1, 2, 6, 7], gating: true },
+  { id: "k2", label: "K2 Declaration Form", sublabel: "Customs export declaration (signed)", icon: ClipboardList, requiredSteps: [0, 1, 2, 3, 4, 5, 6, 7], gating: true },
+  { id: "coo", label: "Certificate of Origin", sublabel: "ATIGA / FTA Form D", icon: Stamp, requiredSteps: [0, 1, 2, 3] },
+  { id: "sirim", label: "SIRIM Certificate", sublabel: "Standards & quality compliance", icon: ShieldCheck, requiredSteps: [0, 2, 3] },
+  { id: "halal", label: "Halal Certificate", sublabel: "JAKIM-recognised certification", icon: Leaf, requiredSteps: [0, 2, 3, 4] },
 ];
 
 const docStatus = (doc: ExportDoc, completed: Set<number>): DocStatus => {
   const missing = doc.requiredSteps.filter((s) => !completed.has(s)).length;
   if (missing === 0) return "ready";
-  if (missing <= 1) return "partial";
+  if (missing <= 2) return "partial";
   return "locked";
 };
 
@@ -85,12 +90,32 @@ const STEP_FLOW: Record<number, { intro: Message; onComplete: Message }> = {
     },
     onComplete: {
       id: "c0", role: "assistant", kind: "text",
-      content: "✅ Entity verified. SSM No. 202301045678-A linked to RMCD records. Moving to product classification.",
+      content: "✅ Entity verified. SSM No. 202301045678-A linked to RMCD records. Now collecting your overseas buyer details.",
     },
   },
   1: {
     intro: {
       id: "i1", role: "assistant", kind: "checklist",
+      content: "Every export declaration needs the consignee on record. I'll pre-fill the Commercial Invoice and B/L from this.",
+      items: [
+        { label: "Consignee (Buyer) name & full address", status: "REQUIRED" },
+        { label: "Importer contact (email & phone)", status: "REQUIRED" },
+        { label: "Importer Tax / VAT ID (destination country)", status: "PENDING" },
+        { label: "Notify Party (if different)", status: "PENDING" },
+      ],
+      actions: [
+        { label: "Add Consignee details", icon: UserSquare2, intent: "primary", action: "add-consignee" },
+        { label: "Import from previous shipment", icon: Upload, intent: "ghost", action: "import-consignee" },
+      ],
+    },
+    onComplete: {
+      id: "c1", role: "assistant", kind: "text",
+      content: "✅ Consignee captured: PT Sumber Rasa, Jakarta Pusat 10110, Indonesia. Tax ID 01.234.567.8-901.000. Mapping product classification next.",
+    },
+  },
+  2: {
+    intro: {
+      id: "i2", role: "assistant", kind: "checklist",
       content: "Now mapping your product against the WCO Harmonized System. The HS Code drives every downstream permit and duty calculation.",
       items: [
         { label: "Product description & specs", status: "REQUIRED" },
@@ -103,25 +128,25 @@ const STEP_FLOW: Record<number, { intro: Message; onComplete: Message }> = {
       ],
     },
     onComplete: {
-      id: "c1", role: "assistant", kind: "text",
+      id: "c2", role: "assistant", kind: "text",
       content: "✅ Classified as HS 0902.30.10 (Black tea, fermented, in packings ≤ 3kg). Duty: 5% under ATIGA. Now checking permit dependencies.",
     },
   },
-  2: {
+  3: {
     intro: {
-      id: "i2", role: "assistant", kind: "reference",
+      id: "i3", role: "assistant", kind: "reference",
       content: "Your HS Code triggers SIRIM compliance. Halal cert recommended for ASEAN F&B markets. MITI export licence not required at this volume.",
       refTitle: "SIRIM QAS — Product Certification",
       refUrl: "https://www.sirim-qas.com.my/",
     },
     onComplete: {
-      id: "c2", role: "assistant", kind: "text",
+      id: "c3", role: "assistant", kind: "text",
       content: "✅ SIRIM cert validated. JAKIM Halal logo permitted. Proceeding to digital access setup.",
     },
   },
-  3: {
+  4: {
     intro: {
-      id: "i3", role: "assistant", kind: "checklist",
+      id: "i4", role: "assistant", kind: "checklist",
       content: "K2 declaration must be submitted via Dagang Net. You'll need a Digital Certificate for authentication.",
       items: [
         { label: "MyCIEDS account", status: "REQUIRED" },
@@ -133,35 +158,82 @@ const STEP_FLOW: Record<number, { intro: Message; onComplete: Message }> = {
       ],
     },
     onComplete: {
-      id: "c3", role: "assistant", kind: "text",
-      content: "✅ Dagang Net linked. Digital Certificate active until 2027. Generating trade documents next.",
-    },
-  },
-  4: {
-    intro: {
-      id: "i4", role: "assistant", kind: "checklist",
-      content: "Generating draft Commercial Invoice and Packing List from your verified entity + classification data.",
-      items: [
-        { label: "Commercial Invoice", status: "PENDING" },
-        { label: "Packing List", status: "PENDING" },
-        { label: "Certificate of Origin (Form D)", status: "PENDING" },
-      ],
-      actions: [
-        { label: "Generate Trade Docs", icon: FileText, intent: "primary", action: "generate-docs" },
-      ],
-    },
-    onComplete: {
       id: "c4", role: "assistant", kind: "text",
-      content: "✅ Invoice INV-2026-0042 and Packing List PL-2026-0042 generated. Ready for K2 submission.",
+      content: "✅ Dagang Net linked. Digital Certificate active until 2027. Now valuing the shipment.",
     },
   },
   5: {
     intro: {
-      id: "i5", role: "assistant", kind: "text",
-      content: "All dependencies satisfied. K2 Customs Declaration is ready for preview and submission to RMCD via Dagang Net.",
+      id: "i5", role: "assistant", kind: "checklist",
+      content: "RMCD requires a full valuation breakdown to assess duties. I'll convert FX automatically using Bank Negara reference rates.",
+      items: [
+        { label: "FOB value (goods at Malaysian port)", status: "REQUIRED" },
+        { label: "Insurance cost (CIF component)", status: "REQUIRED" },
+        { label: "Freight cost", status: "REQUIRED" },
+        { label: "Invoice currency & exchange rate to RM", status: "PENDING" },
+        { label: "FTA exemption reference (if claimed)", status: "PENDING" },
+      ],
+      actions: [
+        { label: "Enter valuation", icon: Coins, intent: "primary", action: "enter-valuation" },
+      ],
     },
     onComplete: {
       id: "c5", role: "assistant", kind: "text",
+      content: "✅ Valuation locked. FOB USD 1,000 · Insurance USD 25 · Freight USD 45. FX 4.72 RM/USD (BNM 22 Apr 2026). ATIGA Form D claimed — duty exemption RM 320.",
+    },
+  },
+  6: {
+    intro: {
+      id: "i6", role: "assistant", kind: "checklist",
+      content: "Logistics specifics flow into both the K2 form and the Bill of Lading. Get this right or your shipment gets held at the port.",
+      items: [
+        { label: "Mode of Transport (Sea / Air / Rail / Road)", status: "REQUIRED" },
+        { label: "Vessel name or Flight number", status: "REQUIRED" },
+        { label: "Port / Place of Export", status: "REQUIRED" },
+        { label: "Port of Discharge (destination)", status: "REQUIRED" },
+        { label: "Scheduled export date", status: "REQUIRED" },
+        { label: "Gross weight (kg) & measurement (m³)", status: "PENDING" },
+        { label: "Packaging type & container number", status: "PENDING" },
+      ],
+      actions: [
+        { label: "Add shipment details", icon: PackageSearch, intent: "primary", action: "add-shipment" },
+        { label: "Pull from carrier booking", icon: Ship, intent: "ghost", action: "pull-carrier" },
+      ],
+    },
+    onComplete: {
+      id: "c6", role: "assistant", kind: "text",
+      content: "✅ Shipment: SEA · MV Bunga Mas 5 · ETD 02 May 2026 · Port Klang → Tanjung Priok. 480 kg / 1.2 m³ · 12 cartons on 1 EUR pallet · Container MSKU-7842150.",
+    },
+  },
+  7: {
+    intro: {
+      id: "i7", role: "assistant", kind: "checklist",
+      content: "Generating Commercial Invoice, Packing List, and the Bill of Lading from your verified data. The K2 form needs a named signatory.",
+      items: [
+        { label: "Commercial Invoice", status: "PENDING" },
+        { label: "Packing List", status: "PENDING" },
+        { label: "Bill of Lading / Air Waybill", status: "PENDING" },
+        { label: "Authorized signatory (NRIC / Passport)", status: "REQUIRED" },
+        { label: "Signatory designation (job title)", status: "REQUIRED" },
+        { label: "Declaration of truth (e-signature)", status: "REQUIRED" },
+      ],
+      actions: [
+        { label: "Generate trade docs", icon: FileText, intent: "primary", action: "generate-docs" },
+        { label: "Sign declaration", icon: PenLine, intent: "ghost", action: "sign-declaration" },
+      ],
+    },
+    onComplete: {
+      id: "c7", role: "assistant", kind: "text",
+      content: "✅ INV-2026-0042, PL-2026-0042, B/L MAEU-558410 generated. Signed by Aisyah Rahman (Director, NRIC 880412-14-5566). Ready for K2 submission.",
+    },
+  },
+  8: {
+    intro: {
+      id: "i8", role: "assistant", kind: "text",
+      content: "All dependencies satisfied. K2 Customs Declaration is ready for preview and submission to RMCD via Dagang Net.",
+    },
+    onComplete: {
+      id: "c8", role: "assistant", kind: "text",
       content: "🎉 K2 submitted. Reference: K2-MY-2026-118742. RMCD acknowledgement expected within 4 business hours.",
     },
   },
@@ -174,7 +246,7 @@ export default function AssistantPage() {
   const [messages, setMessages] = useState<Message[]>([
     {
       id: "welcome", role: "assistant", kind: "text",
-      content: "Hi — I'm your Compliance Architect. I'll guide you through each regulatory dependency in order: SSM → HS Code → Permits → Digital Access → Docs → K2. Let's start with entity verification.",
+      content: "Hi — I'm your Compliance Architect. I'll guide you through every regulatory dependency in order: Entity → Consignee → HS Code → Permits → Digital Access → Valuation → Logistics → Docs & Signatory → K2. Let's start with entity verification.",
     },
     STEP_FLOW[0].intro,
   ]);
@@ -196,8 +268,9 @@ export default function AssistantPage() {
   const partialDocs = docsWithStatus.filter((d) => d.status === "partial");
   const lockedDocs = docsWithStatus.filter((d) => d.status === "locked");
 
-  const allReadyGenerated =
-    readyDocs.length > 0 && readyDocs.every((d) => generatedIds.has(d.id));
+  const gatingDocs = EXPORT_DOCS.filter((d) => d.gating);
+  const canProceed = gatingDocs.every((d) => generatedIds.has(d.id));
+  const gatingGenerated = gatingDocs.filter((d) => generatedIds.has(d.id)).length;
 
   const handleGenerate = (id: string) => {
     if (generatedIds.has(id) || generatingId) return;
@@ -312,7 +385,7 @@ export default function AssistantPage() {
                         </div>
                         <div className="min-w-0 flex-1 pt-0.5">
                           <div className="flex items-center gap-2">
-                            <span className="text-[10px] font-semibold text-muted-foreground">STEP {step.id}</span>
+                            <span className="text-[10px] font-semibold text-muted-foreground">STEP {step.id + 1}</span>
                             {isActive && <span className="rounded-full bg-primary px-1.5 py-px text-[9px] font-bold text-primary-foreground">NOW</span>}
                           </div>
                           <div className="text-[13px] font-semibold text-foreground">{step.title}</div>
@@ -367,9 +440,12 @@ export default function AssistantPage() {
                         <span className={`flex-1 truncate ${isDone ? "text-muted-foreground line-through" : "text-foreground"}`}>
                           {doc.label}
                         </span>
-                        {!isDone && !isGenerating && blockingStep && (
+                        {doc.gating && (
+                          <span className="shrink-0 rounded-sm bg-primary/10 px-1 py-px text-[8px] font-bold uppercase text-primary">Req</span>
+                        )}
+                        {!isDone && !isGenerating && blockingStep && !doc.gating && (
                           <span className="shrink-0 rounded bg-secondary px-1.5 py-px text-[9px] font-semibold text-muted-foreground" title={`Needs: ${blockingStep.title}`}>
-                            S{blockingStep.id}
+                            S{blockingStep.id + 1}
                           </span>
                         )}
                       </li>
@@ -392,7 +468,7 @@ export default function AssistantPage() {
                   <div>
                     <div className="text-sm font-semibold text-foreground">Architect AI</div>
                     <div className="text-[11px] text-muted-foreground">
-                      Step {activeStep} · {STEPS[activeStep]?.title}
+                      Step {activeStep + 1} · {STEPS[activeStep]?.title}
                     </div>
                   </div>
                 </div>
@@ -459,9 +535,9 @@ export default function AssistantPage() {
               </div>
               <div className="flex flex-wrap gap-x-6 gap-y-3 px-4 py-4">
                 {[
-                  { label: "Goods Value", value: "RM 4,200" },
-                  { label: "Estimated VAT", value: "RM 252" },
-                  { label: "Estimated Shipping", value: "RM 180" },
+                  { label: "FOB Value", value: "RM 4,720" },
+                  { label: "Insurance + Freight", value: "RM 330" },
+                  { label: "Estimated Duty", value: "RM 252" },
                 ].map((row) => (
                   <div key={row.label} className="flex items-center gap-2">
                     <span className="text-[13px] text-muted-foreground">{row.label}</span>
@@ -470,7 +546,7 @@ export default function AssistantPage() {
                 ))}
                 <div className="flex items-center gap-2 border-l border-border pl-6">
                   <span className="text-sm font-semibold text-foreground">Total</span>
-                  <span className="text-lg font-semibold text-foreground">RM 4,632</span>
+                  <span className="text-lg font-semibold text-foreground">RM 5,302</span>
                 </div>
                 <div className="flex w-full items-start gap-2 rounded-xl bg-success-soft p-2.5">
                   <TrendingDown className="mt-0.5 h-3.5 w-3.5 shrink-0 text-success" />
@@ -499,7 +575,7 @@ export default function AssistantPage() {
                 </span>
               </div>
 
-              <div className="max-h-[640px] space-y-1 overflow-y-auto px-3 py-3">
+              <div className="max-h-[540px] space-y-1 overflow-y-auto px-3 py-3">
                 {readyDocs.length > 0 && (
                   <>
                     <div className="px-1 pb-1 pt-0.5 text-[10px] font-semibold uppercase tracking-wider text-success">
@@ -515,7 +591,12 @@ export default function AssistantPage() {
                             <Icon className="h-3.5 w-3.5 text-success" />
                           </div>
                           <div className="min-w-0 flex-1">
-                            <div className="truncate text-[11px] font-semibold text-foreground">{doc.label}</div>
+                            <div className="flex items-center gap-1">
+                              <div className="truncate text-[11px] font-semibold text-foreground">{doc.label}</div>
+                              {doc.gating && (
+                                <span className="shrink-0 rounded-sm bg-primary/10 px-1 py-px text-[8px] font-bold uppercase text-primary">Req</span>
+                              )}
+                            </div>
                             <div className="truncate text-[10px] text-muted-foreground">{doc.sublabel}</div>
                           </div>
                           <button
@@ -560,8 +641,13 @@ export default function AssistantPage() {
                             <Icon className="h-3.5 w-3.5 text-warning" />
                           </div>
                           <div className="min-w-0 flex-1">
-                            <div className="truncate text-[11px] font-semibold text-foreground">{doc.label}</div>
-                            <div className="truncate text-[10px] text-warning">Complete: {missing.join(", ")}</div>
+                            <div className="flex items-center gap-1">
+                              <div className="truncate text-[11px] font-semibold text-foreground">{doc.label}</div>
+                              {doc.gating && (
+                                <span className="shrink-0 rounded-sm bg-primary/10 px-1 py-px text-[8px] font-bold uppercase text-primary">Req</span>
+                              )}
+                            </div>
+                            <div className="truncate text-[10px] text-warning">Need: {missing.slice(0, 2).join(", ")}</div>
                           </div>
                           <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-secondary text-muted-foreground">
                             <Lock className="h-3 w-3" />
@@ -586,7 +672,12 @@ export default function AssistantPage() {
                             <Icon className="h-3.5 w-3.5 text-muted-foreground" />
                           </div>
                           <div className="min-w-0 flex-1">
-                            <div className="truncate text-[11px] font-semibold text-muted-foreground">{doc.label}</div>
+                            <div className="flex items-center gap-1">
+                              <div className="truncate text-[11px] font-semibold text-muted-foreground">{doc.label}</div>
+                              {doc.gating && (
+                                <span className="shrink-0 rounded-sm bg-muted px-1 py-px text-[8px] font-bold uppercase text-muted-foreground">Req</span>
+                              )}
+                            </div>
                             <div className="truncate text-[10px] text-muted-foreground">
                               {missingCount} step{missingCount > 1 ? "s" : ""} remaining
                             </div>
@@ -600,7 +691,7 @@ export default function AssistantPage() {
                   </>
                 )}
 
-                {readyDocs.length > 1 && (
+                {readyDocs.filter((d) => !generatedIds.has(d.id)).length > 1 && (
                   <div className="pb-1 pt-3">
                     <button
                       onClick={() => readyDocs.forEach((d) => !generatedIds.has(d.id) && handleGenerate(d.id))}
@@ -621,11 +712,17 @@ export default function AssistantPage() {
       </main>
 
       {/* ── Proceed to Logistics FAB ── */}
-      {allReadyGenerated && (
+      {canProceed && (
         <div className="pointer-events-none fixed bottom-6 right-6 z-50 flex flex-col items-end gap-2">
           <span className="absolute inset-0 -z-10 animate-ping rounded-2xl bg-primary opacity-20" />
           <button
-            onClick={() => navigate("/logistics")}
+            onClick={() => navigate("/logistics", {
+              state: {
+                carriedDocs: gatingDocs
+                  .filter((d) => generatedIds.has(d.id))
+                  .map((d) => ({ id: d.id, label: d.label, sublabel: d.sublabel, status: "ready" })),
+              },
+            })}
             className="pointer-events-auto flex items-center gap-3 rounded-2xl bg-gradient-primary px-5 py-3.5 text-sm font-semibold text-primary-foreground shadow-[0_8px_32px_rgba(0,0,0,0.25)] ring-1 ring-primary/40 transition-all hover:scale-[1.03] hover:shadow-[0_12px_40px_rgba(0,0,0,0.35)] active:scale-[0.98]"
           >
             <Ship className="h-4 w-4" />
@@ -633,7 +730,7 @@ export default function AssistantPage() {
             <ArrowRight className="h-4 w-4" />
           </button>
           <p className="pointer-events-auto text-center text-[10px] text-muted-foreground">
-            All export documents ready
+            CI · PL · B/L · K2 ready
           </p>
         </div>
       )}

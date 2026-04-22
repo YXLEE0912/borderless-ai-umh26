@@ -1,8 +1,9 @@
+import { useState } from "react";
 import TopNav from "@/components/TopNav";
 import { Link } from "react-router-dom";
 import {
-  ScanLine, Map, Calculator, ArrowRight, Sparkles, TrendingUp,
-  CheckCircle2, Clock, Globe, Truck, ShieldCheck
+  ScanLine, Map, Calculator, ArrowRight, Sparkles,
+  CheckCircle2, ChevronDown, User, MapPin, Phone, Mail
 } from "lucide-react";
 import { LiveTradeIntelligence } from "@/components/LiveTradeIntelligence";
 
@@ -78,6 +79,136 @@ const accentClasses = {
   },
 } as const;
 
+const shipmentsData = [
+  {
+    id: "Sambal Nyonya 200g",
+    dest: "🇸🇬 Singapore",
+    status: "Cleared",
+    color: "success" as const,
+    progress: 100,
+    consignee: {
+      name: "Wei Liang Tan",
+      company: "FreshMart SG Pte Ltd",
+      address: "12 Jurong Gateway Rd, Singapore 608928",
+      phone: "+65 9123 4567",
+      email: "weiliang@freshmart.sg",
+    },
+  },
+  {
+    id: "Rattan Side Table",
+    dest: "🇦🇺 Australia",
+    status: "In transit",
+    color: "warning" as const,
+    progress: 55,
+    consignee: {
+      name: "James Holden",
+      company: "Artisan Home AU",
+      address: "88 George St, Sydney NSW 2000, Australia",
+      phone: "+61 2 9988 7766",
+      email: "j.holden@artisanhome.com.au",
+    },
+  },
+  {
+    id: "Batik Silk Scarves",
+    dest: "🇯🇵 Japan",
+    status: "Pre-clearance",
+    color: "primary" as const,
+    progress: 30,
+    consignee: {
+      name: "Yuki Nakamura",
+      company: "Kyoto Fashion House",
+      address: "4-2 Shijo Dori, Kyoto 600-8001, Japan",
+      phone: "+81 75 221 0088",
+      email: "y.nakamura@kyotofashion.jp",
+    },
+  },
+];
+
+const RecentShipments = () => {
+  const [openId, setOpenId] = useState<string | null>(null);
+
+  return (
+    <div className="rounded-2xl border border-border bg-card p-6 shadow-xs">
+      <div className="flex items-center justify-between">
+        <h3 className="text-base font-semibold text-foreground">Recent shipments</h3>
+        <button className="text-xs font-medium text-primary hover:underline">View all</button>
+      </div>
+      <div className="mt-5 flex flex-col gap-2">
+        {shipmentsData.map((row) => {
+          const isOpen = openId === row.id;
+          return (
+            <div key={row.id} className="rounded-xl border border-border overflow-hidden">
+              {/* Clickable header */}
+              <button
+                onClick={() => setOpenId(isOpen ? null : row.id)}
+                className="w-full flex items-center justify-between px-4 py-3.5 hover:bg-muted/40 transition-colors"
+              >
+                <div className="text-left">
+                  <div className="text-sm font-medium text-foreground">{row.id}</div>
+                  <div className="text-xs text-muted-foreground">{row.dest} · ETA 4 days</div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${
+                    row.color === "success" ? "bg-success-soft text-success" :
+                    row.color === "warning" ? "bg-warning-soft text-warning" :
+                    "bg-primary-soft text-primary"
+                  }`}>
+                    {row.status}
+                  </span>
+                  <ChevronDown className={`h-4 w-4 text-muted-foreground transition-transform duration-200 ${isOpen ? "rotate-180" : ""}`} />
+                </div>
+              </button>
+
+              {/* Expandable content */}
+              {isOpen && (
+                <div className="px-4 pb-4 border-t border-border">
+                  <div className="mt-3 rounded-lg border border-border bg-muted/30 p-3">
+                    <div className="mb-2 flex items-center justify-between">
+                      <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                        Consignee (Buyer)
+                      </span>
+                      <span className="rounded-full border border-border px-2 py-0.5 text-[10px] text-muted-foreground">
+                        Verified Importer
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-xs text-muted-foreground">
+                      <div className="flex items-start gap-1.5">
+                        <User className="mt-0.5 h-3 w-3 shrink-0" />
+                        <div>
+                          <div className="font-medium text-foreground">{row.consignee.name}</div>
+                          <div>{row.consignee.company}</div>
+                        </div>
+                      </div>
+                      <div className="flex items-start gap-1.5">
+                        <MapPin className="mt-0.5 h-3 w-3 shrink-0" />
+                        <span>{row.consignee.address}</span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <Phone className="h-3 w-3 shrink-0" />
+                        <span>{row.consignee.phone}</span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <Mail className="h-3 w-3 shrink-0" />
+                        <span className="truncate">{row.consignee.email}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                    <div
+                      className="h-full rounded-full bg-primary transition-all"
+                      style={{ width: `${row.progress}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
 const Index = () => {
   return (
     <div className="min-h-screen">
@@ -121,7 +252,6 @@ const Index = () => {
                   className="group relative overflow-hidden rounded-2xl border border-border bg-gradient-card p-7 shadow-soft-sm ring-1 ring-transparent transition-smooth hover:-translate-y-1 hover:shadow-soft-xl animate-fade-in-up"
                   style={{ animationDelay: `${200 + i * 100}ms` }}
                 >
-                  {/* glow */}
                   <div className={`pointer-events-none absolute -right-20 -top-20 h-56 w-56 rounded-full bg-gradient-to-br ${a.glow} blur-2xl transition-smooth group-hover:scale-110`} />
 
                   <div className="relative flex items-start justify-between">
@@ -160,38 +290,11 @@ const Index = () => {
 
         {/* Recent activity */}
         <section className="mt-10 grid grid-cols-1 gap-5 lg:grid-cols-2">
-          <div className="rounded-2xl border border-border bg-card p-6 shadow-xs">
-            <div className="flex items-center justify-between">
-              <h3 className="text-base font-semibold text-foreground">Recent shipments</h3>
-              <button className="text-xs font-medium text-primary hover:underline">View all</button>
-            </div>
-            <div className="mt-5 divide-y divide-border">
-              {[
-                { product: "Sambal Nyonya 200g", dest: "🇸🇬 Singapore", status: "Cleared", color: "success" },
-                { product: "Rattan Side Table", dest: "🇦🇺 Australia", status: "In transit", color: "warning" },
-                { product: "Batik Silk Scarves", dest: "🇯🇵 Japan", status: "Pre-clearance", color: "primary" },
-              ].map((row) => (
-                <div key={row.product} className="flex items-center justify-between py-3.5">
-                  <div>
-                    <div className="text-sm font-medium text-foreground">{row.product}</div>
-                    <div className="text-xs text-muted-foreground">{row.dest} · ETA 4 days</div>
-                  </div>
-                  <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${row.color === "success" ? "bg-success-soft text-success" :
-                      row.color === "warning" ? "bg-warning-soft text-warning" :
-                        "bg-primary-soft text-primary"
-                    }`}>
-                    {row.status}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-
+          <RecentShipments />
           <div className="rounded-2xl border border-border bg-card shadow-xs overflow-hidden max-h-[320px]">
             <LiveTradeIntelligence />
           </div>
         </section>
-
       </main>
     </div>
   );

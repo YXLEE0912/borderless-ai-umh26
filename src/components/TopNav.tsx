@@ -239,7 +239,12 @@ const TopNav = () => {
                     notifications.map((n) => (
                       <button
                         key={n.id}
-                        onClick={() => clearNotification(n.id)}
+                        onClick={() => {
+                          setNotifications((prev) =>
+                            prev.map((x) => (x.id === n.id ? { ...x, read: true } : x)),
+                          );
+                          navigate("/notifications");
+                        }}
                         className={`w-full text-left flex gap-3 px-4 py-3 border-b border-border/60 hover:bg-secondary/60 transition-base ${
                           !n.read ? "bg-primary/[0.03]" : ""
                         }`}
@@ -281,7 +286,7 @@ const TopNav = () => {
                 </div>
                 <div className="border-t border-border p-2">
                   <button
-                    onClick={() => toast("Notification center coming soon")}
+                    onClick={() => navigate("/notifications")}
                     className="w-full rounded-md py-2 text-xs font-medium text-primary hover:bg-secondary transition-base"
                   >
                     View all notifications
@@ -321,16 +326,16 @@ const TopNav = () => {
                 </div>
                 <DropdownMenuSeparator />
                 <DropdownMenuGroup>
-                  <DropdownMenuItem onClick={() => toast("Profile page coming soon")}>
+                  <DropdownMenuItem onClick={() => navigate("/profile")}>
                     <User className="mr-2 h-4 w-4" />
                     <span>Profile</span>
                   </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => toast("Billing page coming soon")}>
+                  <DropdownMenuItem onClick={() => navigate("/billing")}>
                     <CreditCard className="mr-2 h-4 w-4" />
                     <span>Billing</span>
                     <span className="ml-auto text-[10px] font-medium text-success">Active</span>
                   </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => toast("Settings coming soon")}>
+                  <DropdownMenuItem onClick={() => navigate("/settings")}>
                     <Settings className="mr-2 h-4 w-4" />
                     <span>Settings</span>
                     <DropdownMenuShortcutInline>⌘,</DropdownMenuShortcutInline>
@@ -350,7 +355,7 @@ const TopNav = () => {
                   <span>Command palette</span>
                   <DropdownMenuShortcutInline>⌘K</DropdownMenuShortcutInline>
                 </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => toast("Opening support chat…")}>
+                <DropdownMenuItem onClick={() => navigate("/support")}>
                   <LifeBuoy className="mr-2 h-4 w-4" />
                   <span>Support</span>
                 </DropdownMenuItem>
@@ -432,15 +437,15 @@ const TopNav = () => {
           </CommandGroup>
           <CommandSeparator />
           <CommandGroup heading="Markets">
-            <CommandItem onSelect={() => runCommand(() => toast("Opening China market profile"))}>
+            <CommandItem onSelect={() => runCommand(() => navigate("/markets/china"))}>
               <Globe2 className="mr-2 h-4 w-4" />
               <span>China · ACFTA</span>
             </CommandItem>
-            <CommandItem onSelect={() => runCommand(() => toast("Opening Singapore market profile"))}>
+            <CommandItem onSelect={() => runCommand(() => navigate("/markets/singapore"))}>
               <Globe2 className="mr-2 h-4 w-4" />
               <span>Singapore · ATIGA</span>
             </CommandItem>
-            <CommandItem onSelect={() => runCommand(() => toast("Opening EU market profile"))}>
+            <CommandItem onSelect={() => runCommand(() => navigate("/markets/eu"))}>
               <Globe2 className="mr-2 h-4 w-4" />
               <span>European Union</span>
             </CommandItem>
@@ -466,7 +471,23 @@ const TopNav = () => {
               )}
               <span>Toggle {theme === "light" ? "dark" : "light"} mode</span>
             </CommandItem>
-            <CommandItem onSelect={() => runCommand(() => toast("Settings coming soon"))}>
+            <CommandItem onSelect={() => runCommand(() => navigate("/profile"))}>
+              <User className="mr-2 h-4 w-4" />
+              <span>Profile</span>
+            </CommandItem>
+            <CommandItem onSelect={() => runCommand(() => navigate("/billing"))}>
+              <CreditCard className="mr-2 h-4 w-4" />
+              <span>Billing</span>
+            </CommandItem>
+            <CommandItem onSelect={() => runCommand(() => navigate("/notifications"))}>
+              <Bell className="mr-2 h-4 w-4" />
+              <span>Notifications</span>
+            </CommandItem>
+            <CommandItem onSelect={() => runCommand(() => navigate("/support"))}>
+              <LifeBuoy className="mr-2 h-4 w-4" />
+              <span>Support</span>
+            </CommandItem>
+            <CommandItem onSelect={() => runCommand(() => navigate("/settings"))}>
               <Settings className="mr-2 h-4 w-4" />
               <span>Settings</span>
             </CommandItem>

@@ -20,7 +20,7 @@ type ModuleCard = {
 const modules: ModuleCard[] = [
   {
     id: "scan",
-    title: "Scan Product",
+    title: "Product Scanner",
     description: "Check if your product can be exported.",
     icon: ScanLine,
     cta: "Start Scan",
@@ -31,7 +31,7 @@ const modules: ModuleCard[] = [
   },
   {
     id: "plan",
-    title: "Plan Export",
+    title: "Compliance Architect",
     description: "Get step-by-step compliance guidance.",
     icon: Map,
     cta: "Start Planning",
@@ -42,7 +42,7 @@ const modules: ModuleCard[] = [
   },
   {
     id: "ship",
-    title: "Calculate & Ship",
+    title: "Logistics & Tax Executor",
     description: "Upload documents and get final cost.",
     icon: Calculator,
     cta: "Start Execution",
@@ -55,17 +55,17 @@ const modules: ModuleCard[] = [
 
 const accentClasses = {
   primary: {
-    iconBg: "bg-primary-soft text-primary",
+    iconBg: "bg-[hsl(221,83%,96%)] text-[hsl(221,83%,53%)]",
     glow: "from-primary/20 via-primary/5 to-transparent",
     button: "bg-primary text-primary-foreground hover:bg-primary/90 shadow-glow",
-    chip: "bg-primary/10 text-primary",
+    chip: "bg-[hsl(221,83%,96%)] text-[hsl(221,83%,53%)]",
     ring: "group-hover:ring-primary/20",
   },
   accent: {
-    iconBg: "bg-accent-soft text-accent",
+    iconBg: "bg-[hsl(152,76%,95%)] text-[hsl(160,84%,39%)]",
     glow: "from-accent/20 via-accent/5 to-transparent",
     button: "bg-accent text-accent-foreground hover:bg-accent/90 shadow-accent-glow",
-    chip: "bg-accent/10 text-accent",
+    chip: "bg-[hsl(152,76%,95%)] text-[hsl(160,84%,39%)]",
     ring: "group-hover:ring-accent/20",
   },
   violet: {
@@ -76,13 +76,6 @@ const accentClasses = {
     ring: "group-hover:ring-[hsl(258,90%,55%)]/20",
   },
 } as const;
-
-const stats = [
-  { label: "Active shipments", value: "12", trend: "+3", icon: Truck },
-  { label: "Markets opened", value: "27", trend: "+5", icon: Globe },
-  { label: "Compliance score", value: "98%", trend: "+2.1%", icon: ShieldCheck },
-  { label: "Avg. clearance time", value: "2.4d", trend: "−18%", icon: Clock },
-];
 
 const Index = () => {
   return (
@@ -105,35 +98,6 @@ const Index = () => {
               Turn global trade into a simple, guided process.
             </p>
           </div>
-          <div className="flex items-center gap-2 rounded-2xl border border-border bg-card px-4 py-3 shadow-soft-sm">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-success-soft">
-              <TrendingUp className="h-5 w-5 text-success" />
-            </div>
-            <div className="leading-tight">
-              <div className="text-[13px] text-muted-foreground">This quarter</div>
-              <div className="text-base font-semibold text-foreground">RM 184,520 saved <span className="text-success">↑ 24%</span></div>
-            </div>
-          </div>
-        </section>
-
-        {/* Stats strip */}
-        <section className="mb-10 grid grid-cols-2 gap-3 lg:grid-cols-4">
-          {stats.map((s, i) => (
-            <div
-              key={s.label}
-              className="rounded-2xl border border-border bg-gradient-card p-5 shadow-xs animate-fade-in-up"
-              style={{ animationDelay: `${i * 60}ms` }}
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-[12px] font-medium uppercase tracking-wider text-muted-foreground">{s.label}</span>
-                <s.icon className="h-4 w-4 text-muted-foreground" />
-              </div>
-              <div className="mt-3 flex items-baseline gap-2">
-                <span className="text-3xl font-semibold tracking-tight text-foreground">{s.value}</span>
-                <span className="text-[12px] font-medium text-success">{s.trend}</span>
-              </div>
-            </div>
-          ))}
         </section>
 
         {/* Module cards */}
@@ -143,9 +107,6 @@ const Index = () => {
               <h2 className="text-xl font-semibold text-foreground">Start a new workflow</h2>
               <p className="mt-1 text-sm text-muted-foreground">Three guided modules, one continuous export journey.</p>
             </div>
-            <button className="hidden items-center gap-1 text-sm font-medium text-primary hover:underline md:inline-flex">
-              View all modules <ArrowRight className="h-4 w-4" />
-            </button>
           </div>
 
           <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
@@ -166,9 +127,6 @@ const Index = () => {
                     <div className={`flex h-14 w-14 items-center justify-center rounded-2xl ${a.iconBg} ring-8 ring-transparent transition-base ${a.ring}`}>
                       <Icon className="h-7 w-7" strokeWidth={2} />
                     </div>
-                    <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold tracking-wide ${a.chip}`}>
-                      {m.step}
-                    </span>
                   </div>
 
                   <div className="relative mt-7">
@@ -217,11 +175,10 @@ const Index = () => {
                     <div className="text-sm font-medium text-foreground">{row.product}</div>
                     <div className="text-xs text-muted-foreground">{row.dest} · ETA 4 days</div>
                   </div>
-                  <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${
-                    row.color === "success" ? "bg-success-soft text-success" :
-                    row.color === "warning" ? "bg-warning-soft text-warning" :
-                    "bg-primary-soft text-primary"
-                  }`}>
+                  <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${row.color === "success" ? "bg-success-soft text-success" :
+                      row.color === "warning" ? "bg-warning-soft text-warning" :
+                        "bg-primary-soft text-primary"
+                    }`}>
                     {row.status}
                   </span>
                 </div>
@@ -229,17 +186,6 @@ const Index = () => {
             </div>
           </div>
 
-          <div className="relative overflow-hidden rounded-2xl border border-border bg-gradient-primary p-6 text-primary-foreground shadow-glow">
-            <div className="absolute -right-10 -top-10 h-40 w-40 rounded-full bg-white/10 blur-2xl" />
-            <Sparkles className="h-6 w-6 opacity-80" />
-            <h3 className="mt-4 text-lg font-semibold leading-tight">New: ASEAN tariff updates</h3>
-            <p className="mt-2 text-sm leading-relaxed text-primary-foreground/80">
-              ATIGA reductions detected for 4 of your active SKUs. Estimated savings: RM 12,400.
-            </p>
-            <button className="mt-5 inline-flex items-center gap-1.5 rounded-lg bg-white/15 px-3.5 py-2 text-sm font-medium backdrop-blur transition-base hover:bg-white/25">
-              Review impact <ArrowRight className="h-3.5 w-3.5" />
-            </button>
-          </div>
         </section>
       </main>
     </div>

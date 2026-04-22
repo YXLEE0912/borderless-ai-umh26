@@ -34,24 +34,92 @@ const STEPS: Step[] = [
 type ChecklistItem = { label: string; status: ChecklistStatus };
 
 type DocStatus = "ready" | "partial" | "locked";
+
+// ── Export doc definition ────────────────────────────────────────────────────
+// `coreRequired` = always needed regardless of product
+// `conditionalKey` = only required when the corresponding flag is true
 type ExportDoc = {
   id: string;
   label: string;
   sublabel: string;
   icon: React.ElementType;
   requiredSteps: number[];
-  gating?: boolean;
+  coreRequired?: boolean;
+  conditionalKey?: "needsSirim" | "needsHalal" | "needsCoo";
 };
 
 const EXPORT_DOCS: ExportDoc[] = [
-  { id: "commercial-invoice", label: "Commercial Invoice", sublabel: "Buyer & seller details, FOB value, FX", icon: FileText, requiredSteps: [0, 1, 2, 5], gating: true },
-  { id: "packing-list", label: "Packing List", sublabel: "Item weights, dimensions & quantities", icon: FileSpreadsheet, requiredSteps: [0, 1, 2, 6], gating: true },
-  { id: "bol", label: "Bill of Lading / Air Waybill", sublabel: "Carrier, vessel & routing information", icon: Ship, requiredSteps: [0, 1, 2, 6, 7], gating: true },
-  { id: "k2", label: "K2 Declaration Form", sublabel: "Customs export declaration (signed)", icon: ClipboardList, requiredSteps: [0, 1, 2, 3, 4, 5, 6, 7], gating: true },
-  { id: "coo", label: "Certificate of Origin", sublabel: "ATIGA / FTA Form D", icon: Stamp, requiredSteps: [0, 1, 2, 3] },
-  { id: "sirim", label: "SIRIM Certificate", sublabel: "Standards & quality compliance", icon: ShieldCheck, requiredSteps: [0, 2, 3] },
-  { id: "halal", label: "Halal Certificate", sublabel: "JAKIM-recognised certification", icon: Leaf, requiredSteps: [0, 2, 3, 4] },
+  {
+    id: "commercial-invoice",
+    label: "Commercial Invoice",
+    sublabel: "Buyer & seller details, FOB value, FX",
+    icon: FileText,
+    requiredSteps: [0, 1, 2, 5],
+    coreRequired: true,
+  },
+  {
+    id: "packing-list",
+    label: "Packing List",
+    sublabel: "Item weights, dimensions & quantities",
+    icon: FileSpreadsheet,
+    requiredSteps: [0, 1, 2, 6],
+    coreRequired: true,
+  },
+  {
+    id: "bol",
+    label: "Bill of Lading / Air Waybill",
+    sublabel: "Carrier, vessel & routing information",
+    icon: Ship,
+    requiredSteps: [0, 1, 2, 6, 7],
+    coreRequired: true,
+  },
+  {
+    id: "k2",
+    label: "K2 Declaration Form",
+    sublabel: "Customs export declaration (signed)",
+    icon: ClipboardList,
+    requiredSteps: [0, 1, 2, 3, 4, 5, 6, 7],
+    coreRequired: true,
+  },
+  {
+    id: "coo",
+    label: "Certificate of Origin",
+    sublabel: "ATIGA / FTA Form D",
+    icon: Stamp,
+    requiredSteps: [0, 1, 2, 3],
+    conditionalKey: "needsCoo",
+  },
+  {
+    id: "sirim",
+    label: "SIRIM Certificate",
+    sublabel: "Standards & quality compliance",
+    icon: ShieldCheck,
+    requiredSteps: [0, 2, 3],
+    conditionalKey: "needsSirim",
+  },
+  {
+    id: "halal",
+    label: "Halal Certificate",
+    sublabel: "JAKIM-recognised certification",
+    icon: Leaf,
+    requiredSteps: [0, 2, 3, 4],
+    conditionalKey: "needsHalal",
+  },
 ];
+
+// ── Permit flags determined after Step 3 ────────────────────────────────────
+type PermitFlags = {
+  needsSirim: boolean;
+  needsHalal: boolean;
+  needsCoo: boolean;
+};
+
+// ── Derive whether a doc is "gating" given current permit flags ──────────────
+const isGating = (doc: ExportDoc, flags: PermitFlags): boolean => {
+  if (doc.coreRequired) return true;
+  if (doc.conditionalKey && flags[doc.conditionalKey]) return true;
+  return false;
+};
 
 const docStatus = (doc: ExportDoc, completed: Set<number>): DocStatus => {
   const missing = doc.requiredSteps.filter((s) => !completed.has(s)).length;
@@ -141,7 +209,7 @@ const STEP_FLOW: Record<number, { intro: Message; onComplete: Message }> = {
     },
     onComplete: {
       id: "c3", role: "assistant", kind: "text",
-      content: "✅ SIRIM cert validated. JAKIM Halal logo permitted. Proceeding to digital access setup.",
+      content: "✅ SIRIM cert validated. JAKIM Halal logo permitted. COO (Form D) required for ATIGA duty exemption. Proceeding to digital access setup.",
     },
   },
   4: {
@@ -239,10 +307,27 @@ const STEP_FLOW: Record<number, { intro: Message; onComplete: Message }> = {
   },
 };
 
+// ── Simulated permit detection after Step 3 ──────────────────────────────────
+// In a real app this would come from the HS Code lookup result.
+// Here we hard-code the tea example: needs SIRIM + Halal + COO (ATIGA).
+const DETECTED_PERMIT_FLAGS: PermitFlags = {
+  needsSirim: true,
+  needsHalal: true,
+  needsCoo: true,
+};
+
 export default function AssistantPage() {
   const navigate = useNavigate();
   const [completed, setCompleted] = useState<Set<number>>(new Set());
   const [activeStep, setActiveStep] = useState(0);
+
+  // Permit flags become active once Step 3 is completed
+  const [permitFlags, setPermitFlags] = useState<PermitFlags>({
+    needsSirim: false,
+    needsHalal: false,
+    needsCoo: false,
+  });
+
   const [messages, setMessages] = useState<Message[]>([
     {
       id: "welcome", role: "assistant", kind: "text",
@@ -268,8 +353,13 @@ export default function AssistantPage() {
   const partialDocs = docsWithStatus.filter((d) => d.status === "partial");
   const lockedDocs = docsWithStatus.filter((d) => d.status === "locked");
 
-  const gatingDocs = EXPORT_DOCS.filter((d) => d.gating);
-  const canProceed = gatingDocs.every((d) => generatedIds.has(d.id));
+  // ── Gating: core 4 + any conditional doc triggered by permit flags ──────────
+  const gatingDocs = EXPORT_DOCS.filter((d) => isGating(d, permitFlags));
+
+  // canProceed = every gating doc has been generated
+  const canProceed = gatingDocs.length > 0 && gatingDocs.every((d) => generatedIds.has(d.id));
+
+  // How many gating docs are done (for progress display)
   const gatingGenerated = gatingDocs.filter((d) => generatedIds.has(d.id)).length;
 
   const handleGenerate = (id: string) => {
@@ -298,7 +388,15 @@ export default function AssistantPage() {
         }
         return next;
       });
-      setCompleted((c) => new Set([...c, activeStep]));
+
+      const newCompleted = new Set([...completed, activeStep]);
+      setCompleted(newCompleted);
+
+      // ── After Step 3 completes, activate permit flags ──────────────────────
+      if (activeStep === 3) {
+        setPermitFlags(DETECTED_PERMIT_FLAGS);
+      }
+
       setActiveStep((s) => Math.min(s + 1, total - 1));
       setSending(false);
     }, 1400);
@@ -340,7 +438,7 @@ export default function AssistantPage() {
           <aside className="lg:sticky lg:top-20 lg:self-start">
             <div className="rounded-2xl border border-border bg-gradient-card p-4 shadow-soft-md">
               <div className="mb-3 flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-foreground">Trade Dependency Graph</h2>
+                <h2 className="text-sm font-semibold text-foreground">Export Checklist</h2>
                 <span className="rounded-full bg-primary-soft px-2 py-0.5 text-[10px] font-semibold text-primary">
                   {completed.size}/{total}
                 </span>
@@ -368,20 +466,18 @@ export default function AssistantPage() {
                       )}
                       <button
                         onClick={() => tryJumpTo(step.id)}
-                        className={`relative flex w-full items-start gap-3 rounded-xl p-2 text-left transition-base ${
-                          isActive ? "bg-primary-soft ring-1 ring-primary/30" :
-                          isCompleted ? "hover:bg-secondary/60" :
-                          "opacity-60 hover:opacity-80"
-                        }`}
+                        className={`relative flex w-full items-start gap-3 rounded-xl p-2 text-left transition-base ${isActive ? "bg-primary-soft ring-1 ring-primary/30" :
+                            isCompleted ? "hover:bg-secondary/60" :
+                              "opacity-60 hover:opacity-80"
+                          }`}
                       >
-                        <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${
-                          isCompleted ? "bg-success text-primary-foreground" :
-                          isActive ? "bg-primary text-primary-foreground shadow-glow" :
-                          "bg-secondary text-muted-foreground"
-                        }`}>
+                        <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${isCompleted ? "bg-success text-primary-foreground" :
+                            isActive ? "bg-primary text-primary-foreground shadow-glow" :
+                              "bg-secondary text-muted-foreground"
+                          }`}>
                           {isCompleted ? <CheckCircle2 className="h-4 w-4" /> :
                             isLocked ? <Lock className="h-3.5 w-3.5" /> :
-                            <Icon className="h-4 w-4" />}
+                              <Icon className="h-4 w-4" />}
                         </div>
                         <div className="min-w-0 flex-1 pt-0.5">
                           <div className="flex items-center gap-2">
@@ -426,6 +522,8 @@ export default function AssistantPage() {
                     const isGenerating = generatingId === doc.id;
                     const missing = doc.requiredSteps.filter((s) => !completed.has(s));
                     const blockingStep = missing.length > 0 ? STEPS[missing[0]] : null;
+                    // Show whether this doc is currently gating
+                    const gating = isGating(doc, permitFlags);
                     return (
                       <li key={doc.id} className="flex items-center gap-2 text-[11px]">
                         {isDone ? (
@@ -440,10 +538,11 @@ export default function AssistantPage() {
                         <span className={`flex-1 truncate ${isDone ? "text-muted-foreground line-through" : "text-foreground"}`}>
                           {doc.label}
                         </span>
-                        {doc.gating && (
+                        {/* Only show Req badge if this doc is currently gating */}
+                        {gating && (
                           <span className="shrink-0 rounded-sm bg-primary/10 px-1 py-px text-[8px] font-bold uppercase text-primary">Req</span>
                         )}
-                        {!isDone && !isGenerating && blockingStep && !doc.gating && (
+                        {!isDone && !isGenerating && blockingStep && !gating && (
                           <span className="shrink-0 rounded bg-secondary px-1.5 py-px text-[9px] font-semibold text-muted-foreground" title={`Needs: ${blockingStep.title}`}>
                             S{blockingStep.id + 1}
                           </span>
@@ -452,6 +551,24 @@ export default function AssistantPage() {
                     );
                   })}
                 </ul>
+
+                {/* Gating progress summary */}
+                {gatingDocs.length > 0 && (
+                  <div className="mt-3 rounded-lg bg-secondary/60 px-2.5 py-2">
+                    <div className="mb-1 flex items-center justify-between text-[10px]">
+                      <span className="font-semibold text-muted-foreground">Required docs</span>
+                      <span className={`font-bold ${canProceed ? "text-success" : "text-primary"}`}>
+                        {gatingGenerated}/{gatingDocs.length}
+                      </span>
+                    </div>
+                    <div className="h-1 overflow-hidden rounded-full bg-secondary">
+                      <div
+                        className={`h-full rounded-full transition-base ${canProceed ? "bg-success" : "bg-gradient-primary"}`}
+                        style={{ width: `${Math.round((gatingGenerated / gatingDocs.length) * 100)}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           </aside>
@@ -585,6 +702,7 @@ export default function AssistantPage() {
                       const Icon = doc.icon;
                       const isGenerating = generatingId === doc.id;
                       const isGenerated = generatedIds.has(doc.id);
+                      const gating = isGating(doc, permitFlags);
                       return (
                         <div key={doc.id} className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2.5 transition-base hover:border-primary/30 hover:bg-primary-soft/30">
                           <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-success-soft">
@@ -593,7 +711,7 @@ export default function AssistantPage() {
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-1">
                               <div className="truncate text-[11px] font-semibold text-foreground">{doc.label}</div>
-                              {doc.gating && (
+                              {gating && (
                                 <span className="shrink-0 rounded-sm bg-primary/10 px-1 py-px text-[8px] font-bold uppercase text-primary">Req</span>
                               )}
                             </div>
@@ -602,13 +720,12 @@ export default function AssistantPage() {
                           <button
                             onClick={() => handleGenerate(doc.id)}
                             disabled={isGenerated || isGenerating}
-                            className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-lg transition-base ${
-                              isGenerated
+                            className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-lg transition-base ${isGenerated
                                 ? "bg-success text-primary-foreground"
                                 : isGenerating
-                                ? "bg-primary/20 text-primary"
-                                : "bg-primary text-primary-foreground shadow-glow hover:opacity-90"
-                            }`}
+                                  ? "bg-primary/20 text-primary"
+                                  : "bg-primary text-primary-foreground shadow-glow hover:opacity-90"
+                              }`}
                           >
                             {isGenerated ? (
                               <CheckCircle2 className="h-3 w-3" />
@@ -631,6 +748,7 @@ export default function AssistantPage() {
                     </div>
                     {partialDocs.map((doc) => {
                       const Icon = doc.icon;
+                      const gating = isGating(doc, permitFlags);
                       const missing = doc.requiredSteps
                         .filter((sid) => !completed.has(sid))
                         .map((sid) => STEPS.find((s) => s.id === sid)?.title)
@@ -643,7 +761,7 @@ export default function AssistantPage() {
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-1">
                               <div className="truncate text-[11px] font-semibold text-foreground">{doc.label}</div>
-                              {doc.gating && (
+                              {gating && (
                                 <span className="shrink-0 rounded-sm bg-primary/10 px-1 py-px text-[8px] font-bold uppercase text-primary">Req</span>
                               )}
                             </div>
@@ -665,6 +783,7 @@ export default function AssistantPage() {
                     </div>
                     {lockedDocs.map((doc) => {
                       const Icon = doc.icon;
+                      const gating = isGating(doc, permitFlags);
                       const missingCount = doc.requiredSteps.filter((sid) => !completed.has(sid)).length;
                       return (
                         <div key={doc.id} className="flex items-center gap-2 rounded-xl border border-border bg-card/50 px-3 py-2.5 opacity-50">
@@ -674,7 +793,7 @@ export default function AssistantPage() {
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-1">
                               <div className="truncate text-[11px] font-semibold text-muted-foreground">{doc.label}</div>
-                              {doc.gating && (
+                              {gating && (
                                 <span className="shrink-0 rounded-sm bg-muted px-1 py-px text-[8px] font-bold uppercase text-muted-foreground">Req</span>
                               )}
                             </div>
@@ -718,9 +837,15 @@ export default function AssistantPage() {
           <button
             onClick={() => navigate("/logistics", {
               state: {
-                carriedDocs: gatingDocs
+                // ✅ Carry ALL generated docs, not just gating ones
+                carriedDocs: EXPORT_DOCS
                   .filter((d) => generatedIds.has(d.id))
-                  .map((d) => ({ id: d.id, label: d.label, sublabel: d.sublabel, status: "ready" })),
+                  .map((d) => ({
+                    id: d.id,
+                    label: d.label,
+                    sublabel: d.sublabel,
+                    status: "ready",
+                  })),
               },
             })}
             className="pointer-events-auto flex items-center gap-3 rounded-2xl bg-gradient-primary px-5 py-3.5 text-sm font-semibold text-primary-foreground shadow-[0_8px_32px_rgba(0,0,0,0.25)] ring-1 ring-primary/40 transition-all hover:scale-[1.03] hover:shadow-[0_12px_40px_rgba(0,0,0,0.35)] active:scale-[0.98]"
@@ -730,7 +855,7 @@ export default function AssistantPage() {
             <ArrowRight className="h-4 w-4" />
           </button>
           <p className="pointer-events-auto text-center text-[10px] text-muted-foreground">
-            CI · PL · B/L · K2 ready
+            {gatingGenerated}/{gatingDocs.length} required docs ready
           </p>
         </div>
       )}
@@ -827,11 +952,10 @@ function MessageBubble({ msg, onAction }: { msg: Message; onAction: (action: str
                   <button
                     key={i}
                     onClick={() => onAction(a.action, a.label)}
-                    className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition-base ${
-                      a.intent === "primary"
+                    className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition-base ${a.intent === "primary"
                         ? "bg-primary text-primary-foreground shadow-glow hover:opacity-90"
                         : "border border-border bg-card text-foreground hover:bg-secondary"
-                    }`}
+                      }`}
                   >
                     <Icon className="h-4 w-4" />
                     {a.label}

@@ -7,6 +7,12 @@ import Index from "./pages/Index.tsx";
 import Assistant from "./pages/Assistant.tsx";
 import Logistics from "./pages/Logistics.tsx";
 import Scan from "./pages/Scan.tsx";
+import Profile from "./pages/Profile.tsx";
+import Billing from "./pages/Billing.tsx";
+import Settings from "./pages/Settings.tsx";
+import Notifications from "./pages/Notifications.tsx";
+import Support from "./pages/Support.tsx";
+import Market from "./pages/Market.tsx";
 import NotFound from "./pages/NotFound.tsx";
 
 const queryClient = new QueryClient();
@@ -22,6 +28,12 @@ const App = () => (
           <Route path="/scan" element={<Scan />} />
           <Route path="/assistant" element={<Assistant />} />
           <Route path="/logistics" element={<Logistics />} />
+          <Route path="/profile" element={<Profile />} />
+          <Route path="/billing" element={<Billing />} />
+          <Route path="/settings" element={<Settings />} />
+          <Route path="/notifications" element={<Notifications />} />
+          <Route path="/support" element={<Support />} />
+          <Route path="/markets/:slug" element={<Market />} />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />
         </Routes>

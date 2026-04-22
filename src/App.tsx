@@ -14,11 +14,13 @@ import Notifications from "./pages/Notifications.tsx";
 import Support from "./pages/Support.tsx";
 import Market from "./pages/Market.tsx";
 import NotFound from "./pages/NotFound.tsx";
+import { ThemeProvider } from "@/hooks/use-theme";
 
 const queryClient = new QueryClient();
 
 const App = () => (
   <QueryClientProvider client={queryClient}>
+    <ThemeProvider>
     <TooltipProvider>
       <Toaster />
       <Sonner />
@@ -39,6 +41,7 @@ const App = () => (
         </Routes>
       </BrowserRouter>
     </TooltipProvider>
+    </ThemeProvider>
   </QueryClientProvider>
 );
 

@@ -15,6 +15,8 @@ From the `frontend` directory, install dependencies:
 npm install
 ```
 
+If you want the UI to call the local backend, set `VITE_API_BASE_URL=http://127.0.0.1:8000/api/v1` in your frontend environment.
+
 ## Run locally
 
 Start the development server:

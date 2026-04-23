@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,9 +10,11 @@ class Settings(BaseSettings):
     app_name: str = "Borderless AI API"
     api_prefix: str = "/api/v1"
 
-    z_ai_api_key: str | None = None
+    z_ai_api_key: str | None = Field(default=None, validation_alias=AliasChoices("Z_AI_API_KEY", "A_AI_API_KEY", "AI_API_KEY"))
     z_ai_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
     z_ai_model: str = "glm-4.5v"
+
+    umh_3_api_key: str | None = None
 
 
     supabase_url: str | None = None

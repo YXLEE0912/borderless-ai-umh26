@@ -1,23 +1,17 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.agent_runtime import configure_runtime_state
 from app.api.router import api_router
 from app.core.config import get_settings
-from app.core.supabase import build_supabase_client
-from app.services.scanner import ProductScanner
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    supabase_client = build_supabase_client(settings)
-    scanner = ProductScanner(settings=settings, supabase_client=supabase_client)
-
-    app.state.settings = settings
-    app.state.supabase_client = supabase_client
-    app.state.scanner = scanner
+    configure_runtime_state(app, settings)
 
     yield
 
@@ -25,6 +19,8 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title=settings.app_name, lifespan=lifespan)
+
+    configure_runtime_state(app, settings)
 
     app.add_middleware(
         CORSMiddleware,
@@ -35,6 +31,19 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(api_router, prefix=settings.api_prefix)
+
+    @app.get("/")
+    async def root() -> dict[str, str]:
+        return {
+            "name": settings.app_name,
+            "status": "running",
+            "health": f"{settings.api_prefix}/health",
+        }
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon() -> Response:
+        return Response(status_code=204)
+
     return app
 
 

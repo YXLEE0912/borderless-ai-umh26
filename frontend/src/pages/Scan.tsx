@@ -7,6 +7,7 @@ import {
   PackageSearch, Globe2, FileText, Tag, Lightbulb, Send,
   ChevronRight, Info
 } from "lucide-react";
+import { scanProduct, type BackendScanResult } from "@/lib/api";
 
 type MessageRole = "user" | "assistant";
 
@@ -160,6 +161,28 @@ const parseAIResponse = (text: string): ScanResult => {
   }
 };
 
+const mapBackendResult = (result: BackendScanResult): ScanResult => {
+  const status: ScanResult["status"] =
+    result.status === "green" ? "green" :
+    result.status === "restricted" ? "red" :
+    result.status === "conditional" ? "yellow" : "yellow";
+
+  return {
+    product: result.product_name || "Unknown Product",
+    hsCode: result.hs_code_candidates[0] || "0000.00",
+    confidence:
+      result.hs_code_confidence >= 0.8 ? "High" :
+      result.hs_code_confidence >= 0.5 ? "Medium" : "Low",
+    status,
+    insights: [
+      { tone: status === "green" ? "ok" : status === "yellow" ? "warn" : "bad", text: result.compliance_summary || "Backend scan completed." },
+      ...result.required_documents.slice(0, 2).map((doc) => ({ tone: "warn" as const, text: `Required document: ${doc}` })),
+      ...result.follow_up_questions.slice(0, 2).map((question) => ({ tone: "warn" as const, text: question })),
+    ],
+    rawText: result.decision_steps.map((step) => `${step.phase}: ${step.decision}`).join(" · ") || result.hs_code_reasoning || "",
+  };
+};
+
 const genId = () => Math.random().toString(36).slice(2);
 
 const WELCOME_MESSAGE: Message = {
@@ -228,32 +251,13 @@ export default function Scan() {
     setScanning(true);
 
     try {
-      const content: object[] = [];
-      if (file) {
-        const base64 = await toBase64(file);
-        const mediaType = file.type as "image/jpeg" | "image/png" | "image/gif" | "image/webp";
-        content.push({ type: "image", source: { type: "base64", media_type: mediaType, data: base64 } });
-      }
-      content.push({ type: "text", text: activeQuery || "Can this product be exported? Please analyse." });
-
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "anthropic-dangerous-direct-browser-access": "true",
-          "x-api-key": import.meta.env.VITE_ANTHROPIC_API_KEY,
-        },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 1000,
-          system: SYSTEM_PROMPT,
-          messages: [{ role: "user", content }],
-        }),
+      const response = await scanProduct({
+        product_prompt: activeQuery || undefined,
+        destination_country: "China",
+        product_image: file,
       });
 
-      const data = await response.json();
-      const text = data.content?.map((b: { type: string; text?: string }) => b.text || "").join("") || "";
-      const parsed = parseAIResponse(text);
+      const parsed = mapBackendResult(response.result);
       setLastResult(parsed);
 
       if (parsed.invalid) {
@@ -302,7 +306,7 @@ export default function Scan() {
 
   const continueToPlan = (result: ScanResult) => {
     navigate("/assistant", {
-      state: { from: "scan", product: result.product, hsCode: result.hsCode, confidence: result.confidence },
+      state: { from: "scan", product: result.product, hsCode: result.hsCode, confidence: result.confidence, destinationCountry: "China" },
     });
   };
 

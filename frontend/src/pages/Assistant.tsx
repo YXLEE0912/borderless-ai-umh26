@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import TopNav from "@/components/TopNav";
 import {
   Building2, FileCheck2, Award, FileSearch,
@@ -318,6 +318,8 @@ const DETECTED_PERMIT_FLAGS: PermitFlags = {
 
 export default function AssistantPage() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const scanContext = (location.state ?? {}) as { product?: string; hsCode?: string; confidence?: string; destinationCountry?: string };
   const [completed, setCompleted] = useState<Set<number>>(new Set());
   const [activeStep, setActiveStep] = useState(0);
 
@@ -419,6 +421,13 @@ export default function AssistantPage() {
     setMessages((m) => [...m, { id: genId(), role: "user", kind: "text", content: label }]);
     advance();
   };
+
+  const carriedDocs = EXPORT_DOCS.filter((doc) => generatedIds.has(doc.id)).map((doc) => ({
+    id: doc.id,
+    label: doc.label,
+    sublabel: doc.sublabel,
+    status: "ready",
+  }));
 
   const handleSend = () => {
     if (!input.trim() || sending) return;
@@ -835,23 +844,19 @@ export default function AssistantPage() {
         <div className="pointer-events-none fixed bottom-6 right-6 z-50 flex flex-col items-end gap-2">
           <span className="absolute inset-0 -z-10 animate-ping rounded-2xl bg-primary opacity-20" />
           <button
-            onClick={() => navigate("/logistics", {
+            onClick={() => navigate("/documents", {
               state: {
-                // ✅ Carry ALL generated docs, not just gating ones
-                carriedDocs: EXPORT_DOCS
-                  .filter((d) => generatedIds.has(d.id))
-                  .map((d) => ({
-                    id: d.id,
-                    label: d.label,
-                    sublabel: d.sublabel,
-                    status: "ready",
-                  })),
+                product: scanContext.product,
+                hsCode: scanContext.hsCode,
+                confidence: scanContext.confidence,
+                destinationCountry: scanContext.destinationCountry || "China",
+                carriedDocs,
               },
             })}
             className="pointer-events-auto flex items-center gap-3 rounded-2xl bg-gradient-primary px-5 py-3.5 text-sm font-semibold text-primary-foreground shadow-[0_8px_32px_rgba(0,0,0,0.25)] ring-1 ring-primary/40 transition-all hover:scale-[1.03] hover:shadow-[0_12px_40px_rgba(0,0,0,0.35)] active:scale-[0.98]"
           >
             <Ship className="h-4 w-4" />
-            Proceed to Logistics
+            Proceed to Documents
             <ArrowRight className="h-4 w-4" />
           </button>
           <p className="pointer-events-auto text-center text-[10px] text-muted-foreground">

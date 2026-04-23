@@ -1,0 +1,40 @@
+from functools import lru_cache
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    app_name: str = "Borderless AI API"
+    api_prefix: str = "/api/v1"
+
+    z_ai_api_key: str | None = None
+    z_ai_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
+    z_ai_model: str = "glm-4.5v"
+
+    speech_to_text_api_key: str | None = None
+    speech_to_text_base_url: str | None = None
+    speech_to_text_model: str = "whisper-1"
+
+    supabase_url: str | None = None
+    supabase_service_role_key: str | None = None
+    supabase_storage_bucket: str = "scan-assets"
+    supabase_scans_table: str = "scans"
+    supabase_rulesets_table: str = "regulatory_rulesets"
+    supabase_rules_table: str = "regulatory_rules"
+    supabase_destination_policies_table: str = "destination_policies"
+    supabase_document_profiles_table: str = "document_profiles"
+    supabase_rule_execution_log_table: str = "rule_execution_log"
+
+    rules_cache_ttl_seconds: int = 60
+
+    cors_origins: list[str] = Field(
+        default_factory=lambda: ["http://localhost:3000", "http://127.0.0.1:3000"]
+    )
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

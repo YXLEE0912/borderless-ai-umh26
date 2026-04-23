@@ -30,7 +30,6 @@ $env:GLM_API_KEY="your_real_key_here"
 - `glm_core.py`: GLM model interface (text + JSON mode)
 - `glm_workflow.py`: Stateful workflow engine coordinated by GLM
 - `config.py`: Config (GLM keys from env vars)
-- `example_glm_workflow.py`: Demo with mocked GLM (no API needed for testing)
 
 ## How GLM is the winning core
 
@@ -40,7 +39,7 @@ $env:GLM_API_KEY="your_real_key_here"
 ✅ **Structured outputs** — Returns `WorkflowOutput` JSON: `state`, `actions`, `checklist`  
 ✅ **Stateful/adaptive** — Persists facts, missing fields, ambiguities, failures, history  
 ✅ **Failure handling** — GLM proposes recovery paths and minimal-info prompts  
-✅ **Proof of dependency** — Remove GLM → coordination fails (see `example_glm_workflow.py`)
+✅ **Proof of dependency** — Remove GLM -> coordination fails because reasoning/orchestration cannot proceed
 
 ## Config
 

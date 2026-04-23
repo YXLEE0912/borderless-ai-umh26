@@ -19,6 +19,28 @@ print(result.message)
 print(result.state)
 ```
 
+## Frontend connection (Assistant page)
+
+The frontend can call the Python workflow backend when enabled.
+
+1. Start backend API:
+
+```powershell
+cd backend
+pip install -r requirements.txt
+uvicorn main:app --reload --port 8000
+```
+
+2. In root `.env`, set:
+
+```bash
+VITE_USE_AGENT2_BACKEND=true
+VITE_AGENT2_API_BASE_URL=http://127.0.0.1:8000
+VITE_AGENT2_POLICY_TOPIC=K2 Forms
+```
+
+3. Run frontend (`npm run dev` or your usual command). Assistant messages will call `/api/agent2/process`.
+
 Set your GLM API key:
 
 ```powershell

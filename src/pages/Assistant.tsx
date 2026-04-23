@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import TopNav from "@/components/TopNav";
+import { processAgent2Input } from "@/lib/agent2Client";
 import {
   Building2, FileCheck2, Award, FileSearch,
   ShieldCheck, Sparkles, Mic, ArrowUp, Loader2, Paperclip,
@@ -317,6 +318,9 @@ const DETECTED_PERMIT_FLAGS: PermitFlags = {
 };
 
 export default function AssistantPage() {
+  const useAgent2Backend = import.meta.env.VITE_USE_AGENT2_BACKEND === "true";
+  const policyTopic = import.meta.env.VITE_AGENT2_POLICY_TOPIC || "K2 Forms";
+
   const navigate = useNavigate();
   const [completed, setCompleted] = useState<Set<number>>(new Set());
   const [activeStep, setActiveStep] = useState(0);
@@ -420,11 +424,56 @@ export default function AssistantPage() {
     advance();
   };
 
-  const handleSend = () => {
+  const handleSend = async () => {
     if (!input.trim() || sending) return;
-    setMessages((m) => [...m, { id: genId(), role: "user", kind: "text", content: input.trim() }]);
+    const raw = input.trim();
+    setMessages((m) => [...m, { id: genId(), role: "user", kind: "text", content: raw }]);
     setInput("");
-    advance();
+
+    if (!useAgent2Backend) {
+      advance();
+      return;
+    }
+
+    setSending(true);
+    try {
+      const response = await processAgent2Input(raw, policyTopic);
+      const summaryParts: string[] = [response.message || "Agent2 processed your request."];
+
+      const firstQuestion = response.actions?.find((a) => a.type === "ask_user" && a.question)?.question;
+      if (firstQuestion) {
+        summaryParts.push(`Next: ${firstQuestion}`);
+      }
+
+      const firstTask = response.checklist?.find((c) => c.task)?.task;
+      if (firstTask) {
+        summaryParts.push(`Checklist: ${firstTask}`);
+      }
+
+      setMessages((m) => [
+        ...m,
+        {
+          id: genId(),
+          role: "assistant",
+          kind: "text",
+          content: summaryParts.join("\n"),
+        },
+      ]);
+    } catch {
+      setMessages((m) => [
+        ...m,
+        {
+          id: genId(),
+          role: "assistant",
+          kind: "text",
+          content: "Agent2 backend not reachable. Falling back to local assistant flow.",
+        },
+      ]);
+      advance();
+      return;
+    } finally {
+      setSending(false);
+    }
   };
 
   return (

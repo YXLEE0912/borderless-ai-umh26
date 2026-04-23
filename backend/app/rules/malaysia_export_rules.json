@@ -85,6 +85,39 @@
         "message": "Wildlife-related products require strict permit controls."
       }
     ],
+    "hs_code_policies": [
+      {
+        "rule_id": "MY-HS-4203",
+        "prefix": "4203",
+        "status": "conditional",
+        "min_confidence": 0.5,
+        "permits": ["MAQIS permit", "Inspection clearance"],
+        "agencies": ["MAQIS", "Royal Malaysian Customs Department"],
+        "message": "HS 4203 (articles of apparel/accessories of leather) often requires animal-product controls and document checks."
+      },
+      {
+        "rule_id": "MY-HS-4407",
+        "prefix": "4407",
+        "status": "conditional",
+        "min_confidence": 0.5,
+        "permits": ["Phytosanitary certificate", "Inspection clearance"],
+        "agencies": ["MAQIS", "Department of Agriculture"],
+        "message": "HS 4407 (wood sawn/chipped lengthwise) may require phytosanitary controls before export."
+      },
+      {
+        "rule_id": "MY-HS-9301",
+        "prefix": "9301",
+        "status": "restricted",
+        "min_confidence": 0.4,
+        "permits": [],
+        "agencies": ["Royal Malaysian Customs Department"],
+        "message": "HS 9301 indicates arms-related goods and should be blocked pending strict authority review."
+      }
+    ],
+    "hs_confidence_policy": {
+      "min_confidence": 0.65,
+      "strict_hs_mode": true
+    },
     "default_required_documents": [
       "Commercial invoice",
       "Packing list",

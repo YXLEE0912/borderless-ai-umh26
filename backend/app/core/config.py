@@ -14,9 +14,6 @@ class Settings(BaseSettings):
     z_ai_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
     z_ai_model: str = "glm-4.5v"
 
-    speech_to_text_api_key: str | None = None
-    speech_to_text_base_url: str | None = None
-    speech_to_text_model: str = "whisper-1"
 
     supabase_url: str | None = None
     supabase_service_role_key: str | None = None
@@ -27,6 +24,7 @@ class Settings(BaseSettings):
     supabase_destination_policies_table: str = "destination_policies"
     supabase_document_profiles_table: str = "document_profiles"
     supabase_rule_execution_log_table: str = "rule_execution_log"
+    supabase_scan_chat_messages_table: str = "scan_chat_messages"
 
     rules_cache_ttl_seconds: int = 60
 

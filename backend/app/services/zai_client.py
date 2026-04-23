@@ -52,12 +52,28 @@ class ZAIClient:
                 {
                     "role": "system",
                     "content": (
-                        "You are a Malaysia export scanner for SMEs. Return JSON only with keys: "
-                        "product_name, materials_detected, hs_code_candidates, hs_code_confidence, status, "
-                        "compliance_summary, ssm_check, required_documents, required_permits, required_agencies, "
-                        "logistics_extractions, logistics_sea_flow, logistics_sea_required_documents, rule_hits, "
-                        "extraction_notes. "
-                        "Use status values green, conditional, restricted, or review."
+                        "You are a Malaysia export scanner for SMEs. Return valid JSON only. "
+                        "CRITICAL: All array fields must be JSON arrays of strings, NEVER strings themselves. "
+                        "For example: materials_detected should be [\"leather\", \"metal\"], NOT \"leather metal\". "
+                        "Each array element should be a complete, meaningful item (e.g., \"FSC pine wood\"), not single characters. "
+                        "JSON keys (all required): "
+                        "product_name (string), "
+                        "materials_detected (array of material strings), "
+                        "hs_code_candidates (array of HS codes), "
+                        "hs_code_confidence (float 0.0-1.0), "
+                        "hs_code_reasoning (short explanation of why those HS candidates were selected), "
+                        "status (one of: green, conditional, restricted, review), "
+                        "compliance_summary (string), "
+                        "ssm_check (one of: valid, invalid_format, missing, unknown), "
+                        "required_documents (array), "
+                        "required_permits (array), "
+                        "required_agencies (array), "
+                        "logistics_extractions (object/dict), "
+                        "logistics_sea_flow (array), "
+                        "logistics_sea_required_documents (array), "
+                        "rule_hits (array), "
+                        "extraction_notes (array of note strings), "
+                        "follow_up_questions (array of clarifying questions to ask user if data is unclear). "
                     ),
                 },
                 {"role": "user", "content": user_parts},

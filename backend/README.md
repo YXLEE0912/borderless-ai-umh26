@@ -7,10 +7,16 @@ This folder contains the first FastAPI backend slice for the Product Scanner.
 - `GET /api/v1/health`
 - `POST /api/v1/scans`
 - `GET /api/v1/scans/{scan_id}`
+- `GET /api/v1/scans/{scan_id}/chat`
+- `POST /api/v1/scans/{scan_id}/follow-up`
 - Supabase Postgres table for scan records
 - Optional Supabase client for storage
 - Z.ai adapter with a fallback rule-based scanner when no API key is set
 - Rules engine that applies Malaysia 3-layer export checks and sea logistics checklist
+- HS-code policy matching that can add rule hits, permits, and agencies based on HS prefixes
+- HS confidence gate: when HS confidence is below threshold (default 0.65), result is forced to `review` for manual verification
+- Strict HS mode (default enabled): when HS policy matches with enough confidence, keyword layers are treated as secondary warnings
+- Decision trace in response: `result.decision_steps` explains each major decision step and status transition
 
 ## Rules to store
 
@@ -52,6 +58,7 @@ Use Supabase Postgres as the production rule registry:
 3. `sql/003_operational_hardening.sql`
 4. `sql/004_seed_source_registry_china.sql`
 5. `sql/005_governance_audit.sql`
+6. `sql/006_scan_chat_history.sql`
 
 Fallback behavior: if DB rules are unavailable, engine falls back to `app/rules/malaysia_export_rules.json`.
 
@@ -62,8 +69,9 @@ Audit behavior: each `POST /api/v1/scans` call writes a row to `rule_execution_l
 1. Parse product and merchant inputs.
 2. Get AI result (or fallback).
 3. Apply deterministic rules engine to enforce legal guardrails.
-4. Merge required documents, permits, agencies, and logistics checklist.
-5. Persist final decision with `rule_hits` and extraction notes.
+4. Apply HS-code policy overlays from the active ruleset when HS candidates have enough confidence.
+5. Merge required documents, permits, agencies, and logistics checklist.
+6. Persist final decision with `rule_hits`, extraction notes, and `hs_code_reasoning`.
 
 ## Local setup
 
@@ -76,11 +84,21 @@ Audit behavior: each `POST /api/v1/scans` call writes a row to `rule_execution_l
 
 Send `multipart/form-data` to `POST /api/v1/scans` with:
 
-- `product_prompt`
+- optional `product_prompt`
 - optional `destination_country`
 - optional `merchant_name`
 - optional `merchant_ssm`
 - optional `product_image`
+
+At least one of `product_prompt` or `product_image` is required.
+
+## Follow-up chat
+
+- `POST /api/v1/scans/{scan_id}/follow-up` accepts JSON:
+	- `message` required
+	- optional `destination_country`, `merchant_name`, `merchant_ssm`
+- Backend stores both user and assistant messages in `scan_chat_messages`.
+- `GET /api/v1/scans/{scan_id}/chat` returns chronological chat history.
 
 ## Speech To Text
 

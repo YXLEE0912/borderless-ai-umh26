@@ -29,9 +29,80 @@ def apply_rules(
     required_permits = _dedupe(result.required_permits)
     required_agencies = _dedupe(result.required_agencies)
     extraction_notes = list(result.extraction_notes)
+    decision_steps = list(result.decision_steps)
 
     malaysia_rules = rules["malaysia_export"]
     status = result.status
+    hs_gate = _parse_hs_confidence_gate(malaysia_rules.get("hs_confidence_policy", {}))
+    hs_gate_triggered = False
+    strict_hs_mode = hs_gate["strict_hs_mode"]
+
+    _add_decision_step(
+        decision_steps,
+        phase="input",
+        decision="start_scan_rules",
+        reason=f"strict_hs_mode={strict_hs_mode}, hs_confidence={result.hs_code_confidence:.2f}",
+    )
+
+    if result.hs_code_candidates and result.hs_code_confidence < hs_gate["min_confidence"]:
+        hs_gate_triggered = True
+        extraction_notes.append(
+            (
+                "HS confidence is "
+                f"{result.hs_code_confidence:.2f}, below gate {hs_gate['min_confidence']:.2f}; "
+                "manual HS review is required before final customs decision."
+            )
+        )
+        if status != ScanStatus.restricted:
+            status = ScanStatus.review
+        _add_decision_step(
+            decision_steps,
+            phase="hs_gate",
+            decision="forced_review",
+            reason=f"confidence {result.hs_code_confidence:.2f} < gate {hs_gate['min_confidence']:.2f}",
+        )
+
+    hs_status = ScanStatus.green
+    hs_notes: list[str] = []
+    hs_hits: list[str] = []
+    hs_permits: list[str] = []
+    hs_agencies: list[str] = []
+    if not hs_gate_triggered:
+        hs_status, hs_notes, hs_hits, hs_permits, hs_agencies = _apply_hs_code_rules(
+            hs_code_candidates=result.hs_code_candidates,
+            hs_code_confidence=result.hs_code_confidence,
+            hs_policies=malaysia_rules.get("hs_code_policies", []),
+        )
+        if hs_hits:
+            status = _merge_status(status, hs_status)
+            rule_hits.extend(hs_hits)
+            extraction_notes.extend(hs_notes)
+            required_permits.extend(hs_permits)
+            required_agencies.extend(hs_agencies)
+            _add_decision_step(
+                decision_steps,
+                phase="hs_policy",
+                decision=f"status_{status.value}",
+                reason=f"matched HS rules: {', '.join(hs_hits)}",
+            )
+        else:
+            _add_decision_step(
+                decision_steps,
+                phase="hs_policy",
+                decision="no_hs_match",
+                reason="No HS prefix policy matched candidates at current confidence.",
+            )
+
+    hs_code_reasoning = str(result.hs_code_reasoning or "").strip()
+    if hs_gate_triggered:
+        hs_code_reasoning = (
+            "HS candidates found but confidence is below required gate; "
+            "manual HS classification review is required before policy mapping."
+        )
+    elif hs_notes:
+        hs_code_reasoning = "; ".join(_dedupe(hs_notes))
+    elif not hs_code_reasoning and result.hs_code_candidates:
+        hs_code_reasoning = "HS candidates identified, but no HS policy mapping matched in the active ruleset."
 
     layer1_hits = _find_matches(malaysia_rules["layer1_absolute_prohibition"], normalized_text)
     if layer1_hits:
@@ -39,25 +110,65 @@ def apply_rules(
         for hit in layer1_hits:
             rule_hits.append(hit["rule_id"])
             extraction_notes.append(hit["message"])
+        _add_decision_step(
+            decision_steps,
+            phase="keyword_layer1",
+            decision="restricted",
+            reason=f"Matched absolute prohibition rules: {', '.join(hit['rule_id'] for hit in layer1_hits)}",
+        )
 
     if status != ScanStatus.restricted:
         layer2_hits = _find_matches(malaysia_rules["layer2_license_required"], normalized_text)
         if layer2_hits:
-            status = ScanStatus.conditional
-            for hit in layer2_hits:
-                rule_hits.append(hit["rule_id"])
-                extraction_notes.append(hit["message"])
-                required_permits.extend(hit.get("permits", []))
-                required_agencies.extend(hit.get("agencies", []))
+            if strict_hs_mode and hs_hits:
+                for hit in layer2_hits:
+                    rule_hits.append(hit["rule_id"])
+                    extraction_notes.append(f"Keyword signal observed (secondary in strict HS mode): {hit['message']}")
+                _add_decision_step(
+                    decision_steps,
+                    phase="keyword_layer2",
+                    decision="secondary_warning_only",
+                    reason="Strict HS mode active with HS hit, layer2 does not change status.",
+                )
+            else:
+                status = ScanStatus.conditional
+                for hit in layer2_hits:
+                    rule_hits.append(hit["rule_id"])
+                    extraction_notes.append(hit["message"])
+                    required_permits.extend(hit.get("permits", []))
+                    required_agencies.extend(hit.get("agencies", []))
+                _add_decision_step(
+                    decision_steps,
+                    phase="keyword_layer2",
+                    decision=f"status_{status.value}",
+                    reason=f"Matched license-required rules: {', '.join(hit['rule_id'] for hit in layer2_hits)}",
+                )
 
         layer3_hits = _find_matches(malaysia_rules["layer3_conditional"], normalized_text)
         if layer3_hits:
-            status = ScanStatus.conditional if status != ScanStatus.restricted else status
-            for hit in layer3_hits:
-                rule_hits.append(hit["rule_id"])
-                extraction_notes.append(hit["message"])
-                required_permits.extend(hit.get("permits", []))
-                required_agencies.extend(hit.get("agencies", []))
+            if strict_hs_mode and hs_hits:
+                for hit in layer3_hits:
+                    rule_hits.append(hit["rule_id"])
+                    extraction_notes.append(f"Keyword signal observed (secondary in strict HS mode): {hit['message']}")
+                _add_decision_step(
+                    decision_steps,
+                    phase="keyword_layer3",
+                    decision="secondary_warning_only",
+                    reason="Strict HS mode active with HS hit, layer3 does not change status.",
+                )
+            else:
+                status = ScanStatus.conditional if status != ScanStatus.restricted else status
+                for hit in layer3_hits:
+                    rule_hits.append(hit["rule_id"])
+                    extraction_notes.append(hit["message"])
+                    required_permits.extend(hit.get("permits", []))
+                    required_agencies.extend(hit.get("agencies", []))
+                _add_decision_step(
+                    decision_steps,
+                    phase="keyword_layer3",
+                    decision=f"status_{status.value}",
+                    reason=f"Matched conditional rules: {', '.join(hit['rule_id'] for hit in layer3_hits)}",
+                )
 
     required_documents.extend(malaysia_rules.get("default_required_documents", []))
 
@@ -71,10 +182,32 @@ def apply_rules(
         extraction_notes.extend(destination_notes)
         if status == ScanStatus.green:
             status = ScanStatus.conditional
+        _add_decision_step(
+            decision_steps,
+            phase="destination_overlay",
+            decision=f"status_{status.value}",
+            reason=f"Destination overlays matched: {', '.join(destination_hits)}",
+        )
 
     ssm_check = _evaluate_ssm(merchant_ssm)
     if ssm_check != "valid":
         extraction_notes.append("Merchant SSM should be validated before submission to customs workflow.")
+        _add_decision_step(
+            decision_steps,
+            phase="merchant_validation",
+            decision="ssm_review_required",
+            reason=f"ssm_check={ssm_check}",
+        )
+
+    if hs_gate_triggered and status != ScanStatus.restricted:
+        status = ScanStatus.review
+
+    _add_decision_step(
+        decision_steps,
+        phase="final",
+        decision=f"status_{status.value}",
+        reason="Final status after HS, keyword, destination, and validation checks.",
+    )
 
     logistics_extractions = _extract_logistics_fields(prompt)
 
@@ -83,6 +216,7 @@ def apply_rules(
         materials_detected=_dedupe(result.materials_detected),
         hs_code_candidates=_dedupe(result.hs_code_candidates),
         hs_code_confidence=result.hs_code_confidence,
+        hs_code_reasoning=hs_code_reasoning,
         status=status,
         compliance_summary=result.compliance_summary,
         ssm_check=ssm_check,
@@ -94,8 +228,79 @@ def apply_rules(
         logistics_sea_required_documents=list(malaysia_rules.get("sea_required_documents", [])),
         rule_hits=_dedupe(rule_hits),
         extraction_notes=_dedupe(extraction_notes),
+        decision_steps=_dedupe_steps(decision_steps),
+        follow_up_questions=_dedupe(result.follow_up_questions),
         source=result.source,
     )
+
+
+def _apply_hs_code_rules(
+    *,
+    hs_code_candidates: list[str],
+    hs_code_confidence: float,
+    hs_policies: list[dict],
+) -> tuple[ScanStatus, list[str], list[str], list[str], list[str]]:
+    hits: list[str] = []
+    notes: list[str] = []
+    permits: list[str] = []
+    agencies: list[str] = []
+    status = ScanStatus.green
+
+    if not hs_code_candidates or not hs_policies:
+        return status, notes, hits, permits, agencies
+
+    for candidate in hs_code_candidates:
+        normalized = _normalize_hs(candidate)
+        if not normalized:
+            continue
+        for policy in hs_policies:
+            prefix = _normalize_hs(str(policy.get("prefix", "")))
+            if not prefix or not normalized.startswith(prefix):
+                continue
+
+            min_conf = float(policy.get("min_confidence", 0.0) or 0.0)
+            if hs_code_confidence < min_conf:
+                continue
+
+            policy_status = _to_status(str(policy.get("status", "conditional")))
+            status = _merge_status(status, policy_status)
+            hits.append(str(policy.get("rule_id", f"HS-{prefix}")))
+            notes.append(str(policy.get("message", f"HS {candidate} matched policy prefix {prefix}.")))
+            permits.extend([str(item) for item in policy.get("permits", []) if str(item).strip()])
+            agencies.extend([str(item) for item in policy.get("agencies", []) if str(item).strip()])
+
+    return status, _dedupe(notes), _dedupe(hits), _dedupe(permits), _dedupe(agencies)
+
+
+def _parse_hs_confidence_gate(config: dict) -> dict[str, float]:
+    min_confidence = float(config.get("min_confidence", 0.65) or 0.65)
+    if min_confidence < 0.0:
+        min_confidence = 0.0
+    if min_confidence > 1.0:
+        min_confidence = 1.0
+    strict_hs_mode = bool(config.get("strict_hs_mode", True))
+    return {"min_confidence": min_confidence, "strict_hs_mode": strict_hs_mode}
+
+
+def _normalize_hs(value: str) -> str:
+    return re.sub(r"[^0-9]", "", value or "")
+
+
+def _to_status(value: str) -> ScanStatus:
+    clean = (value or "").strip().lower()
+    if clean in {"green", "conditional", "restricted", "review"}:
+        return ScanStatus(clean)
+    return ScanStatus.conditional
+
+
+def _merge_status(current: ScanStatus, incoming: ScanStatus) -> ScanStatus:
+    rank = {
+        ScanStatus.green: 0,
+        ScanStatus.review: 1,
+        ScanStatus.conditional: 2,
+        ScanStatus.restricted: 3,
+    }
+    return incoming if rank[incoming] > rank[current] else current
 
 
 def _apply_destination_rules(*, rules: dict, normalized_text: str, destination_country: str | None) -> tuple[list[str], list[str]]:
@@ -196,4 +401,25 @@ def _dedupe(values: list[str]) -> list[str]:
             continue
         seen.add(key)
         out.append(normalized)
+    return out
+
+
+def _add_decision_step(steps: list[dict[str, str]], *, phase: str, decision: str, reason: str) -> None:
+    steps.append({"phase": phase, "decision": decision, "reason": reason})
+
+
+def _dedupe_steps(steps: list[dict[str, str]]) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in steps:
+        phase = str(item.get("phase", "")).strip()
+        decision = str(item.get("decision", "")).strip()
+        reason = str(item.get("reason", "")).strip()
+        if not phase or not decision:
+            continue
+        key = f"{phase}|{decision}|{reason}".lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"phase": phase, "decision": decision, "reason": reason})
     return out

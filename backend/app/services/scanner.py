@@ -64,14 +64,33 @@ class ProductScanner:
             base_result = _fallback_result(prompt=prompt)
 
         rules_bundle = await self.rules_repository.get_active_rules_bundle()
-
-        return apply_rules(
+        result = apply_rules(
             result=base_result,
             prompt=prompt,
             destination_country=destination_country,
             merchant_ssm=merchant_ssm,
             rules_bundle=rules_bundle,
         )
+
+        follow_up_questions = _build_follow_up_questions(
+            result=result,
+            prompt=prompt,
+            destination_country=destination_country,
+            image_bytes=image_bytes,
+            merchant_name=merchant_name,
+            merchant_ssm=merchant_ssm,
+        )
+        if follow_up_questions:
+            notes = _dedupe_string_list(
+                result.extraction_notes + ["Additional details are needed to improve classification confidence."]
+            )
+            return result.model_copy(
+                update={
+                    "follow_up_questions": follow_up_questions,
+                    "extraction_notes": notes,
+                }
+            )
+        return result
 
 
 def _parse_model_result(raw_result: str) -> dict:
@@ -99,9 +118,10 @@ def _normalize_result(data: dict, source: str) -> ScanResult:
 
     return ScanResult(
         product_name=str(data.get("product_name", "")).strip(),
-        materials_detected=[str(item) for item in data.get("materials_detected", []) if str(item).strip()],
-        hs_code_candidates=[str(item) for item in data.get("hs_code_candidates", []) if str(item).strip()],
+        materials_detected=_normalize_array_field(data.get("materials_detected", [])),
+        hs_code_candidates=_normalize_array_field(data.get("hs_code_candidates", [])),
         hs_code_confidence=float(data.get("hs_code_confidence", 0.0) or 0.0),
+        hs_code_reasoning=str(data.get("hs_code_reasoning", "")).strip(),
         status=status,
         compliance_summary=str(data.get("compliance_summary", "")).strip(),
         ssm_check=str(data.get("ssm_check", "unknown")).strip() or "unknown",
@@ -111,12 +131,12 @@ def _normalize_result(data: dict, source: str) -> ScanResult:
         logistics_extractions={
             str(k): str(v) for k, v in dict(data.get("logistics_extractions", {})).items() if str(k).strip()
         },
-        logistics_sea_flow=[str(item) for item in data.get("logistics_sea_flow", []) if str(item).strip()],
-        logistics_sea_required_documents=[
-            str(item) for item in data.get("logistics_sea_required_documents", []) if str(item).strip()
-        ],
-        rule_hits=[str(item) for item in data.get("rule_hits", []) if str(item).strip()],
+        logistics_sea_flow=_normalize_array_field(data.get("logistics_sea_flow", [])),
+        logistics_sea_required_documents=_normalize_array_field(data.get("logistics_sea_required_documents", [])),
+        rule_hits=_normalize_array_field(data.get("rule_hits", [])),
         extraction_notes=_normalize_string_list(data.get("extraction_notes", [])),
+        decision_steps=_normalize_decision_steps(data.get("decision_steps", [])),
+        follow_up_questions=_normalize_string_list(data.get("follow_up_questions", [])),
         source=source,
     )
 
@@ -150,6 +170,7 @@ def _fallback_result(prompt: str) -> ScanResult:
         materials_detected=_detect_materials(prompt),
         hs_code_candidates=[],
         hs_code_confidence=0.35,
+        hs_code_reasoning="Fallback mode: HS code needs manual confirmation.",
         status=status,
         compliance_summary=summary,
         ssm_check="unknown",
@@ -161,6 +182,8 @@ def _fallback_result(prompt: str) -> ScanResult:
         logistics_sea_required_documents=[],
         rule_hits=[],
         extraction_notes=["Fallback rule-based result used because Z.ai API key is not configured."],
+        decision_steps=[],
+        follow_up_questions=[],
         source="fallback",
     )
 
@@ -190,3 +213,108 @@ def _normalize_string_list(value) -> list[str]:
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
     return [str(value).strip()] if str(value).strip() else []
+
+
+def _normalize_array_field(value) -> list[str]:
+    """Convert string or list to clean array, avoiding character splitting.
+    
+    If value is a string, returns it as a single-element array.
+    If value is a list, filters out empty strings and single-char items 
+    that might result from iterating over a string by accident.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        normalized = value.strip()
+        return [normalized] if normalized else []
+    if isinstance(value, list):
+        result = []
+        for item in value:
+            item_str = str(item).strip()
+            if item_str and len(item_str) > 1:
+                result.append(item_str)
+        return result
+    return []
+
+
+def _normalize_decision_steps(value) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    out: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        phase = str(item.get("phase", "")).strip()
+        decision = str(item.get("decision", "")).strip()
+        reason = str(item.get("reason", "")).strip()
+        if not (phase and decision):
+            continue
+        out.append({"phase": phase, "decision": decision, "reason": reason})
+    return out
+
+
+def _build_follow_up_questions(
+    *,
+    result: ScanResult,
+    prompt: str,
+    destination_country: str | None,
+    image_bytes: bytes | None,
+    merchant_name: str | None,
+    merchant_ssm: str | None,
+) -> list[str]:
+    questions = list(result.follow_up_questions)
+    lowered_prompt = prompt.lower()
+
+    if image_bytes is None:
+        questions.append(
+            "Please upload clear product photos (front, back, label/packaging close-up) so I can verify what the item is."
+        )
+    else:
+        image_confidence_low = (
+            result.status == ScanStatus.review
+            or result.hs_code_confidence < 0.55
+            or not result.materials_detected
+            or not result.hs_code_candidates
+        )
+        if image_confidence_low:
+            questions.append(
+                "The image may be unclear for compliance checks. Can you upload 2 to 3 sharper photos under good lighting, including any label text?"
+            )
+
+    if not destination_country:
+        questions.append("Which destination country will this product be exported to?")
+
+    if not merchant_name:
+        questions.append("What is the registered merchant/company name for this shipment?")
+
+    if not merchant_ssm:
+        questions.append("Please provide the 12-digit Malaysia SSM registration number for validation.")
+    elif result.ssm_check == "invalid_format":
+        questions.append("The SSM appears invalid. Can you confirm the correct 12-digit SSM number?")
+
+    if not result.hs_code_candidates or result.hs_code_confidence < 0.55:
+        questions.append(
+            "Please share product specs: exact material composition (%), intended use, and product dimensions/weight."
+        )
+
+    if any(keyword in lowered_prompt for keyword in ["food", "cosmetic", "chemical", "animal", "plant"]):
+        questions.append(
+            "Do you have supporting certificates (for example health, phytosanitary, or safety certificates) for this product category?"
+        )
+
+    return _dedupe_string_list(questions)[:6]
+
+
+def _dedupe_string_list(values: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        normalized = str(item).strip()
+        if not normalized:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(normalized)
+    return out

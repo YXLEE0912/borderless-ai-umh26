@@ -39,6 +39,20 @@ async def get_scan_record(client, table_name: str, scan_id: str) -> dict | None:
     return record
 
 
+async def update_scan_record(client, table_name: str, scan_id: str, updates: dict) -> dict | None:
+    if client is None:
+        return None
+
+    payload = dict(updates)
+    payload["updated_at"] = _to_iso(payload.get("updated_at"))
+
+    response = _table(client, table_name).update(payload).eq("id", scan_id).execute()
+    rows = response.data or []
+    if not rows:
+        return None
+    return dict(rows[0])
+
+
 def _to_iso(value):
     if isinstance(value, datetime):
         return value.isoformat()

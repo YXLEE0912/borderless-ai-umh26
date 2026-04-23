@@ -110,7 +110,7 @@ class RulesRepository:
                 "notes": row.get("notes") or "",
             }
 
-        docs_map = {str(row.get("profile_key", "")): _json_array(row.get("items")) for row in docs_rows}
+        docs_map_raw = {str(row.get("profile_key", "")): row.get("items") for row in docs_rows}
 
         return {
             "version": f"{ruleset.get('name', 'ruleset')}:{ruleset.get('version', 'unknown')}",
@@ -119,9 +119,11 @@ class RulesRepository:
                 "layer1_absolute_prohibition": layer1,
                 "layer2_license_required": layer2,
                 "layer3_conditional": layer3,
-                "default_required_documents": docs_map.get("default_required_documents", []),
-                "sea_logistics_flow": docs_map.get("sea_logistics_flow", []),
-                "sea_required_documents": docs_map.get("sea_required_documents", []),
+                "hs_code_policies": _json_array(docs_map_raw.get("hs_code_policies")),
+                "hs_confidence_policy": _json_object(docs_map_raw.get("hs_confidence_policy", {})),
+                "default_required_documents": _json_array(docs_map_raw.get("default_required_documents")),
+                "sea_logistics_flow": _json_array(docs_map_raw.get("sea_logistics_flow")),
+                "sea_required_documents": _json_array(docs_map_raw.get("sea_required_documents")),
             },
             "destination_import": destination_import,
         }
@@ -140,3 +142,14 @@ def _json_array(value) -> list:
     if isinstance(value, str):
         return [value]
     return list(value)
+
+
+def _json_object(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict):
+                return item
+        return {}
+    return {}

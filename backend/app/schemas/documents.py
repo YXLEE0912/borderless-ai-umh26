@@ -57,3 +57,21 @@ class DocumentGenerationResponse(BaseModel):
     can_proceed_to_cost: bool = False
     cost_context: CostContext
     notes: list[str] = Field(default_factory=list)
+
+
+class DocumentExtractedData(BaseModel):
+    product_name: str | None = None
+    hs_code: str | None = None
+    destination_country: str | None = None
+    weight_kg: float | None = None
+    declared_value: float | None = None
+    incoterm: str | None = None
+
+
+class DocumentExtractionResponse(BaseModel):
+    file_name: str
+    mime_type: str | None = None
+    used_zai: bool = False
+    extracted_text_preview: str | None = None
+    data: DocumentExtractedData = Field(default_factory=DocumentExtractedData)
+    notes: list[str] = Field(default_factory=list)

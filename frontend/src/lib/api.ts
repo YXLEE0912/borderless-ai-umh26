@@ -134,6 +134,24 @@ export type CostQuoteResponse = {
   export_pack: Record<string, unknown>;
 };
 
+export type DocumentExtractedData = {
+  product_name?: string | null;
+  hs_code?: string | null;
+  destination_country?: string | null;
+  weight_kg?: number | null;
+  declared_value?: number | null;
+  incoterm?: string | null;
+};
+
+export type DocumentExtractionResponse = {
+  file_name: string;
+  mime_type?: string | null;
+  used_zai: boolean;
+  extracted_text_preview?: string | null;
+  data: DocumentExtractedData;
+  notes: string[];
+};
+
 export type BackendScanStatus = "green" | "conditional" | "restricted" | "review";
 
 export type BackendScanResult = {
@@ -195,6 +213,24 @@ export async function quoteCosts(payload: CostQuoteRequest): Promise<CostQuoteRe
     method: "POST",
     body: JSON.stringify(payload),
   });
+}
+
+export async function extractDocumentFields(file: File, documentLabel?: string): Promise<DocumentExtractionResponse> {
+  const formData = new FormData();
+  formData.append("file", file);
+  if (documentLabel) formData.append("document_label", documentLabel);
+
+  const response = await fetch(`${API_BASE_URL}/documents/extract`, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(detail || `Request failed with status ${response.status}`);
+  }
+
+  return response.json() as Promise<DocumentExtractionResponse>;
 }
 
 export async function scanProduct(payload: {

@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef } from "react";
 import { useLocation } from "react-router-dom";
 import TopNav from "@/components/TopNav";
-import { quoteCosts, type CostContext, type CostQuoteResponse } from "@/lib/api";
+import { extractDocumentFields, quoteCosts, type CostContext, type CostQuoteResponse } from "@/lib/api";
 import {
   Upload, FileText, FileCheck2, FileSpreadsheet, CheckCircle2,
   Plane, Ship, ArrowRight, Sparkles, TrendingDown, Info,
@@ -32,6 +32,17 @@ type ShipDoc = {
   // so it wasn't generated in the assistant and the user can optionally upload it
   optional?: boolean;
   fileName?: string;
+  previewUrl?: string;
+  mimeType?: string;
+};
+
+type ShipmentInsight = {
+  product?: string;
+  hsCode?: string;
+  destinationCountry?: string;
+  weightKg?: number;
+  goodsValue?: number;
+  incoterm?: string;
 };
 
 // Master list of all possible export documents
@@ -83,6 +94,14 @@ const formatGoodsValue = (value: number) =>
     maximumFractionDigits: 0,
   });
 
+const toDataUrl = (file: File) =>
+  new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("Failed to read file"));
+    reader.readAsDataURL(file);
+  });
+
 const getCurrencyDisplayLabel = (currency: CurrencyCode) => (currency === "CNY" ? "¥" : currency);
 
 const fallbackBreakdown: BreakdownRow[] = [
@@ -99,6 +118,14 @@ const generateAndDownloadPDF = (
   shipping: "air" | "sea",
   breakdownRows: BreakdownRow[],
   currency: CurrencyCode,
+  summary: {
+    product?: string;
+    hsCode?: string;
+    destinationCountry?: string;
+    weightKg?: number;
+    goodsValue?: number;
+    incoterm?: string;
+  },
   previewOnly = false,
 ) => {
   const now = new Date();
@@ -185,9 +212,13 @@ const generateAndDownloadPDF = (
       doc.status === "uploading" ? "#EFF6FF" :
       doc.optional ? "#F3F4F6" : "#FFFBEB";
 
+    const imageSection = doc.previewUrl
+      ? `<img src="${doc.previewUrl}" alt="${doc.title}" style="width:72px;height:72px;object-fit:cover;border-radius:10px;border:1px solid #E5E7EB;flex-shrink:0;"/>`
+      : `<div style="width:44px;height:44px;border-radius:12px;background:${statusBg};display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0;">${docVisual(doc.title)}</div>`;
+
     return `
       <div style="border:1px solid #E5E7EB;border-radius:12px;padding:14px;background:#fff;display:flex;gap:12px;align-items:flex-start;">
-        <div style="width:44px;height:44px;border-radius:12px;background:${statusBg};display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0;">${docVisual(doc.title)}</div>
+        ${imageSection}
         <div style="flex:1;min-width:0;">
           <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;">
             <div style="font-size:13px;font-weight:700;color:#111827;line-height:1.35;">${doc.title}</div>
@@ -242,15 +273,16 @@ const generateAndDownloadPDF = (
   <hr/>
   <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-bottom:22px;">
     ${[
-      ["Route", "🇲🇾 Malaysia → 🇸🇬 Singapore"],
-      ["Product", "Batik Silk Scarves"],
-      ["HS Code", "6214.10.0000"],
+      ["Route", summary.destinationCountry ? `🇲🇾 Malaysia → 🇸🇬 ${summary.destinationCountry}` : ""],
+      ["Product", summary.product || ""],
+      ["HS Code", summary.hsCode || ""],
       ["Shipping Code", shippingCode],
       ["Shipping Method", shippingLabel],
-      ["Incoterm", shipping === "air" ? "DAP" : "CIF Port"],
-      ["Goods Value", formatGoodsValue(breakdownRows[0]?.value || 0)],
+      ["Incoterm", summary.incoterm || ""],
+      ["Goods Value", summary.goodsValue != null ? formatGoodsValue(summary.goodsValue) : ""],
+      ["Weight", summary.weightKg != null ? `${summary.weightKg} kg` : ""],
       ["Currency", getCurrencyDisplayLabel(currency)],
-    ].map(([k, v]) => `
+    ].filter(([, v]) => Boolean(v)).map(([k, v]) => `
       <div style="border:1px solid #E5E7EB;border-radius:12px;padding:12px 14px;background:#fff;">
         <div style="font-size:10px;font-weight:700;color:#6B7280;letter-spacing:0.5px;text-transform:uppercase;margin-bottom:4px;">${k}</div>
         <div style="font-size:13px;font-weight:700;color:#111827;line-height:1.35;">${v}</div>
@@ -263,13 +295,12 @@ const generateAndDownloadPDF = (
   <hr/>
   <div style="display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap;">
     ${[
-      ["Exporter",     "Aiman Trading Sdn Bhd"],
-      ["Route",        "🇲🇾 Malaysia (KL) → 🇸🇬 Singapore"],
-      ["Product",      "Batik Silk Scarves"],
-      ["HS Code",      "6214.10.0000"],
-      ["Incoterm",     "DAP — Delivered at Place"],
-      ["Gross Weight", "12.4 kg"],
-    ].map(([k, v]) => `
+      ["Route", summary.destinationCountry ? `🇲🇾 Malaysia → 🇸🇬 ${summary.destinationCountry}` : ""],
+      ["Product", summary.product || ""],
+      ["HS Code", summary.hsCode || ""],
+      ["Incoterm", summary.incoterm || ""],
+      ["Gross Weight", summary.weightKg != null ? `${summary.weightKg} kg` : ""],
+    ].filter(([, v]) => Boolean(v)).map(([k, v]) => `
       <div style="background:#F3F4F6;border-radius:6px;padding:10px 14px;flex:1;min-width:160px;">
         <div style="font-size:10px;color:#6B7280;margin-bottom:3px;">${k}</div>
         <div style="font-size:13px;font-weight:700;color:#111827;">${v}</div>
@@ -410,25 +441,28 @@ const Logistics = () => {
   const [shipping, setShipping] = useState<"air" | "sea">(
     routeState.transportMode === "sea" || costContext?.transport_mode === "sea" ? "sea" : "air"
   );
-  const documentGoodsValue = costContext?.declared_value && costContext.declared_value > 0 ? costContext.declared_value : 1000;
+  const [insight, setInsight] = useState<ShipmentInsight>({});
+  const documentGoodsValue = insight.goodsValue && insight.goodsValue > 0 ? insight.goodsValue : null;
+  const hasDocumentGoodsValue = documentGoodsValue != null;
   const [currency, setCurrency] = useState<CurrencyCode>(normalizeCurrency(costContext?.currency));
-  const [goodsValueSource, setGoodsValueSource] = useState<"document" | "manual">("document");
-  const [manualGoodsValue, setManualGoodsValue] = useState<number>(documentGoodsValue);
+  const [goodsValueSource, setGoodsValueSource] = useState<"document" | "manual">(hasDocumentGoodsValue ? "document" : "manual");
+  const [manualGoodsValue, setManualGoodsValue] = useState<number>(documentGoodsValue ?? 0);
   const [generatingSummary, setGeneratingSummary] = useState(false);
   const fileInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const costSectionRef = useRef<HTMLDivElement>(null);
 
-  const summaryProduct = routeState.product || costContext?.product_name || "Batik Silk Scarves";
-  const summaryDestination = routeState.destinationCountry || costContext?.destination_country || "Singapore";
-  const summaryHsCode = routeState.hsCode || "6214.10.0000";
-  const summaryWeight = costContext?.weight_kg ?? 12.4;
-  const goodsValue = goodsValueSource === "document" ? documentGoodsValue : manualGoodsValue;
+  const summaryProduct = insight.product || "";
+  const summaryDestination = insight.destinationCountry || "";
+  const summaryHsCode = insight.hsCode || "";
+  const summaryWeight = insight.weightKg;
+  const summaryIncoterm = insight.incoterm || (shipping === "sea" ? "CIF Port" : shipping === "air" ? "DAP" : "");
+  const goodsValue = goodsValueSource === "document" && documentGoodsValue != null ? documentGoodsValue : manualGoodsValue;
   const effectiveCostContext: CostContext = costContext || {
     product_name: summaryProduct,
     destination_country: summaryDestination,
     transport_mode: shipping,
     declared_value: goodsValue,
-    weight_kg: summaryWeight,
+    weight_kg: summaryWeight ?? 1,
     volumetric_weight_kg: null,
     currency,
     package_count: 1,
@@ -467,9 +501,18 @@ const Logistics = () => {
   };
 
   useEffect(() => {
-    if (!effectiveCostContext) return;
+    if (!effectiveCostContext || effectiveCostContext.weight_kg <= 0) return;
     void calculateQuote(shipping);
   }, [costContext, docs, shipping, goodsValue, goodsValueSource, manualGoodsValue, currency]);
+
+  useEffect(() => {
+    if (!hasDocumentGoodsValue && goodsValueSource === "document") {
+      setGoodsValueSource("manual");
+    }
+    if (hasDocumentGoodsValue && goodsValueSource === "document" && documentGoodsValue != null) {
+      setManualGoodsValue((prev) => (prev === 0 ? documentGoodsValue : prev));
+    }
+  }, [hasDocumentGoodsValue, goodsValueSource, documentGoodsValue]);
 
   const costRows: BreakdownRow[] = quote ? [
     { label: "Goods Value", value: goodsValue, note: goodsValueSource === "document" ? "From uploaded document" : "Manual entry", waived: false },
@@ -492,11 +535,42 @@ const Logistics = () => {
 
   const uploadedCount = docs.filter((d) => d.status === "uploaded" || d.status === "carried").length;
 
-  const handleFileSelect = (docId: string, file: File) => {
+  const handleFileSelect = async (docId: string, file: File) => {
+    const previewUrl = file.type.startsWith("image/") ? await toDataUrl(file) : undefined;
+    let extracted: ShipmentInsight = {};
+    try {
+      const extraction = await extractDocumentFields(file, docId);
+      extracted = {
+        product: extraction.data.product_name || undefined,
+        hsCode: extraction.data.hs_code || undefined,
+        destinationCountry: extraction.data.destination_country || undefined,
+        weightKg: extraction.data.weight_kg ?? undefined,
+        goodsValue: extraction.data.declared_value ?? undefined,
+        incoterm: extraction.data.incoterm || undefined,
+      };
+    } catch {
+      extracted = {};
+    }
+    setInsight((prev) => ({
+      product: extracted.product || prev.product,
+      hsCode: extracted.hsCode || prev.hsCode,
+      destinationCountry: extracted.destinationCountry || prev.destinationCountry,
+      weightKg: extracted.weightKg ?? prev.weightKg,
+      goodsValue: extracted.goodsValue ?? prev.goodsValue,
+      incoterm: extracted.incoterm || prev.incoterm,
+    }));
+
     setDocs((prev) =>
       prev.map((d) =>
         d.id === docId
-          ? { ...d, status: "uploading", fileName: file.name, size: `${(file.size / 1024).toFixed(0)} KB` }
+          ? {
+              ...d,
+              status: "uploading",
+              fileName: file.name,
+              size: `${(file.size / 1024).toFixed(0)} KB`,
+              previewUrl,
+              mimeType: file.type,
+            }
           : d
       )
     );
@@ -521,19 +595,42 @@ const Logistics = () => {
   const handleDrop = (docId: string, e: React.DragEvent) => {
     e.preventDefault();
     const file = e.dataTransfer.files?.[0];
-    if (file) handleFileSelect(docId, file);
+    if (file) {
+      void handleFileSelect(docId, file);
+    }
   };
 
   const handleDownloadSummary = () => {
     setGeneratingSummary(true);
     setTimeout(() => {
       setGeneratingSummary(false);
-      generateAndDownloadPDF(docs, shipping, costRows, currency);
+      generateAndDownloadPDF(docs, shipping, costRows, currency, {
+        product: summaryProduct,
+        hsCode: summaryHsCode,
+        destinationCountry: summaryDestination,
+        weightKg: summaryWeight,
+        goodsValue,
+        incoterm: summaryIncoterm,
+      });
     }, 800);
   };
 
   const handlePreviewSummary = () => {
-    generateAndDownloadPDF(docs, shipping, costRows, currency, true);
+    generateAndDownloadPDF(
+      docs,
+      shipping,
+      costRows,
+      currency,
+      {
+        product: summaryProduct,
+        hsCode: summaryHsCode,
+        destinationCountry: summaryDestination,
+        weightKg: summaryWeight,
+        goodsValue,
+        incoterm: summaryIncoterm,
+      },
+      true,
+    );
   };
 
   const total = costRows.reduce((sum, r) => sum + r.value, 0);
@@ -627,7 +724,9 @@ const Logistics = () => {
                         className="hidden"
                         onChange={(e) => {
                           const file = e.target.files?.[0];
-                          if (file) handleFileSelect(doc.id, file);
+                          if (file) {
+                            void handleFileSelect(doc.id, file);
+                          }
                         }}
                       />
 
@@ -953,7 +1052,7 @@ const Logistics = () => {
                         onChange={(event) => setGoodsValueSource(event.target.value as "document" | "manual")}
                         className="w-full rounded-xl border border-border bg-card px-3 py-2.5 text-sm text-foreground outline-none transition-base focus:border-primary"
                       >
-                        <option value="document">Use uploaded document value</option>
+                        {hasDocumentGoodsValue && <option value="document">Use uploaded document value</option>}
                         <option value="manual">Other, enter manually</option>
                       </select>
                     </div>
@@ -973,7 +1072,9 @@ const Logistics = () => {
                     )}
                   </div>
                   <div className="mt-2 text-[11px] text-muted-foreground">
-                    Use the uploaded document value or switch to manual entry before calculating total cost.
+                    {hasDocumentGoodsValue
+                      ? "Use the uploaded document value or switch to manual entry before calculating total cost."
+                      : "Uploaded document value not found. Please enter goods value manually."}
                   </div>
                 </div>
 
@@ -1088,15 +1189,15 @@ const Logistics = () => {
               <h3 className="text-sm font-semibold text-foreground">Shipment summary</h3>
               <div className="mt-4 space-y-3 text-[13px]">
                 {[
-                  ["Route",    `🇲🇾 Malaysia → 🇸🇬 ${summaryDestination}`],
+                  ["Route", summaryDestination ? `🇲🇾 Malaysia → 🇸🇬 ${summaryDestination}` : ""],
                   ["Product",  summaryProduct],
                   ["HS Code",  summaryHsCode],
-                  ["Weight",   `${summaryWeight} kg`],
+                  ["Weight",   summaryWeight != null ? `${summaryWeight} kg` : ""],
                   ["Currency", currency],
                   ["Goods Value", formatGoodsValue(displayGoodsValue)],
                   ["Landed Cost", quote ? formatCurrency(displayTotal, currency) : "—"],
-                  ["Incoterm", shipping === "sea" ? "CIF Port" : shipping === "air" ? "DAP" : "Select shipping"],
-                ].map(([k, v]) => (
+                  ["Incoterm", summaryIncoterm],
+                ].filter(([, v]) => Boolean(v)).map(([k, v]) => (
                   <div key={k} className="flex items-center justify-between">
                     <span className="text-muted-foreground">{k}</span>
                     <span className="font-medium text-foreground text-right">{v}</span>

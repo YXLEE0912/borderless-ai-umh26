@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .glm_core import GLMArchitectCore
+from live_agent_intelligence.live_agent_intelligence import LiveAgentIntelligence
 
 
 Stage = str
@@ -116,10 +117,12 @@ class GLMWorkflowEngine:
         glm: GLMArchitectCore,
         tools: ToolRouter | None = None,
         state: WorkflowState | None = None,
+        policy_researcher: LiveAgentIntelligence | None = None,
     ) -> None:
         self.glm = glm
         self.tools = tools or ToolRouter()
         self.state = state or WorkflowState()
+        self.policy_researcher = policy_researcher
 
     def process_unstructured_input(
         self,
@@ -129,13 +132,15 @@ class GLMWorkflowEngine:
     ) -> WorkflowOutput:
         source_meta = source_meta or {}
 
+        policy_context = self._build_policy_context(raw_input=raw_input, source_meta=source_meta)
+
         parsed = self._glm_extract(raw_input, source_type, source_meta)
         if not parsed.get("ok"):
             return self._hard_fail("GLM extraction failed. Workflow coordination unavailable.")
 
         self._merge_extraction(parsed)
 
-        plan = self._glm_plan()
+        plan = self._glm_plan(policy_context=policy_context)
         if not plan.get("ok"):
             return self._hard_fail("GLM planning failed. Workflow coordination unavailable.")
 
@@ -170,7 +175,7 @@ class GLMWorkflowEngine:
             return {"ok": False, "error": "GLM did not return object"}
         return {"ok": True, **out.data}
 
-    def _glm_plan(self) -> dict[str, Any]:
+    def _glm_plan(self, policy_context: dict[str, Any] | None = None) -> dict[str, Any]:
         prompt = (
             "You are the workflow coordinator. Decide next actions using current state. "
             "Return JSON only with keys: assistant_message (string), stage (string), "
@@ -181,10 +186,12 @@ class GLMWorkflowEngine:
         context = {
             "state": self.state.snapshot(),
             "available_tools": self.tools.available_tools(),
+            "policy_context": policy_context or {},
             "hard_constraints": [
                 "cannot advance with critical missing_fields",
                 "must call tools when confidence is low",
                 "must propose recovery when failures exist",
+                "if policy_context includes new mandatory rule, include it in checklist",
             ],
         }
         out = self.glm.run_json(prompt, context=context)
@@ -193,6 +200,47 @@ class GLMWorkflowEngine:
         if not isinstance(out.data, dict):
             return {"ok": False, "error": "GLM did not return object"}
         return {"ok": True, **out.data}
+
+    def _build_policy_context(self, raw_input: str, source_meta: dict[str, Any]) -> dict[str, Any]:
+        if self.policy_researcher is None:
+            return {}
+
+        topic = str(source_meta.get("policy_topic", "")).strip()
+        if not topic:
+            topic = self._infer_policy_topic(raw_input)
+
+        if not topic:
+            return {}
+
+        report = self.policy_researcher.as_workflow_context(topic=topic)
+        self.state.history.append(
+            WorkflowEvent(
+                kind="policy_research",
+                detail={
+                    "topic": topic,
+                    "signals": len(report.get("signals", [])),
+                    "rules": report.get("rules", []),
+                },
+            )
+        )
+        return report
+
+    @staticmethod
+    def _infer_policy_topic(raw_input: str) -> str:
+        text = raw_input.lower()
+        if "k2" in text:
+            return "K2 Forms"
+        if "ssm" in text or "brn" in text:
+            return "SSM registration updates"
+        if "permit" in text or "miti" in text:
+            return "MITI export policy"
+        if "halal" in text:
+            return "Halal export certification"
+        if "sirim" in text:
+            return "SIRIM product compliance"
+        if "customs" in text or "rmcd" in text:
+            return "Royal Malaysian Customs export declaration"
+        return "Malaysia export policy updates"
 
     def _merge_extraction(self, parsed: dict[str, Any]) -> None:
         facts = parsed.get("facts", {})

@@ -30,6 +30,29 @@ $env:GLM_API_KEY="your_real_key_here"
 - `glm_core.py`: GLM model interface (text + JSON mode)
 - `glm_workflow.py`: Stateful workflow engine coordinated by GLM
 - `config.py`: Config (GLM keys from env vars)
+- `live_agent_intelligence.py`: Research and retrieval agent for live policy context
+- `policy_sources_websites.py`: Official website source list
+- `policy_sources_news.py`: News feed source list
+
+## Live Agent Intelligence
+
+Use `LiveAgentIntelligence` to fetch current policy signals and inject them into planning context:
+
+```python
+from agent2.glm_core import GLMArchitectCore
+from agent2.glm_workflow import GLMWorkflowEngine
+from agent2.live_agent_intelligence import LiveAgentIntelligence
+
+core = GLMArchitectCore(language_mode="manglish", persona_mode="expert")
+researcher = LiveAgentIntelligence(glm=core)
+engine = GLMWorkflowEngine(glm=core, policy_researcher=researcher)
+
+result = engine.process_unstructured_input(
+    "Need to submit K2 for tea export to Indonesia",
+    source_type="message",
+    source_meta={"policy_topic": "K2 Forms"},
+)
+```
 
 ## How GLM is the winning core
 

@@ -1,4 +1,36 @@
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "/api/v1").replace(/\/$/, "");
+function resolveApiBaseUrl(): string {
+  const fallback = "/api/v1";
+  const raw = (import.meta.env.VITE_API_BASE_URL || fallback).trim();
+
+  if (!raw) return fallback;
+
+  // Keep relative values as same-origin paths so they work with Vite proxy.
+  if (raw.startsWith("/")) {
+    return raw.replace(/\/$/, "");
+  }
+
+  try {
+    const parsed = new URL(raw);
+
+    if (typeof window !== "undefined") {
+      const pageOrigin = window.location.origin;
+      const isSameOrigin = parsed.origin === pageOrigin;
+      const isLoopback = parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost";
+      const isMixedContent = window.location.protocol === "https:" && parsed.protocol === "http:";
+
+      // In hosted/HTTPS contexts, force same-origin API path to avoid unsafe frame/navigation errors.
+      if ((isLoopback && !isSameOrigin) || isMixedContent) {
+        return fallback;
+      }
+    }
+
+    return raw.replace(/\/$/, "");
+  } catch {
+    return fallback;
+  }
+}
+
+const API_BASE_URL = resolveApiBaseUrl();
 
 export type CarriedDocument = {
   id: string;

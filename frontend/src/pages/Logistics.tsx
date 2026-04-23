@@ -78,6 +78,11 @@ const formatCurrency = (amount: number, currency: CurrencyCode) => {
   }).format(amount);
 };
 
+const formatGoodsValue = (value: number) =>
+  value.toLocaleString("en-MY", {
+    maximumFractionDigits: 0,
+  });
+
 const getCurrencyDisplayLabel = (currency: CurrencyCode) => (currency === "CNY" ? "¥" : currency);
 
 const fallbackBreakdown: BreakdownRow[] = [
@@ -243,7 +248,7 @@ const generateAndDownloadPDF = (
       ["Shipping Code", shippingCode],
       ["Shipping Method", shippingLabel],
       ["Incoterm", shipping === "air" ? "DAP" : "CIF Port"],
-      ["Goods Value", formatCurrency(convertFromBaseCurrency(breakdownRows[0]?.value || 0, currency), currency)],
+      ["Goods Value", formatGoodsValue(breakdownRows[0]?.value || 0)],
       ["Currency", getCurrencyDisplayLabel(currency)],
     ].map(([k, v]) => `
       <div style="border:1px solid #E5E7EB;border-radius:12px;padding:12px 14px;background:#fff;">
@@ -532,7 +537,7 @@ const Logistics = () => {
   };
 
   const total = costRows.reduce((sum, r) => sum + r.value, 0);
-  const displayGoodsValue = convertFromBaseCurrency(goodsValue, currency);
+  const displayGoodsValue = goodsValue;
   const displayTotal = quote ? convertFromBaseCurrency(quote.estimated_total_cost, currency) : convertFromBaseCurrency(total, currency);
 
   return (
@@ -984,7 +989,9 @@ const Logistics = () => {
                       <span className={`text-[15px] font-medium tabular-nums ${
                         row.waived ? "text-success line-through decoration-success/40" : "text-foreground"
                       }`}>
-                        {formatCurrency(convertFromBaseCurrency(row.value, currency), currency)}
+                        {row.label === "Goods Value"
+                          ? formatGoodsValue(row.value)
+                          : formatCurrency(convertFromBaseCurrency(row.value, currency), currency)}
                       </span>
                     </div>
                   ))}
@@ -1086,7 +1093,7 @@ const Logistics = () => {
                   ["HS Code",  summaryHsCode],
                   ["Weight",   `${summaryWeight} kg`],
                   ["Currency", currency],
-                  ["Goods Value", formatCurrency(displayGoodsValue, currency)],
+                  ["Goods Value", formatGoodsValue(displayGoodsValue)],
                   ["Landed Cost", quote ? formatCurrency(displayTotal, currency) : "—"],
                   ["Incoterm", shipping === "sea" ? "CIF Port" : shipping === "air" ? "DAP" : "Select shipping"],
                 ].map(([k, v]) => (

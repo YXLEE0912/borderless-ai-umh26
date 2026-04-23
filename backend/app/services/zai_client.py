@@ -90,6 +90,28 @@ class ZAIClient:
 
         return data["choices"][0]["message"]["content"]
 
+    async def chat_json(self, system_prompt: str, user_prompt: str, temperature: float = 0.1) -> str:
+        if not self.api_key:
+            raise RuntimeError("Z.ai API key is not configured")
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": [{"type": "text", "text": user_prompt}]},
+            ],
+            "temperature": temperature,
+        }
+
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+
+        async with httpx.AsyncClient(base_url=self.base_url, timeout=60.0, headers=headers) as client:
+            response = await client.post("/chat/completions", json=payload)
+            response.raise_for_status()
+            data = response.json()
+
+        return data["choices"][0]["message"]["content"]
+
     def _build_prompt(
         self,
         prompt: str,

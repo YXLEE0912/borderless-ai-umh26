@@ -1,3 +1,14 @@
+# Dependencies
+node_modules
+.pnp
+.pnp.js
+
+# Build outputs
+dist
+dist-ssr
+build
+*.local
+
 # Logs
 logs
 *.log
@@ -6,11 +17,6 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
-
-node_modules
-dist
-dist-ssr
-*.local
 
 # Editor directories and files
 .vscode/*
@@ -22,3 +28,109 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# ==========================================
+# PYTHON
+# ==========================================
+# Virtual Environment
+.venv/
+venv/
+env/
+.venv
+ENV/
+env.bak/
+venv.bak/
+
+# Python compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+PIPFILE.lock
+
+# ==========================================
+# 🔒 SENSITIVE DATA - NEVER COMMIT THESE
+# ==========================================
+# Environment files with API keys
+.env
+.env.local
+.env.*.local
+*.env
+
+# Supabase credentials
+supabase-key.txt
+service_role_key.txt
+
+# API keys (any format)
+*apikey*
+*api_key*
+*secret*
+*credentials*
+
+# Database dumps
+*.sql.gz
+*.sql.bz2
+*.dump
+*.dump.gz
+
+# ==========================================
+# SCRAPING / CACHE
+# ==========================================
+# Scraped data
+scraped_data/
+cache/
+*.pkl
+*.pickle
+
+# BeautifulSoup cache
+*.bs4-cache
+
+# Supabase local config
+supabase/config.toml
+
+# ==========================================
+# OS FILES
+# ==========================================
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+
+# Windows shortcuts
+*.lnk
+
+# ==========================================
+# PROJECT SPECIFIC
+# ==========================================
+# PDFs (if downloading gov documents)
+pdfs/*.pdf
+!pdfs/.gitkeep
+
+# Test files
+test_*.py
+*_test.py
+tests/

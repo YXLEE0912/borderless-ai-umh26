@@ -4,7 +4,7 @@ Compliance Service - Malaysian export regulation checks
 
 import json
 from typing import Dict, Any
-from services.glm_service import GLMService
+from glmservice import GLMService
 
 
 class ComplianceService:

@@ -498,18 +498,34 @@ def parse_document_fields_json(content: str) -> DocumentExtractedData:
     if not isinstance(data, dict):
         raise ValueError("Expected JSON object for document extraction")
 
-    def _num(key: str) -> float | None:
-        value = data.get(key)
-        if value is None or value == "":
+    def _to_float(value: object) -> float | None:
+        if value is None:
             return None
-        return float(value)
+        if isinstance(value, (int, float)):
+            parsed = float(value)
+            return parsed if parsed == parsed else None
+        if isinstance(value, str):
+            text_value = value.strip()
+            if not text_value:
+                return None
+            cleaned = re.sub(r"[^0-9.+\-]", "", text_value.replace(",", ""))
+            if not cleaned:
+                return None
+            try:
+                return float(cleaned)
+            except ValueError:
+                return None
+        return None
 
-    def _num_any(keys: list[str]) -> float | None:
+    def _num(key: str) -> float | None:
+        return _to_float(data.get(key))
+
+    def _num_any(keys: list[str], source: dict | None = None) -> float | None:
+        bag = source if isinstance(source, dict) else data
         for key in keys:
-            value = data.get(key)
-            if value is None or value == "":
-                continue
-            return float(value)
+            value = _to_float(bag.get(key))
+            if value is not None:
+                return value
         return None
 
     def _txt(key: str) -> str | None:
@@ -526,15 +542,110 @@ def parse_document_fields_json(content: str) -> DocumentExtractedData:
                 return text_value
         return None
 
+    def _line_item_dicts() -> list[dict]:
+        candidates = [
+            data.get("line_items"),
+            data.get("lineItems"),
+            data.get("items"),
+            data.get("products"),
+            data.get("goods"),
+        ]
+        rows: list[dict] = []
+        for candidate in candidates:
+            if isinstance(candidate, list):
+                for row in candidate:
+                    if isinstance(row, dict):
+                        rows.append(row)
+        return rows
+
+    line_items = _line_item_dicts()
+
+    line_item_quantity_total = 0.0
+    has_line_item_quantity = False
+    line_item_weight_total = 0.0
+    has_line_item_weight = False
+    line_item_declared_value_total = 0.0
+    has_line_item_declared_value = False
+    line_item_unit_price: float | None = None
+
+    for row in line_items:
+        quantity = _num_any([
+            "quantity", "qty", "total_qty", "total quantity", "item_qty", "pieces", "units", "pcs", "count"
+        ], source=row)
+        weight = _num_any([
+            "net_weight", "net weight", "weight_kg", "weight kg", "weight", "gross_weight", "gross weight"
+        ], source=row)
+        unit_price = _num_any([
+            "unit_price", "unit price", "price_per_unit", "price per unit", "item_price", "price", "rate"
+        ], source=row)
+        total_price = _num_any([
+            "total_price", "total price", "line_total", "line total", "amount", "value", "declared_value", "invoice_value"
+        ], source=row)
+
+        if quantity is not None and quantity > 0:
+            has_line_item_quantity = True
+            line_item_quantity_total += quantity
+        if weight is not None and weight > 0:
+            has_line_item_weight = True
+            line_item_weight_total += weight
+        if total_price is not None and total_price > 0:
+            has_line_item_declared_value = True
+            line_item_declared_value_total += total_price
+        if line_item_unit_price is None and unit_price is not None and unit_price > 0:
+            line_item_unit_price = unit_price
+
+        if (
+            total_price is None
+            and quantity is not None
+            and quantity > 0
+            and unit_price is not None
+            and unit_price > 0
+        ):
+            has_line_item_declared_value = True
+            line_item_declared_value_total += round(quantity * unit_price, 2)
+
+    quantity_value = _num_any([
+        "quantity", "qty", "total_qty", "total qty", "total_quantity", "total quantity", "item_qty", "item qty", "pcs", "pieces", "units", "cartons", "boxes"
+    ])
+    if (quantity_value is None or quantity_value <= 0) and has_line_item_quantity:
+        quantity_value = round(line_item_quantity_total, 4)
+
+    weight_value = _num_any([
+        "net_weight", "net weight", "gross_weight", "gross weight", "weight_kg", "weight kg", "weight", "billable_weight", "billable weight", "chargeable_weight", "chargeable weight", "cargo_weight", "cargo weight", "net_weight_kg", "gross_weight_kg"
+    ])
+    if (weight_value is None or weight_value <= 0) and has_line_item_weight:
+        weight_value = round(line_item_weight_total, 4)
+
+    declared_value = _num_any([
+        "declared_value", "declared value", "total_price", "total price", "price", "invoice_value", "invoice value", "goods_value", "goods value", "total_value", "total value", "item_value", "item value", "amount", "line_total", "line total"
+    ])
+    if (declared_value is None or declared_value <= 0) and has_line_item_declared_value:
+        declared_value = round(line_item_declared_value_total, 2)
+
+    unit_price_value = _num_any([
+        "unit_price", "unit price", "price_per_unit", "price per unit", "price_per_item", "price per item", "item_price", "item price", "rate", "cost per unit"
+    ])
+    if (unit_price_value is None or unit_price_value <= 0) and line_item_unit_price is not None:
+        unit_price_value = line_item_unit_price
+
+    if (
+        (unit_price_value is None or unit_price_value <= 0)
+        and quantity_value is not None
+        and quantity_value > 0
+        and declared_value is not None
+        and declared_value > 0
+    ):
+        unit_price_value = round(declared_value / quantity_value, 2)
+
     return DocumentExtractedData(
         product_name=_txt_any(["product_name", "product", "item", "item_description", "item description", "goods_description", "goods description", "description", "commodity", "merchandise", "cargo_description", "cargo description"]),
         hs_code=_txt_any(["hs_code", "hs code", "tariff_code", "tariff code", "customs_code", "customs code"]),
         destination_country=_txt_any(["destination_country", "destination country", "country_of_destination", "country of destination", "destination", "ship_to_country", "ship to country", "consignee_country", "consignee country", "delivery_country", "delivery country"]),
         destination_address=_txt_any(["destination_address", "destination address", "complete_address", "complete address", "full_address", "full address", "delivery_address", "delivery address", "ship_to_address", "ship to address", "consignee_address", "consignee address", "shipping_address", "shipping address", "recipient_address", "recipient address", "receiver_address", "receiver address", "address", "address_line_1", "address line 1", "address_line_2", "address line 2", "address_line_3", "address line 3"]),
         origin_region=_txt_any(["origin_region", "origin region", "origin"]),
-        quantity=_num_any(["quantity", "qty", "total_qty", "total qty", "total_quantity", "total quantity", "item_qty", "item qty", "pcs", "pieces", "units", "cartons", "boxes"]),
-        weight_kg=_num_any(["net_weight", "net weight", "gross_weight", "gross weight", "weight_kg", "weight kg", "weight", "billable_weight", "billable weight", "chargeable_weight", "chargeable weight", "cargo_weight", "cargo weight", "net_weight_kg", "gross_weight_kg"]),
-        declared_value=_num_any(["declared_value", "declared value", "total_price", "total price", "price", "invoice_value", "invoice value", "goods_value", "goods value", "total_value", "total value", "item_value", "item value", "amount", "line_total", "line total"]),
-        unit_price=_num_any(["unit_price", "unit price", "price_per_unit", "price per unit", "price_per_item", "price per item", "item_price", "item price", "rate", "cost per unit"]),
+        quantity=quantity_value,
+        weight_kg=weight_value,
+        declared_value=declared_value,
+        unit_price=unit_price_value,
         incoterm=_txt_any(["incoterm", "incoterms"]),
     )

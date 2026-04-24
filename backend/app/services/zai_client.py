@@ -6,10 +6,19 @@ import httpx
 
 
 class ZAIClient:
-    def __init__(self, api_key: str | None, base_url: str, model: str):
+    def __init__(
+        self,
+        api_key: str | None,
+        base_url: str,
+        model: str,
+        timeout_seconds: float = 90.0,
+        max_retries: int = 2,
+    ):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.model = model
+        self.timeout_seconds = timeout_seconds
+        self.max_retries = max(0, max_retries)
 
     async def analyze(
         self,
@@ -83,10 +92,29 @@ class ZAIClient:
 
         headers = {"Authorization": f"Bearer {self.api_key}"}
 
-        async with httpx.AsyncClient(base_url=self.base_url, timeout=60.0, headers=headers) as client:
-            response = await client.post("/chat/completions", json=payload)
-            response.raise_for_status()
-            data = response.json()
+        data = None
+        last_error: Exception | None = None
+        async with httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout_seconds, headers=headers) as client:
+            for attempt in range(self.max_retries + 1):
+                try:
+                    response = await client.post("/chat/completions", json=payload)
+                    response.raise_for_status()
+                    data = response.json()
+                    break
+                except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as error:
+                    last_error = error
+                    if attempt >= self.max_retries:
+                        raise
+                except httpx.HTTPStatusError as error:
+                    last_error = error
+                    if error.response.status_code in {429, 500, 502, 503, 504} and attempt < self.max_retries:
+                        continue
+                    raise
+
+        if not isinstance(data, dict):
+            raise RuntimeError(
+                f"Z.ai returned invalid response payload: {last_error.__class__.__name__ if last_error else 'unknown'}"
+            )
 
         return data["choices"][0]["message"]["content"]
 

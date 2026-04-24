@@ -110,10 +110,3 @@ Request fields:
 - `language` optional, for example `en` or `zh`
 
 If `STT_API_KEY` and `STT_BASE_URL` are not set, the backend falls back to `Z_AI_API_KEY` and `Z_AI_BASE_URL`.
-
-## Compliance TTS
-
-`POST /api/v1/scans` now optionally returns `tts_audio_url`.
-
-- For `conditional`, `restricted`, or `review` results, backend generates an MP3 warning via `gTTS`.
-- Audio is uploaded to the same Supabase storage bucket and returned to frontend for playback.

@@ -152,7 +152,9 @@ class ZAIClient:
 
         system_prompt = (
             "You extract shipping and customs fields from business documents. Return valid JSON only with keys: "
-            "product_name, hs_code, destination_country, weight_kg, declared_value, incoterm. "
+            "product_name, hs_code, destination_country, origin_region, weight_kg, declared_value, incoterm. "
+            "origin_region must be one of: west, east, or null. "
+            "If quantity/qty appears and declared value is missing, map quantity into declared_value. "
             "Use null when missing. No markdown."
         )
 
@@ -189,6 +191,54 @@ class ZAIClient:
             data = response.json()
 
         return data["choices"][0]["message"]["content"]
+
+    async def extract_document_text(
+        self,
+        image_bytes: bytes,
+        image_content_type: str | None,
+        file_name: str | None,
+    ) -> str:
+        if not self.api_key:
+            raise RuntimeError("Z.ai API key is not configured")
+
+        system_prompt = (
+            "You are an OCR transcriber for trade documents. "
+            "Return plain text only, preserving important labels and values. "
+            "No markdown, no JSON."
+        )
+
+        content_type = image_content_type or "image/png"
+        content_parts: list[dict] = [
+            {
+                "type": "text",
+                "text": (
+                    f"Transcribe all visible text from this document image. file_name={file_name or 'unknown'}\n"
+                    "Keep line breaks where possible."
+                ),
+            },
+            {
+                "type": "image_url",
+                "image_url": {"url": self._build_data_url(image_bytes, content_type)},
+            },
+        ]
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": content_parts},
+            ],
+            "temperature": 0.0,
+        }
+
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+
+        async with httpx.AsyncClient(base_url=self.base_url, timeout=60.0, headers=headers) as client:
+            response = await client.post("/chat/completions", json=payload)
+            response.raise_for_status()
+            data = response.json()
+
+        return str(data["choices"][0]["message"]["content"] or "").strip()
 
     def _build_prompt(
         self,

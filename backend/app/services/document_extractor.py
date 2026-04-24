@@ -20,12 +20,26 @@ class DocumentExtractor:
     async def extract(self, file_name: str, mime_type: str | None, content: bytes) -> DocumentExtractionResponse:
         notes: list[str] = []
         text = self._extract_text(file_name=file_name, mime_type=mime_type, content=content)
+
+        is_image = bool(mime_type and mime_type.startswith("image/"))
+        if is_image and self.has_zai_key:
+            try:
+                ocr_text = await self.zai_client.extract_document_text(
+                    image_bytes=content,
+                    image_content_type=mime_type,
+                    file_name=file_name,
+                )
+                if ocr_text:
+                    text = ocr_text
+                    notes.append("OCR text extracted from image via Z.ai.")
+            except Exception as error:
+                notes.append(f"Z.ai OCR fallback used: {error.__class__.__name__}.")
+
         regex_data = self._extract_with_regex(text)
 
         used_zai = False
         result = regex_data
 
-        is_image = bool(mime_type and mime_type.startswith("image/"))
         if self.has_zai_key:
             try:
                 zai_raw = await self.zai_client.extract_document_fields(
@@ -90,32 +104,123 @@ class DocumentExtractor:
         return ""
 
     def _extract_with_regex(self, text: str) -> DocumentExtractedData:
-        content = (text or "").replace("\n", " ")
-        hs_match = re.search(r"\b\d{4}(?:\.\d{2}(?:\.\d{2,4})?)?\b", content)
-        goods_value_match = re.search(
-            r"(?:goods\s*value|declared\s*value|invoice\s*value|total\s*value)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)",
-            content,
-            flags=re.IGNORECASE,
+        raw_text = text or ""
+        content = raw_text.replace("\n", " ")
+
+        hs_match = re.search(
+            r"(?im)\b(?:hs(?:\s*code)?|tariff(?:\s*code)?)\s*[:=#-]?\s*([0-9]{4}(?:\.[0-9]{2}(?:\.[0-9]{2,4})?)?)\b",
+            raw_text,
         )
-        weight_match = re.search(r"(?:weight|gross\s*weight|net\s*weight)\s*[:=]?\s*([0-9]+(?:\.\d+)?)\s*kg", content, flags=re.IGNORECASE)
+        if not hs_match:
+            hs_match = re.search(r"\b[0-9]{4}\.[0-9]{2}(?:\.[0-9]{2,4})?\b", raw_text)
+
+        goods_value_match = re.search(
+            r"(?im)^\s*(?:goods\s*value|declared\s*value|invoice\s*value|total\s*value|quantity|qty)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)\s*$",
+            raw_text,
+        )
+        if not goods_value_match:
+            goods_value_match = re.search(
+                r"(?:goods\s*value|declared\s*value|invoice\s*value|total\s*value|quantity|qty)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)",
+                content,
+                flags=re.IGNORECASE,
+            )
+
+        weight_match = re.search(
+            r"(?im)^\s*(?:weight|gross\s*weight|net\s*weight)\s*[:=]?\s*([0-9]+(?:\.\d+)?)\s*(?:kg|kgs)\b",
+            raw_text,
+        )
+        if not weight_match:
+            weight_match = re.search(
+                r"(?:weight|gross\s*weight|net\s*weight)\s*[:=]?\s*([0-9]+(?:\.\d+)?)\s*(?:kg|kgs)\b",
+                content,
+                flags=re.IGNORECASE,
+            )
+
         incoterm_match = re.search(r"\b(EXW|FCA|FOB|CFR|CIF|CPT|CIP|DPU|DAP|DDP)\b", content, flags=re.IGNORECASE)
-        destination_match = re.search(r"(?:destination|ship\s*to|consignee\s*country)\s*[:=]\s*([A-Za-z ]{2,60})", content, flags=re.IGNORECASE)
-        product_match = re.search(r"(?:product|item\s*description|goods)\s*[:=]\s*([A-Za-z0-9 .,'\-()]{3,120})", content, flags=re.IGNORECASE)
+
+        destination_match = re.search(
+            r"(?im)^\s*(?:destination(?:\s*country)?|ship\s*to|consignee\s*country|to)\s*[:=-]\s*([A-Za-z][A-Za-z ]{1,60})\s*$",
+            raw_text,
+        )
+        if not destination_match:
+            destination_match = re.search(
+                r"(?:destination(?:\s*country)?|ship\s*to|consignee\s*country)\s*[:=-]\s*([A-Za-z][A-Za-z ]{1,60})",
+                content,
+                flags=re.IGNORECASE,
+            )
+
+        product_match = re.search(
+            r"(?im)^\s*(?:product\s*name|product|item\s*description|goods\s*description|goods)\s*[:=]\s*([^\n]{2,120})\s*$",
+            raw_text,
+        )
+        if not product_match:
+            product_match = re.search(
+                r"(?:product\s*name|product|item\s*description|goods\s*description|goods)\s*[:=]\s*([A-Za-z0-9 .,'\-()]{3,120})",
+                content,
+                flags=re.IGNORECASE,
+            )
+
+        origin_region = self._infer_origin_region(raw_text)
 
         return DocumentExtractedData(
             product_name=product_match.group(1).strip() if product_match else None,
             hs_code=hs_match.group(0) if hs_match else None,
             destination_country=destination_match.group(1).strip() if destination_match else None,
+            origin_region=origin_region,
             weight_kg=float(weight_match.group(1)) if weight_match else None,
             declared_value=float(goods_value_match.group(1).replace(",", "")) if goods_value_match else None,
             incoterm=incoterm_match.group(1).upper() if incoterm_match else None,
         )
+
+    def _infer_origin_region(self, content: str):
+        lowered = (content or "").lower()
+
+        # Prefer explicit East Malaysia markers first.
+        east_markers = (
+            "east malaysia",
+            "sabah",
+            "sarawak",
+            "kuching",
+            "kota kinabalu",
+            "bintulu",
+            "miri",
+        )
+        if any(marker in lowered for marker in east_markers):
+            return "east"
+
+        west_markers = (
+            "west malaysia",
+            "peninsular malaysia",
+            "selangor",
+            "kuala lumpur",
+            "johor",
+            "penang",
+            "malacca",
+            "melaka",
+            "perak",
+            "kedah",
+            "kelantan",
+            "terengganu",
+            "pahang",
+            "negeri sembilan",
+            "perlis",
+        )
+        if any(marker in lowered for marker in west_markers):
+            return "west"
+
+        # If document says origin from Malaysia without east-state markers,
+        # default to west to match existing rate-card baseline.
+        if "origin" in lowered and "malaysia" in lowered:
+            return "west"
+
+        return None
 
     def _merge_data(self, base: DocumentExtractedData, overlay: DocumentExtractedData) -> DocumentExtractedData:
         return DocumentExtractedData(
             product_name=overlay.product_name or base.product_name,
             hs_code=overlay.hs_code or base.hs_code,
             destination_country=overlay.destination_country or base.destination_country,
+            origin_region=overlay.origin_region or base.origin_region,
             weight_kg=overlay.weight_kg if overlay.weight_kg is not None else base.weight_kg,
             declared_value=overlay.declared_value if overlay.declared_value is not None else base.declared_value,
             incoterm=overlay.incoterm or base.incoterm,
@@ -141,6 +246,14 @@ def parse_document_fields_json(content: str) -> DocumentExtractedData:
             return None
         return float(value)
 
+    def _num_any(keys: list[str]) -> float | None:
+        for key in keys:
+            value = data.get(key)
+            if value is None or value == "":
+                continue
+            return float(value)
+        return None
+
     def _txt(key: str) -> str | None:
         value = data.get(key)
         if value is None:
@@ -152,7 +265,8 @@ def parse_document_fields_json(content: str) -> DocumentExtractedData:
         product_name=_txt("product_name"),
         hs_code=_txt("hs_code"),
         destination_country=_txt("destination_country"),
+        origin_region=_txt("origin_region"),
         weight_kg=_num("weight_kg"),
-        declared_value=_num("declared_value"),
+        declared_value=_num_any(["declared_value", "quantity", "qty"]),
         incoterm=_txt("incoterm"),
     )

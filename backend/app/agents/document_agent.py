@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from app.core.config import Settings
 from app.schemas.documents import CostContext, DocumentGenerationRequest, DocumentGenerationResponse, DocumentItem
-from app.schemas.cost import TransportMode
+from app.schemas.cost import OriginRegion, TransportMode
 
 
 class DocumentAgent:
@@ -69,6 +69,7 @@ class DocumentAgent:
             cost_context=CostContext(
                 product_name=payload.product_name,
                 destination_country=payload.destination_country,
+                origin_region=OriginRegion.west,
                 transport_mode=payload.transport_mode,
                 declared_value=declared_value,
                 weight_kg=weight_kg,

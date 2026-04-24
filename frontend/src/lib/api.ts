@@ -32,6 +32,8 @@ function resolveApiBaseUrl(): string {
 
 const API_BASE_URL = resolveApiBaseUrl();
 
+export type OriginRegion = "west" | "east";
+
 export type CarriedDocument = {
   id: string;
   label: string;
@@ -50,6 +52,7 @@ export type DocumentItem = {
 export type CostContext = {
   product_name: string;
   destination_country: string;
+  origin_region: OriginRegion;
   transport_mode: "air" | "sea" | "flight" | "ship";
   declared_value: number;
   weight_kg: number;
@@ -98,6 +101,7 @@ export type DocumentGenerationRequest = {
 export type CostQuoteRequest = {
   product_name: string;
   destination_country: string;
+  origin_region: OriginRegion;
   transport_mode: "air" | "sea" | "flight" | "ship";
   declared_value: number;
   weight_kg: number;
@@ -116,9 +120,12 @@ export type CostQuoteRequest = {
 export type CostQuoteResponse = {
   product_name: string;
   destination_country: string;
+  origin_region: OriginRegion;
   transport_mode: string;
   currency: string;
   billable_weight_kg: number;
+  shipping_rate_band: "document" | "parcel" | "sea_formula";
+  shipping_rate_weight_kg: number;
   shipping_fee: number;
   insurance_fee: number;
   customs_duty: number;
@@ -138,6 +145,7 @@ export type DocumentExtractedData = {
   product_name?: string | null;
   hs_code?: string | null;
   destination_country?: string | null;
+  origin_region?: OriginRegion | null;
   weight_kg?: number | null;
   declared_value?: number | null;
   incoterm?: string | null;
@@ -150,6 +158,12 @@ export type DocumentExtractionResponse = {
   extracted_text_preview?: string | null;
   data: DocumentExtractedData;
   notes: string[];
+};
+
+export type DocumentExtractionAndQuoteResponse = {
+  extraction: DocumentExtractionResponse;
+  normalized_quote_request: CostQuoteRequest;
+  quote: CostQuoteResponse;
 };
 
 export type BackendScanStatus = "green" | "conditional" | "restricted" | "review";
@@ -194,8 +208,34 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   });
 
   if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(detail || `Request failed with status ${response.status}`);
+    const rawText = await response.text();
+    let parsedMessage: string | null = null;
+
+    try {
+      const parsed = JSON.parse(rawText) as {
+        detail?: string | Array<{ loc?: Array<string | number>; msg?: string }>;
+      };
+
+      if (typeof parsed.detail === "string" && parsed.detail.trim()) {
+        parsedMessage = parsed.detail.trim();
+      }
+
+      if (!parsedMessage && Array.isArray(parsed.detail) && parsed.detail.length > 0) {
+        const first = parsed.detail[0];
+        const field = first.loc?.[first.loc.length - 1];
+        const msg = first.msg || "Invalid request payload.";
+        const prefix = field ? `${String(field)}: ` : "";
+        parsedMessage = `${prefix}${msg}`;
+      }
+    } catch {
+      // Fall back to plain text when body is not JSON.
+    }
+
+    if (parsedMessage) {
+      throw new Error(parsedMessage);
+    }
+
+    throw new Error(rawText || `Request failed with status ${response.status}`);
   }
 
   return response.json() as Promise<T>;
@@ -231,6 +271,46 @@ export async function extractDocumentFields(file: File, documentLabel?: string):
   }
 
   return response.json() as Promise<DocumentExtractionResponse>;
+}
+
+export async function extractAndQuoteDocument(
+  file: File,
+  options?: {
+    documentLabel?: string;
+    transportMode?: "air" | "sea" | "flight" | "ship";
+    currency?: string;
+    packageCount?: number;
+    destinationCountry?: string;
+    productName?: string;
+    originRegion?: OriginRegion;
+    weightKg?: number;
+    declaredValue?: number;
+  }
+): Promise<DocumentExtractionAndQuoteResponse> {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  if (options?.documentLabel) formData.append("document_label", options.documentLabel);
+  if (options?.transportMode) formData.append("transport_mode", options.transportMode);
+  if (options?.currency) formData.append("currency", options.currency);
+  if (options?.packageCount != null) formData.append("package_count", String(options.packageCount));
+  if (options?.destinationCountry) formData.append("destination_country", options.destinationCountry);
+  if (options?.productName) formData.append("product_name", options.productName);
+  if (options?.originRegion) formData.append("origin_region", options.originRegion);
+  if (options?.weightKg != null) formData.append("weight_kg", String(options.weightKg));
+  if (options?.declaredValue != null) formData.append("declared_value", String(options.declaredValue));
+
+  const response = await fetch(`${API_BASE_URL}/documents/extract-and-quote`, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(detail || `Request failed with status ${response.status}`);
+  }
+
+  return response.json() as Promise<DocumentExtractionAndQuoteResponse>;
 }
 
 export async function scanProduct(payload: {

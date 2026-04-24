@@ -3,6 +3,11 @@ from enum import Enum
 from pydantic import BaseModel, Field
 
 
+class OriginRegion(str, Enum):
+    west = "west"
+    east = "east"
+
+
 class TransportMode(str, Enum):
     air = "air"
     sea = "sea"
@@ -13,6 +18,7 @@ class TransportMode(str, Enum):
 class CostQuoteRequest(BaseModel):
     product_name: str = Field(min_length=1, max_length=200)
     destination_country: str = Field(min_length=1, max_length=80)
+    origin_region: OriginRegion = OriginRegion.west
     transport_mode: TransportMode = TransportMode.air
     declared_value: float = Field(ge=0)
     weight_kg: float = Field(gt=0)
@@ -31,9 +37,12 @@ class CostQuoteRequest(BaseModel):
 class CostQuoteResponse(BaseModel):
     product_name: str
     destination_country: str
+    origin_region: OriginRegion
     transport_mode: str
     currency: str
     billable_weight_kg: float
+    shipping_rate_band: str
+    shipping_rate_weight_kg: float
     shipping_fee: float
     insurance_fee: float
     customs_duty: float

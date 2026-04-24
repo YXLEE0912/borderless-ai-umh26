@@ -35,6 +35,9 @@ async def extract_document_fields(
     extractor = DocumentExtractor(
         zai_client=request.app.state.scanner.zai_client,
         has_zai_key=bool(settings.z_ai_api_key),
+        google_cloud_api_key=settings.google_cloud_api_key,
+        openai_api_key=settings.openai_api_key,
+        openai_model=settings.openai_model,
     )
     response = await extractor.extract(
         file_name=file.filename or (document_label or "uploaded-document"),
@@ -67,6 +70,9 @@ async def extract_and_quote_document(
     extractor = DocumentExtractor(
         zai_client=request.app.state.scanner.zai_client,
         has_zai_key=bool(settings.z_ai_api_key),
+        google_cloud_api_key=settings.google_cloud_api_key,
+        openai_api_key=settings.openai_api_key,
+        openai_model=settings.openai_model,
     )
     extraction = await extractor.extract(
         file_name=file.filename or (document_label or "uploaded-document"),

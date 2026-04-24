@@ -282,19 +282,43 @@ const normalizeExtractedDocumentData = (data: ExtractedDocumentDataLike) => {
     "volumetric weight",
     "cargo_weight",
     "cargo weight",
+    "gross wt",
+    "net wt",
+    "chargeable wt",
+    "billable wt",
+    "package wt",
+    "grossweight",
+    "netweight",
+    "chargeableweight",
+    "billableweight",
+    "package weight",
+    "package_weight",
+    "item weight",
+    "item_weight",
+    "weight kg",
   ]);
   const quantity = pickFirstNumber(data, [
     "quantity",
     "qty",
     "total_qty",
     "total qty",
+    "total quantity",
     "item_qty",
     "item qty",
+    "item quantity",
     "pcs",
     "pieces",
     "units",
+    "unit",
     "cartons",
     "boxes",
+    "packages",
+    "package",
+    "packs",
+    "pack",
+    "count",
+    "nos",
+    "no",
   ]);
   const goodsValue = pickFirstNumber(data, [
     "declared_value",
@@ -309,6 +333,7 @@ const normalizeExtractedDocumentData = (data: ExtractedDocumentDataLike) => {
     "amount",
     "total_value",
     "total value",
+    "total price",
     "item_value",
     "item value",
     "merchandise value",
@@ -325,6 +350,7 @@ const normalizeExtractedDocumentData = (data: ExtractedDocumentDataLike) => {
     "item price",
     "rate",
     "cost per unit",
+    "price",
   ]);
   const incoterm = pickFirstText(data, ["incoterm", "incoterms", "delivery term", "delivery_term"]);
 
@@ -339,6 +365,41 @@ const normalizeExtractedDocumentData = (data: ExtractedDocumentDataLike) => {
     goodsValue: goodsValue ?? undefined,
     unitPrice: unitPrice ?? undefined,
     incoterm: incoterm || undefined,
+  };
+};
+
+const deriveShipmentInsight = (
+  next: ShipmentInsight,
+  fallback?: ShipmentInsight,
+): ShipmentInsight => {
+  const quantity = next.quantity && next.quantity > 0 ? next.quantity : fallback?.quantity;
+  const unitPrice = next.unitPrice && next.unitPrice > 0 ? next.unitPrice : fallback?.unitPrice;
+  const goodsValue = next.goodsValue && next.goodsValue > 0 ? next.goodsValue : fallback?.goodsValue;
+
+  let resolvedUnitPrice = unitPrice;
+  let resolvedGoodsValue = goodsValue;
+
+  if (resolvedUnitPrice == null && resolvedGoodsValue != null && quantity != null && quantity > 0) {
+    resolvedUnitPrice = Number((resolvedGoodsValue / quantity).toFixed(2));
+  }
+
+  if (resolvedGoodsValue == null && resolvedUnitPrice != null && quantity != null && quantity > 0) {
+    resolvedGoodsValue = Number((resolvedUnitPrice * quantity).toFixed(2));
+  }
+
+  if (resolvedUnitPrice != null && quantity != null && quantity > 0 && resolvedGoodsValue != null) {
+    const expectedGoodsValue = Number((resolvedUnitPrice * quantity).toFixed(2));
+    if (Math.abs(expectedGoodsValue - resolvedGoodsValue) > 0.01) {
+      resolvedGoodsValue = expectedGoodsValue;
+    }
+  }
+
+  return {
+    ...fallback,
+    ...next,
+    quantity,
+    unitPrice: resolvedUnitPrice,
+    goodsValue: resolvedGoodsValue,
   };
 };
 
@@ -937,9 +998,10 @@ const Logistics = () => {
     {
       label: "Shipping Fee",
       value: quote.shipping_fee,
+      // The backend can return a sea_formula band, while the UI helper expects sea_lcl.
       note: formatShippingRateLabel({
         originRegion: quote.origin_region,
-        rateBand: quote.shipping_rate_band,
+        rateBand: quote.shipping_rate_band === "sea_formula" ? "sea_lcl" : quote.shipping_rate_band,
         rateWeightKg: quote.shipping_rate_weight_kg,
         shippingFee: quote.shipping_fee,
       }),
@@ -1001,40 +1063,41 @@ const Logistics = () => {
         extracted = {};
       }
     }
-    setInsight((prev) => ({
-      product: extracted.product || prev.product,
-      hsCode: extracted.hsCode || prev.hsCode,
-      destinationCountry: extracted.destinationCountry || prev.destinationCountry,
-      destinationAddress: extracted.destinationAddress || prev.destinationAddress,
-      originRegion: extracted.originRegion || prev.originRegion,
-      quantity: extracted.quantity ?? prev.quantity,
-      weightKg: extracted.weightKg ?? prev.weightKg,
-      goodsValue: extracted.goodsValue ?? prev.goodsValue,
-      unitPrice: extracted.unitPrice ?? prev.unitPrice,
-      incoterm: extracted.incoterm || prev.incoterm,
-    }));
+    const derivedInsight = deriveShipmentInsight(
+      {
+        product: extracted.product || undefined,
+        hsCode: extracted.hsCode || undefined,
+        destinationCountry: extracted.destinationCountry || undefined,
+        destinationAddress: extracted.destinationAddress || undefined,
+        originRegion: extracted.originRegion || undefined,
+        quantity: extracted.quantity ?? undefined,
+        weightKg: extracted.weightKg ?? undefined,
+        goodsValue: extracted.goodsValue ?? undefined,
+        unitPrice: extracted.unitPrice ?? undefined,
+        incoterm: extracted.incoterm || undefined,
+      },
+      insight,
+    );
+
+    setInsight((prev) => deriveShipmentInsight(derivedInsight, prev));
     if (extracted.originRegion) {
       setOriginRegion(extracted.originRegion);
     }
-    if (extracted.quantity != null && extracted.quantity > 0) {
-      setQuantity(extracted.quantity);
+    if (derivedInsight.quantity != null && derivedInsight.quantity > 0) {
+      setQuantity(derivedInsight.quantity);
     }
-    if (extracted.unitPrice != null && extracted.unitPrice > 0) {
-      setUnitPrice(extracted.unitPrice);
-    } else if (extracted.quantity != null && extracted.quantity > 0 && extracted.goodsValue != null && extracted.goodsValue > 0) {
-      setUnitPrice(Number((extracted.goodsValue / extracted.quantity).toFixed(2)));
+    if (derivedInsight.unitPrice != null && derivedInsight.unitPrice > 0) {
+      setUnitPrice(derivedInsight.unitPrice);
     }
-    const productName = (extracted.product || "").trim();
-    const extractedUnitPrice = extracted.unitPrice && extracted.unitPrice > 0
-      ? extracted.unitPrice
-      : (extracted.quantity && extracted.quantity > 0 && extracted.goodsValue && extracted.goodsValue > 0
-        ? Number((extracted.goodsValue / extracted.quantity).toFixed(2))
-        : 0);
+    const productName = (derivedInsight.product || extracted.product || "").trim();
+    const extractedUnitPrice = derivedInsight.unitPrice && derivedInsight.unitPrice > 0
+      ? derivedInsight.unitPrice
+      : 0;
     setProductLineItems((prev) => {
       const itemKey = productName || "Uploaded Product";
       const previous = prev[itemKey];
-      const nextQuantity = (previous?.quantity || 0) + (extracted.quantity && extracted.quantity > 0 ? extracted.quantity : 0);
-      const nextWeight = (previous?.weightKg || 0) + (extracted.weightKg && extracted.weightKg > 0 ? extracted.weightKg : 0);
+      const nextQuantity = (previous?.quantity || 0) + (derivedInsight.quantity && derivedInsight.quantity > 0 ? derivedInsight.quantity : 0);
+      const nextWeight = (previous?.weightKg || 0) + (derivedInsight.weightKg && derivedInsight.weightKg > 0 ? derivedInsight.weightKg : 0);
       return {
         ...prev,
         [itemKey]: {
@@ -1094,11 +1157,7 @@ const Logistics = () => {
       )
     );
     if (previewDoc?.id === docId) {
-        Object.keys(next).forEach((key) => {
-          if (next[key].docId === docId) {
-            delete next[key];
-          }
-        });
+      setPreviewDoc(null);
     }
     setProductLineItems((prev) => {
       if (remainingUploadedCount <= 0) {
@@ -1119,17 +1178,24 @@ const Logistics = () => {
         setQuoteError(null);
       }
       const next = { ...prev };
+      delete next[docId];
+      return next;
+    });
+  };
 
-    const handleRefreshDocuments = () => {
-      docsRef.current.forEach((doc) => {
-        if (doc.fileUrl) {
-          URL.revokeObjectURL(doc.fileUrl);
-        }
-      });
-      setDocs((prev) => prev.map((doc) => {
+  const handleRefreshDocuments = () => {
+    docsRef.current.forEach((doc) => {
+      if (doc.fileUrl) {
+        URL.revokeObjectURL(doc.fileUrl);
+      }
+    });
+
+    setDocs((prev) =>
+      prev.map((doc) => {
         if (doc.status === "carried") {
           return doc;
         }
+
         return {
           ...doc,
           status: "missing",
@@ -1139,30 +1205,28 @@ const Logistics = () => {
           fileUrl: undefined,
           mimeType: undefined,
         };
-      }));
-      setInsight({
-        product: routeState.product || undefined,
-        hsCode: routeState.hsCode || undefined,
-        destinationCountry: routeState.destinationCountry || undefined,
-        destinationAddress: undefined,
-        originRegion: routeState.originRegion || undefined,
-        quantity: undefined,
-        weightKg: costContext?.weight_kg,
-        goodsValue: undefined,
-        unitPrice: undefined,
-        incoterm: undefined,
-      });
-      setQuantity(0);
-      setUnitPrice(0);
-      setProductLineItems({});
-      setQuote(null);
-      setQuoteError(null);
-      setPreviewDoc(null);
-      setShipmentId(createShipmentId());
-    };
-      delete next[docId];
-      return next;
+      })
+    );
+
+    setInsight({
+      product: routeState.product || undefined,
+      hsCode: routeState.hsCode || undefined,
+      destinationCountry: routeState.destinationCountry || undefined,
+      destinationAddress: undefined,
+      originRegion: routeState.originRegion || undefined,
+      quantity: undefined,
+      weightKg: costContext?.weight_kg,
+      goodsValue: undefined,
+      unitPrice: undefined,
+      incoterm: undefined,
     });
+    setQuantity(0);
+    setUnitPrice(0);
+    setProductLineItems({});
+    setQuote(null);
+    setQuoteError(null);
+    setPreviewDoc(null);
+    setShipmentId(createShipmentId());
   };
 
   const handleOpenPreview = (doc: ShipDoc) => {
@@ -1199,7 +1263,7 @@ const Logistics = () => {
     setTimeout(() => {
       setGeneratingSummary(false);
       persistHistoryEntry(buildHistoryEntry());
-      generateAndDownloadPDF(docs, shipping, costRows, currency, {
+      generateAndDownloadPDF(docs, shipping, costRows, currency, shipmentId, {
         product: summaryProduct,
         hsCode: summaryHsCode,
         destinationCountry: summaryDestinationCountry,
@@ -1209,7 +1273,7 @@ const Logistics = () => {
         unitPrice,
         goodsCost: goodsDeclaredValue,
         incoterm: summaryIncoterm,
-      }, shipmentId);
+      });
       setShipmentId(createShipmentId());
     }, 800);
   };
@@ -1221,6 +1285,7 @@ const Logistics = () => {
       shipping,
       costRows,
       currency,
+      shipmentId,
       {
         product: summaryProduct,
         hsCode: summaryHsCode,
@@ -1232,7 +1297,6 @@ const Logistics = () => {
         goodsCost: goodsDeclaredValue,
         incoterm: summaryIncoterm,
       },
-      shipmentId,
       true,
     );
   };

@@ -19,6 +19,16 @@ class Settings(BaseSettings):
     z_ai_timeout_seconds: float = 90.0
     z_ai_max_retries: int = 2
 
+    google_cloud_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("GOOGLE_CLOUD_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"),
+    )
+    openai_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("OPENAI_API_KEY"),
+    )
+    openai_model: str = "gpt-4o-mini"
+
     gemini_api_key: str | None = None
     gemini_api_key_backup: str | None = None
     gemini_vision_model: str = "gemini-2.5-flash"

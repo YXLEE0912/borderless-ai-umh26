@@ -1,0 +1,51 @@
+Here's a simple README for your friend:
+
+markdown
+# 🇲🇾 Malaysian Trade Policy Scraper
+
+Scrape Malaysian government trade websites. Then ask AI questions about the policies.
+
+---
+
+## 📂 Files
+
+| File | Description |
+|------|-------------|
+| `CustomsExportReader.py` | Main one - scrapes 5 websites, uses Gemini AI (ilmu.ai as backup) |
+| `CustomsExportReader2.py` | Simple one - scrapes 1 website, Gemini only |
+| `.env` | Put your API keys here |
+
+---
+
+## 🚀 How To Run
+
+### 1. Install packages
+```bash
+pip install beautifulsoup4 requests python-dotenv google-genai
+2. Put API keys in .env file
+text
+GEMINI_API_KEY=your_gemini_key_here
+Z_AI_API_KEY=your_ilmu_key_here
+3. Run
+bash
+python CustomsExportReader.py
+4. Ask questions!
+text
+❓ You: What documents needed for K2 export form?
+🤖 Expert: Based on Customs Export Procedure, you need...
+⚠️ Problems?
+Problem	Solution
+Gemini 503 error	Wait 1-2 minutes, retry. Or use CustomsExportReader2.py
+ModuleNotFoundError	Run pip install command above
+Z_AI_API_KEY not found	Check your .env file exists
+Some websites fail	Malaysian gov sites block bots. Can't fix.
+🌐 Websites Scraped
+Customs eZ-HS Portal (tariff codes)
+
+MITI RCEP FTA (trade agreement)
+
+Customs Export Procedure (how to export)
+
+Federal Legislation (customs law)
+
+WCO Harmonized System (HS codes)

@@ -7,6 +7,7 @@ import httpx
 
 from app.core.config import Settings
 from app.schemas.scan import ScanResult, ScanStatus
+from app.services.gemini_vision_client import GeminiVisionClient
 from app.services.rules_engine import apply_rules
 from app.services.rules_repository import RulesRepository
 from app.services.zai_client import ZAIClient
@@ -20,6 +21,13 @@ class ProductScanner:
             api_key=settings.z_ai_api_key,
             base_url=settings.z_ai_base_url,
             model=settings.z_ai_model,
+            timeout_seconds=settings.z_ai_timeout_seconds,
+            max_retries=settings.z_ai_max_retries,
+        )
+        gemini_keys = [key for key in [settings.gemini_api_key, settings.gemini_api_key_backup] if key]
+        self.gemini_vision_client = GeminiVisionClient(
+            api_keys=gemini_keys,
+            model=settings.gemini_vision_model,
         )
         self.rules_repository = RulesRepository(settings=settings, supabase_client=supabase_client)
 
@@ -33,11 +41,32 @@ class ProductScanner:
         merchant_name: str | None = None,
         merchant_ssm: str | None = None,
     ) -> ScanResult:
+        # Step 1: Analyze image with Gemini vision if provided
+        gemini_vision_summary = None
+        if image_bytes and self.gemini_vision_client.enabled:
+            try:
+                vision_result = await self.gemini_vision_client.analyze_image(
+                    prompt=prompt,
+                    image_bytes=image_bytes,
+                    image_content_type=image_content_type,
+                )
+                gemini_vision_summary = vision_result
+            except Exception as error:
+                # Gemini vision failure is not blocking; we can still use ILMU with original prompt
+                pass
+
+        # Step 2: Build enhanced prompt with Gemini vision results
+        enhanced_prompt = _build_enhanced_prompt(
+            original_prompt=prompt,
+            gemini_vision_summary=gemini_vision_summary,
+        )
+
+        # Step 3: Analyze with ILMU using enhanced prompt
         base_result: ScanResult
         if self.settings.z_ai_api_key:
             try:
                 raw_result = await self.zai_client.analyze(
-                    prompt=prompt,
+                    prompt=enhanced_prompt,
                     destination_country=destination_country,
                     image_bytes=image_bytes,
                     image_content_type=image_content_type,
@@ -48,25 +77,25 @@ class ProductScanner:
                 parsed = _parse_model_result(raw_result)
                 base_result = _normalize_result(parsed, source="z-ai")
             except httpx.HTTPStatusError as error:
-                base_result = _fallback_result(prompt=prompt)
                 response_text = (error.response.text or "").strip()
                 if response_text:
                     response_text = response_text[:240]
-                base_result.extraction_notes.append(
-                    f"Z.ai request failed: {error.response.status_code} {response_text or 'no response body'}"
+                base_result = _fallback_result(
+                    prompt=enhanced_prompt,
+                    reason=f"ILMU reasoning service unavailable (HTTP {error.response.status_code}).",
                 )
             except Exception as error:
-                base_result = _fallback_result(prompt=prompt)
-                base_result.extraction_notes.append(
-                    f"Z.ai request failed, fallback mode used: {error.__class__.__name__}"
+                base_result = _fallback_result(
+                    prompt=enhanced_prompt,
+                    reason=f"ILMU reasoning service unavailable ({error.__class__.__name__}).",
                 )
         else:
-            base_result = _fallback_result(prompt=prompt)
+            base_result = _fallback_result(prompt=enhanced_prompt, reason="Z.ai API key is not configured.")
 
         rules_bundle = await self.rules_repository.get_active_rules_bundle()
         result = apply_rules(
             result=base_result,
-            prompt=prompt,
+            prompt=enhanced_prompt,
             destination_country=destination_country,
             merchant_ssm=merchant_ssm,
             rules_bundle=rules_bundle,
@@ -74,7 +103,7 @@ class ProductScanner:
 
         follow_up_questions = _build_follow_up_questions(
             result=result,
-            prompt=prompt,
+            prompt=enhanced_prompt,
             destination_country=destination_country,
             image_bytes=image_bytes,
             merchant_name=merchant_name,
@@ -91,6 +120,60 @@ class ProductScanner:
                 }
             )
         return result
+
+
+def _build_enhanced_prompt(original_prompt: str, gemini_vision_summary: dict | None) -> str:
+    """Merge Gemini vision analysis results with the original prompt for ILMU processing.
+    
+    Args:
+        original_prompt: The user-provided text prompt
+        gemini_vision_summary: Dictionary with vision analysis results from Gemini (product_name,
+                               materials_detected, visual_summary, etc.)
+    
+    Returns:
+        Enhanced prompt string that includes both original context and vision analysis
+    """
+    if not gemini_vision_summary:
+        return original_prompt
+
+    # Extract key information from Gemini vision results
+    product_name = (gemini_vision_summary.get("product_name") or "").strip()
+    materials = gemini_vision_summary.get("materials_detected") or []
+    visual_summary = (gemini_vision_summary.get("visual_summary") or "").strip()
+    brand = (gemini_vision_summary.get("brand_detected") or "").strip()
+    packaging_text = gemini_vision_summary.get("packaging_text") or []
+
+    # Build vision context block
+    vision_context_parts = []
+    
+    if product_name:
+        vision_context_parts.append(f"Product name (from image): {product_name}")
+    
+    if materials:
+        materials_str = ", ".join([str(m).strip() for m in materials if str(m).strip()])
+        if materials_str:
+            vision_context_parts.append(f"Materials detected: {materials_str}")
+    
+    if brand:
+        vision_context_parts.append(f"Brand/Manufacturer: {brand}")
+    
+    if packaging_text:
+        packaging_str = " | ".join([str(p).strip() for p in packaging_text if str(p).strip()])
+        if packaging_str:
+            vision_context_parts.append(f"Packaging text: {packaging_str}")
+    
+    if visual_summary:
+        vision_context_parts.append(f"Visual description: {visual_summary}")
+
+    # If no vision data was extracted, return original prompt
+    if not vision_context_parts:
+        return original_prompt
+
+    # Combine original prompt with vision analysis
+    vision_block = "\n".join(vision_context_parts)
+    enhanced = f"{original_prompt}\n\n[Image Analysis from Gemini Vision]\n{vision_block}"
+    
+    return enhanced
 
 
 def _parse_model_result(raw_result: str) -> dict:
@@ -141,7 +224,7 @@ def _normalize_result(data: dict, source: str) -> ScanResult:
     )
 
 
-def _fallback_result(prompt: str) -> ScanResult:
+def _fallback_result(prompt: str, reason: str | None = None) -> ScanResult:
     text = prompt.lower()
     restricted_keywords = ["weapon", "gun", "explosive", "drug", "narcotic", "poison"]
     conditional_keywords = ["animal", "plant", "food", "wildlife", "meat", "seed", "fish"]
@@ -181,7 +264,7 @@ def _fallback_result(prompt: str) -> ScanResult:
         logistics_sea_flow=[],
         logistics_sea_required_documents=[],
         rule_hits=[],
-        extraction_notes=["Fallback rule-based result used because Z.ai API key is not configured."],
+        extraction_notes=[reason or "Fallback rule-based result used because AI analysis is unavailable."],
         decision_steps=[],
         follow_up_questions=[],
         source="fallback",

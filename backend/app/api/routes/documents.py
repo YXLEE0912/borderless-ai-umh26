@@ -36,6 +36,8 @@ async def extract_document_fields(
         zai_client=request.app.state.scanner.zai_client,
         has_zai_key=bool(settings.z_ai_api_key),
         google_cloud_api_key=settings.google_cloud_api_key,
+        gemini_api_keys=[key for key in [settings.gemini_api_key, settings.gemini_api_key_backup] if key],
+        gemini_model=settings.gemini_vision_model,
         openai_api_key=settings.openai_api_key,
         openai_model=settings.openai_model,
     )
@@ -71,6 +73,8 @@ async def extract_and_quote_document(
         zai_client=request.app.state.scanner.zai_client,
         has_zai_key=bool(settings.z_ai_api_key),
         google_cloud_api_key=settings.google_cloud_api_key,
+        gemini_api_keys=[key for key in [settings.gemini_api_key, settings.gemini_api_key_backup] if key],
+        gemini_model=settings.gemini_vision_model,
         openai_api_key=settings.openai_api_key,
         openai_model=settings.openai_model,
     )

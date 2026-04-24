@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef } from "react";
 import { useLocation } from "react-router-dom";
 import TopNav from "@/components/TopNav";
-import { extractAndQuoteDocument, extractDocumentFields, quoteCosts, type CostContext, type CostQuoteResponse } from "@/lib/api";
+import { extractDocumentFields, quoteCosts, type CostContext, type CostQuoteResponse } from "@/lib/api";
 import { formatShippingRateLabel, lookupSeaShippingRate, lookupShippingRate, type OriginRegion } from "@/lib/shippingRates";
 import {
   Upload, FileText, FileCheck2, FileSpreadsheet, CheckCircle2,
@@ -425,8 +425,6 @@ const normalizeExtractedDocumentData = (data: ExtractedDocumentDataLike) => {
     "packs",
     "pack",
     "count",
-    "nos",
-    "no",
   ]) ?? (hasLineItemQuantity ? Number(lineItemQuantityTotal.toFixed(4)) : null);
   const goodsValue = pickFirstNumber(data, [
     "declared_value",
@@ -572,15 +570,85 @@ const mergeInsightByDocumentId = (
   return deriveShipmentInsight(next, previous);
 };
 
-const toDataUrl = (file: File) =>
-  new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ""));
-    reader.onerror = () => reject(reader.error || new Error("Failed to read file"));
-    reader.readAsDataURL(file);
-  });
+const compressImageForUpload = async (file: File): Promise<File> => {
+  if (!file.type.startsWith("image/") || file.size <= 3 * 1024 * 1024) {
+    return file;
+  }
+
+  try {
+    const bitmap = await createImageBitmap(file);
+    const maxDimension = 2200;
+    const scale = Math.min(1, maxDimension / Math.max(bitmap.width, bitmap.height));
+    if (scale >= 1) {
+      return file;
+    }
+
+    const width = Math.max(1, Math.round(bitmap.width * scale));
+    const height = Math.max(1, Math.round(bitmap.height * scale));
+
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+
+    const context = canvas.getContext("2d");
+    if (!context) {
+      bitmap.close();
+      return file;
+    }
+
+    context.drawImage(bitmap, 0, 0, width, height);
+    bitmap.close();
+
+    const compressedBlob = await new Promise<Blob | null>((resolve) => {
+      canvas.toBlob(resolve, file.type, 0.88);
+    });
+
+    if (!compressedBlob || compressedBlob.size >= file.size) {
+      return file;
+    }
+
+    return new File([compressedBlob], file.name, {
+      type: compressedBlob.type || file.type,
+      lastModified: file.lastModified,
+    });
+  } catch {
+    return file;
+  }
+};
 
 const getCurrencyDisplayLabel = (currency: CurrencyCode) => (currency === "CNY" ? "¥" : currency);
+
+const formatOriginRegionLabel = (originRegion?: OriginRegion) => {
+  if (originRegion === "east") return "East Malaysia";
+  if (originRegion === "west") return "West Malaysia";
+  return "";
+};
+
+const buildShipmentSummaryRows = (summary: {
+  product?: string;
+  hsCode?: string;
+  destinationCountry?: string;
+  destinationAddress?: string;
+  originRegion?: OriginRegion;
+  currency: CurrencyCode;
+  weightKg?: number;
+  goodsQuantity?: number;
+  unitPrice?: number;
+  landedCost?: number;
+  incoterm?: string;
+}) => [
+  ["Route", summary.destinationCountry ? `🇲🇾 Malaysia → ${summary.destinationCountry}` : ""],
+  ["Complete Address", summary.destinationAddress || ""],
+  ["Product", summary.product || ""],
+  ["HS Code", summary.hsCode || ""],
+  ["Net Weight", summary.weightKg != null ? `${summary.weightKg} kg` : ""],
+  ["Origin Region", formatOriginRegionLabel(summary.originRegion)],
+  ["Currency", summary.currency],
+  ["Goods Quantity", summary.goodsQuantity != null ? formatGoodsValue(summary.goodsQuantity) : ""],
+  ["Unit Price", summary.unitPrice != null ? formatCurrency(convertFromBaseCurrency(summary.unitPrice, summary.currency), summary.currency) : ""],
+  ["Landed Cost", summary.landedCost != null ? formatCurrency(summary.landedCost, summary.currency) : ""],
+  ["Incoterm", summary.incoterm || ""],
+].filter(([, value]) => Boolean(value)) as Array<[string, string]>;
 
 const createShipmentId = () => {
   const datePart = new Date().toISOString().slice(0, 10).replace(/-/g, "");
@@ -600,9 +668,12 @@ const generateAndDownloadPDF = (
     hsCode?: string;
     destinationCountry?: string;
     destinationAddress?: string;
+    originRegion?: OriginRegion;
+    currency: CurrencyCode;
     weightKg?: number;
     goodsQuantity?: number;
     unitPrice?: number;
+    landedCost?: number;
     goodsCost?: number;
     incoterm?: string;
   },
@@ -808,19 +879,14 @@ const generateAndDownloadPDF = (
   <div class="section-label">Trade Overview</div>
   <hr/>
   <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-bottom:22px;">
-    ${[
-      ["Route", summary.destinationCountry ? `🇲🇾 Malaysia → 🇨🇳 ${summary.destinationCountry}` : ""],
-      ["Complete Address", summary.destinationAddress || ""],
-      ["Product", summary.product || ""],
-      ["HS Code", summary.hsCode || ""],
+    ${buildShipmentSummaryRows({
+      ...summary,
+      currency,
+      landedCost: summary.landedCost,
+    }).concat([
       ["Shipping Code", shippingCode],
       ["Shipping Method", shippingLabel],
-      ["Incoterm", summary.incoterm || ""],
-      ["Goods Quantity", summary.goodsQuantity != null ? formatGoodsValue(summary.goodsQuantity) : ""],
-      ["Unit Price", summary.unitPrice != null ? formatCurrency(convertFromBaseCurrency(summary.unitPrice, currency), currency) : ""],
-      ["Net Weight", summary.weightKg != null ? `${summary.weightKg} kg` : ""],
-      ["Currency", getCurrencyDisplayLabel(currency)],
-    ].filter(([, v]) => Boolean(v)).map(([k, v]) => `
+    ]).map(([k, v]) => `
       <div style="border:1px solid #E5E7EB;border-radius:12px;padding:12px 14px;background:#fff;">
         <div style="font-size:10px;font-weight:700;color:#6B7280;letter-spacing:0.5px;text-transform:uppercase;margin-bottom:4px;">${k}</div>
         <div style="font-size:13px;font-weight:700;color:#111827;line-height:1.35;">${v}</div>
@@ -832,14 +898,11 @@ const generateAndDownloadPDF = (
   <div class="section-label">Shipment Details</div>
   <hr/>
   <div style="display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap;">
-    ${[
-      ["Route", summary.destinationCountry ? `🇲🇾 Malaysia → 🇨🇳 ${summary.destinationCountry}` : ""],
-      ["Complete Address", summary.destinationAddress || ""],
-      ["Product", summary.product || ""],
-      ["HS Code", summary.hsCode || ""],
-      ["Incoterm", summary.incoterm || ""],
-      ["Net Weight", summary.weightKg != null ? `${summary.weightKg} kg` : ""],
-    ].filter(([, v]) => Boolean(v)).map(([k, v]) => `
+    ${buildShipmentSummaryRows({
+      ...summary,
+      currency,
+      landedCost: summary.landedCost,
+    }).map(([k, v]) => `
       <div style="background:#F3F4F6;border-radius:6px;padding:10px 14px;flex:1;min-width:160px;">
         <div style="font-size:10px;color:#6B7280;margin-bottom:3px;">${k}</div>
         <div style="font-size:13px;font-weight:700;color:#111827;">${v}</div>
@@ -1243,54 +1306,50 @@ const Logistics = () => {
   ];
 
   const handleFileSelect = async (docId: string, file: File) => {
-    const previewUrl = file.type.startsWith("image/") ? await toDataUrl(file) : undefined;
-    const fileUrl = URL.createObjectURL(file);
+    const uploadFile = await compressImageForUpload(file);
+    const fileUrl = URL.createObjectURL(uploadFile);
+    const previewUrl = uploadFile.type.startsWith("image/") ? fileUrl : undefined;
     const selectedDoc = docs.find((d) => d.id === docId);
-    let extracted: ShipmentInsight = {};
-    let pipelineQuote: CostQuoteResponse | null = null;
-    try {
-      const pipeline = await extractAndQuoteDocument(file, {
-        documentLabel: selectedDoc?.title || docId,
-        transportMode: shipping,
-        currency,
-        originRegion,
-        destinationCountry: summaryDestinationCountry || summaryDestinationAddress || undefined,
-        destinationAddress: summaryDestinationAddress || undefined,
-        productName: summaryProduct || undefined,
-        // Do not send zero defaults. Let backend use extracted document values when available.
-        weightKg: summaryWeight && summaryWeight > 0 ? summaryWeight : undefined,
-        declaredValue: goodsDeclaredValue > 0 ? goodsDeclaredValue : undefined,
-      });
 
-      const extraction = pipeline.extraction;
-      const normalized = pipeline.normalized_quote_request;
-      pipelineQuote = pipeline.quote;
+    setDocs((prev) =>
+      prev.map((d) =>
+        d.id === docId
+          ? (() => {
+              if (d.fileUrl) {
+                URL.revokeObjectURL(d.fileUrl);
+              }
+              return {
+                ...d,
+                status: "uploading",
+                fileName: file.name,
+                size: `${(uploadFile.size / 1024).toFixed(0)} KB`,
+                previewUrl,
+                fileUrl,
+                mimeType: uploadFile.type,
+              };
+            })()
+          : d
+      )
+    );
+
+    let extracted: ShipmentInsight = {};
+    try {
+      const extraction = await extractDocumentFields(uploadFile, selectedDoc?.title || docId);
       const extractedFromDocument = normalizeExtractedDocumentData(extraction.data as ExtractedDocumentDataLike);
       const weightBearing = isWeightBearingDocument(selectedDoc?.title || selectedDoc?.subtitle || docId, extraction.extracted_text_preview || undefined);
-      const normalizedWeight = normalized.weight_kg > 0 ? normalized.weight_kg : undefined;
       extracted = {
         ...extractedFromDocument,
-        product: normalized.product_name || extractedFromDocument.product,
-        destinationCountry: normalized.destination_country || extractedFromDocument.destinationCountry,
-        originRegion: normalized.origin_region || extractedFromDocument.originRegion,
+        product: extractedFromDocument.product,
+        destinationCountry: extractedFromDocument.destinationCountry,
+        originRegion: extractedFromDocument.originRegion,
         // Prefer direct extraction (e.g., "Net Weight") over normalized fallback defaults.
-        weightKg: weightBearing ? (extractedFromDocument.weightKg ?? normalizedWeight) : extractedFromDocument.weightKg,
-        goodsValue: normalized.declared_value ?? extractedFromDocument.goodsValue,
+        weightKg: weightBearing ? extractedFromDocument.weightKg : undefined,
+        goodsValue: extractedFromDocument.goodsValue,
       };
-      setCurrency(normalizeCurrency(normalized.currency));
-    } catch (pipelineError) {
-      setQuoteError(pipelineError instanceof Error ? pipelineError.message : "Failed to extract document data.");
-      try {
-        const extraction = await extractDocumentFields(file, selectedDoc?.title || docId);
-        const extractedFromDocument = normalizeExtractedDocumentData(extraction.data as ExtractedDocumentDataLike);
-        const weightBearing = isWeightBearingDocument(selectedDoc?.title || selectedDoc?.subtitle || docId, extraction.extracted_text_preview || undefined);
-        extracted = {
-          ...extractedFromDocument,
-          weightKg: weightBearing ? extractedFromDocument.weightKg : undefined,
-        };
-      } catch {
-        extracted = {};
-      }
+      setQuoteError(null);
+    } catch (extractError) {
+      setQuoteError(extractError instanceof Error ? extractError.message : "Failed to extract document data.");
+      extracted = {};
     }
     const extractedSnapshot: ShipmentInsight = {
       product: extracted.product || undefined,
@@ -1337,36 +1396,11 @@ const Logistics = () => {
         },
       };
     });
-    if (pipelineQuote) {
-      setQuote(pipelineQuote);
-      setQuoteError(null);
-    }
-
     setDocs((prev) =>
       prev.map((d) =>
-        d.id === docId
-          ? (() => {
-              if (d.fileUrl) {
-                URL.revokeObjectURL(d.fileUrl);
-              }
-              return {
-                ...d,
-                status: "uploading",
-                fileName: file.name,
-                size: `${(file.size / 1024).toFixed(0)} KB`,
-                previewUrl,
-                fileUrl,
-                mimeType: file.type,
-              };
-            })()
-          : d
+        d.id === docId ? { ...d, status: "uploaded" } : d
       )
     );
-    setTimeout(() => {
-      setDocs((prev) =>
-        prev.map((d) => (d.id === docId ? { ...d, status: "uploaded" } : d))
-      );
-    }, 1800);
   };
 
   const handleRemove = (docId: string) => {
@@ -1496,9 +1530,12 @@ const Logistics = () => {
         hsCode: summaryHsCode,
         destinationCountry: summaryDestinationCountry,
         destinationAddress: summaryDestinationAddress,
+        originRegion,
+        currency,
         weightKg: summaryWeight,
         goodsQuantity,
         unitPrice: effectiveUnitPrice,
+        landedCost: displayTotal,
         goodsCost: goodsDeclaredValue,
         incoterm: summaryIncoterm,
       });
@@ -1519,9 +1556,12 @@ const Logistics = () => {
         hsCode: summaryHsCode,
         destinationCountry: summaryDestinationCountry,
         destinationAddress: summaryDestinationAddress,
+        originRegion,
+        currency,
         weightKg: summaryWeight,
         goodsQuantity,
         unitPrice: effectiveUnitPrice,
+        landedCost: displayTotal,
         goodsCost: goodsDeclaredValue,
         incoterm: summaryIncoterm,
       },
@@ -2303,20 +2343,19 @@ const Logistics = () => {
             <div className="rounded-2xl border border-border bg-card p-5 shadow-soft-sm">
               <h3 className="text-sm font-semibold text-foreground">Shipment summary</h3>
               <div className="mt-4 space-y-3 text-[13px]">
-                {[
-                  ["Route", summaryDestinationCountry ? `🇲🇾 Malaysia → 🇨🇳 ${summaryDestinationCountry}` : ""],
-                  ["Complete Address", summaryDestinationAddress],
-                  ["Product",  summaryProduct],
-                  ["HS Code",  summaryHsCode],
-                  ["Net Weight",   summaryWeight != null ? `${summaryWeight} kg` : ""],
-                  ["Origin Region", originRegion === "east" ? "East Malaysia" : "West Malaysia"],
-                  ["Currency", currency],
-                  ["Goods Quantity", displayGoodsQuantity > 0 ? formatGoodsValue(displayGoodsQuantity) : ""],
-                  ["Unit Price", formatCurrency(convertFromBaseCurrency(effectiveUnitPrice, currency), currency)],
-                  
-                  ["Landed Cost", formatCurrency(displayTotal, currency)],
-                  ["Incoterm", summaryIncoterm],
-                ].filter(([, v]) => Boolean(v)).map(([k, v]) => (
+                {buildShipmentSummaryRows({
+                  product: summaryProduct,
+                  hsCode: summaryHsCode,
+                  destinationCountry: summaryDestinationCountry,
+                  destinationAddress: summaryDestinationAddress,
+                  originRegion,
+                  currency,
+                  weightKg: summaryWeight,
+                  goodsQuantity: displayGoodsQuantity,
+                  unitPrice: effectiveUnitPrice,
+                  landedCost: displayTotal,
+                  incoterm: summaryIncoterm,
+                }).map(([k, v]) => (
                   <div key={k} className="flex items-center justify-between">
                     <span className="text-muted-foreground">{k}</span>
                     <span className="font-medium text-foreground text-right">{v}</span>

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
@@ -96,8 +97,6 @@ def _looks_like_quantity_label(value: str) -> bool:
         "package",
         "packages",
         "pcs",
-        "nos",
-        "no",
         "count",
         "totalcount",
         "shippingunits",
@@ -110,12 +109,16 @@ class DocumentExtractor:
         zai_client: ZAIClient,
         has_zai_key: bool,
         google_cloud_api_key: str | None = None,
+        gemini_api_keys: list[str] | None = None,
+        gemini_model: str = "gemini-2.5-flash",
         openai_api_key: str | None = None,
         openai_model: str = "gpt-4o-mini",
     ):
         self.zai_client = zai_client
         self.has_zai_key = has_zai_key
         self.google_cloud_api_key = google_cloud_api_key
+        self.gemini_api_keys = [key for key in (gemini_api_keys or []) if key]
+        self.gemini_model = gemini_model
         self.openai_api_key = openai_api_key
         self.openai_model = openai_model
 
@@ -124,7 +127,9 @@ class DocumentExtractor:
         text = self._extract_text(file_name=file_name, mime_type=mime_type, content=content)
 
         is_image = bool(mime_type and mime_type.startswith("image/"))
-        if is_image and self.google_cloud_api_key:
+        # Avoid duplicate OCR round-trips when Z.ai image extraction is available.
+        should_use_google_ocr = is_image and self.google_cloud_api_key and not self.has_zai_key
+        if should_use_google_ocr:
             try:
                 ocr_text = await self._extract_text_with_google_vision(
                     image_bytes=content,
@@ -142,15 +147,6 @@ class DocumentExtractor:
         used_zai = False
         result = regex_data
 
-        if self.openai_api_key:
-            try:
-                openai_raw = await self._extract_with_openai(text_context=text, file_name=file_name)
-                openai_data = parse_document_fields_json(openai_raw)
-                result = normalize_document_data(self._merge_data(regex_data, openai_data), notes=notes)
-                notes.append("Document fields extracted with OpenAI.")
-            except Exception as error:
-                notes.append(f"OpenAI extraction fallback used: {error.__class__.__name__}.")
-
         if self.has_zai_key:
             try:
                 zai_raw = await self.zai_client.extract_document_fields(
@@ -160,11 +156,39 @@ class DocumentExtractor:
                     file_name=file_name,
                 )
                 zai_data = parse_document_fields_json(zai_raw)
-                result = normalize_document_data(self._merge_data(regex_data, zai_data), notes=notes)
+                result = normalize_document_data(self._merge_data(result, zai_data), notes=notes)
                 used_zai = True
                 notes.append("Document fields extracted with Z.ai.")
             except Exception as error:
                 notes.append(f"Z.ai extraction fallback used: {error.__class__.__name__}.")
+
+                if is_image and self.gemini_api_keys:
+                    try:
+                        gemini_payload = await self._extract_with_gemini_image(
+                            image_bytes=content,
+                            image_content_type=mime_type,
+                            file_name=file_name,
+                        )
+                        gemini_ocr_text = str(gemini_payload.get("ocr_text") or "").strip()
+                        if gemini_ocr_text:
+                            text = gemini_ocr_text
+                            notes.append("OCR text extracted from image via Gemini fallback.")
+
+                        gemini_data = parse_document_fields_json(json.dumps(gemini_payload))
+                        result = normalize_document_data(self._merge_data(result, gemini_data), notes=notes)
+                        notes.append("Document fields extracted with Gemini fallback.")
+                    except Exception as gemini_error:
+                        notes.append(f"Gemini extraction fallback used: {gemini_error.__class__.__name__}.")
+
+        # Run OpenAI only when Z.ai is unavailable or failed.
+        if self.openai_api_key and not used_zai:
+            try:
+                openai_raw = await self._extract_with_openai(text_context=text, file_name=file_name)
+                openai_data = parse_document_fields_json(openai_raw)
+                result = normalize_document_data(self._merge_data(result, openai_data), notes=notes)
+                notes.append("Document fields extracted with OpenAI.")
+            except Exception as error:
+                notes.append(f"OpenAI extraction fallback used: {error.__class__.__name__}.")
 
         preview = text[:500] if text else None
         if not preview:
@@ -252,6 +276,65 @@ class DocumentExtractor:
 
         return text
 
+    async def _extract_with_gemini_image(
+        self,
+        *,
+        image_bytes: bytes,
+        image_content_type: str | None,
+        file_name: str | None,
+    ) -> dict:
+        import google.generativeai as genai
+
+        if not self.gemini_api_keys:
+            raise RuntimeError("Gemini API keys are not configured")
+
+        instruction = (
+            "You are an OCR and field extraction assistant for shipping documents. "
+            "Return JSON only with keys: "
+            "item, product_name, hs_code, destination_country, destination_address, origin_region, "
+            "quantity, weight_kg, unit_price, total_price, incoterm, ocr_text. "
+            "origin_region must be west, east, or null. "
+            "Use null for missing values. Do not include markdown."
+        )
+
+        user_prompt = f"file_name={file_name or 'unknown'}\nExtract OCR text and fields from this document image."
+
+        last_error: Exception | None = None
+        mime_candidates = _build_gemini_mime_candidates(image_content_type)
+
+        for api_key in self.gemini_api_keys:
+            for mime_type in mime_candidates:
+                try:
+                    def _call() -> str:
+                        genai.configure(api_key=api_key)
+                        model = genai.GenerativeModel(self.gemini_model)
+                        response = model.generate_content(
+                            [
+                                instruction,
+                                user_prompt,
+                                {
+                                    "mime_type": mime_type,
+                                    "data": image_bytes,
+                                },
+                            ]
+                        )
+                        return (response.text or "").strip()
+
+                    raw = await asyncio.to_thread(_call)
+                    cleaned = re.sub(r"^```json\s*", "", raw.strip(), flags=re.IGNORECASE)
+                    cleaned = re.sub(r"\s*```$", "", cleaned)
+                    parsed = json.loads(cleaned)
+                    if isinstance(parsed, dict):
+                        return parsed
+                    raise ValueError("Gemini response is not a JSON object")
+                except Exception as error:
+                    last_error = error
+                    continue
+
+        raise RuntimeError(
+            f"Gemini image extraction failed: {last_error.__class__.__name__ if last_error else 'unknown'}"
+        )
+
     async def _extract_with_openai(self, text_context: str | None, file_name: str | None) -> str:
         system_prompt = (
             "You extract shipping and customs fields from business documents. Return valid JSON only with keys: "
@@ -298,19 +381,19 @@ class DocumentExtractor:
             hs_match = re.search(r"\b[0-9]{4}\.[0-9]{2}(?:\.[0-9]{2,4})?\b", raw_text)
 
         quantity_match = re.search(
-            r"(?im)^\s*(?:quantity|qty|total\s*qty|total\s*quantity|item\s*qty|item\s*quantity|pcs|pieces|units|unit|cartons|boxes|packages|package|packs|pack|count|nos?)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)\s*(?:pcs|pieces|units|unit|cartons|boxes|packages|package|packs|pack|count|nos?)?\s*$",
+            r"(?im)^\s*(?:quantity|qty|total\s*qty|total\s*quantity|item\s*qty|item\s*quantity|pcs|pieces|units|unit|cartons|boxes|packages|package|packs|pack|count)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)\s*(?:pcs|pieces|units|unit|cartons|boxes|packages|package|packs|pack|count)?\s*$",
             raw_text,
         )
         if not quantity_match:
             quantity_match = re.search(
-                r"(?:quantity|qty|total\s*qty|total\s*quantity|item\s*qty|item\s*quantity|pcs|pieces|units|unit|cartons|boxes|packages|package|packs|pack|count|nos?)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)",
+                r"(?:quantity|qty|total\s*qty|total\s*quantity|item\s*qty|item\s*quantity|pcs|pieces|units|unit|cartons|boxes|packages|package|packs|pack|count)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)",
                 content,
                 flags=re.IGNORECASE,
             )
 
         if not quantity_match:
             quantity_match = re.search(
-                r"(?im)^\s*([0-9][0-9,]*(?:\.\d+)?)\s*(?:pcs|pieces|units|unit|cartons|boxes|packages|package|packs|pack|count|nos?)\s*$",
+                r"(?im)^\s*([0-9][0-9,]*(?:\.\d+)?)\s*(?:pcs|pieces|units|unit|cartons|boxes|packages|package|packs|pack|count)\s*$",
                 raw_text,
             )
 
@@ -649,3 +732,21 @@ def parse_document_fields_json(content: str) -> DocumentExtractedData:
         unit_price=unit_price_value,
         incoterm=_txt_any(["incoterm", "incoterms"]),
     )
+
+
+def _build_gemini_mime_candidates(image_content_type: str | None) -> list[str]:
+    normalized = (image_content_type or "").strip().lower()
+    if normalized == "image/jpg":
+        normalized = "image/jpeg"
+
+    allowed = {"image/png", "image/jpeg", "image/webp"}
+    candidates: list[str] = []
+
+    if normalized in allowed:
+        candidates.append(normalized)
+
+    for fallback in ["image/jpeg", "image/png", "image/webp"]:
+        if fallback not in candidates:
+            candidates.append(fallback)
+
+    return candidates

@@ -11,19 +11,28 @@ import {
 } from "lucide-react";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// API CLIENT  (inline so you don't need a separate file import)
-// Change BASE_URL to match your env variable setup
+// API CLIENT
 // ─────────────────────────────────────────────────────────────────────────────
-const BASE_URL =
-  (typeof import.meta !== "undefined"
-    ? (import.meta as any).env?.VITE_API_URL
-    : undefined) ||
-  (typeof process !== "undefined"
-    ? (process.env as any).NEXT_PUBLIC_API_URL
-    : undefined) ||
-  "http://localhost:8000";
 
-async function apiRequest(method: string, path: string, body?: unknown, params?: Record<string, string>) {
+const BASE_URL = (() => {
+  const fromVite =
+    typeof import.meta !== "undefined"
+      ? (import.meta as any).env?.VITE_API_URL
+      : undefined;
+  const fromNext =
+    typeof process !== "undefined"
+      ? (process.env as any).NEXT_PUBLIC_API_URL
+      : undefined;
+  const raw = fromVite || fromNext || "";   // "" = use Vite proxy (recommended)
+  return raw.replace(/\/$/, "");
+})();
+
+async function apiRequest(
+  method: string,
+  path: string,
+  body?: unknown,
+  params?: Record<string, string>
+) {
   let url = `${BASE_URL}${path}`;
   if (params) url += `?${new URLSearchParams(params)}`;
   const res = await fetch(url, {
@@ -38,20 +47,49 @@ async function apiRequest(method: string, path: string, body?: unknown, params?:
   return res.json();
 }
 
+// Multipart upload — used for SSM cert, product photos, etc.
+async function apiUpload(
+  path: string,
+  file: File,
+  params?: Record<string, string>
+) {
+  let url = `${BASE_URL}${path}`;
+  if (params) url += `?${new URLSearchParams(params)}`;
+  const form = new FormData();
+  form.append("file", file);
+  // Do NOT set Content-Type — browser sets multipart boundary automatically
+  const res = await fetch(url, { method: "POST", body: form });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
 const api = {
   createSession: () => apiRequest("POST", "/sessions"),
+  // Backend returns { reply: "..." } — NOT { response: "..." }
   chat: (sid: string, message: string) =>
     apiRequest("POST", "/chat", { session_id: sid, message, stream: false }),
-  verifyEntity: (sid: string, data: { company_name: string; registration_number: string; director_nric?: string }) =>
-    apiRequest("POST", "/entity/verify", { session_id: sid, ...data }),
+  verifyEntity: (
+    sid: string,
+    data: { company_name: string; registration_number: string; director_nric?: string }
+  ) => apiRequest("POST", "/entity/verify", { session_id: sid, ...data }),
+  uploadSsm: (sid: string, file: File) =>
+    apiUpload("/entity/upload-ssm", file, { session_id: sid }),
   addConsignee: (sid: string, data: object) =>
     apiRequest("POST", "/consignee/add", { session_id: sid, ...data }),
   classifyHSCode: (sid: string, data: object) =>
     apiRequest("POST", "/classification/hs-code", { session_id: sid, ...data }),
+  uploadProduct: (sid: string, file: File) =>
+    apiUpload("/classification/upload-product", file, { session_id: sid }),
   checkPermits: (sid: string, data: object) =>
     apiRequest("POST", "/permits/check", { session_id: sid, ...data }),
   setupDigitalAccess: (sid: string, company_brn: string) =>
-    apiRequest("POST", "/digital-access/setup", null, { session_id: sid, company_brn }),
+    apiRequest("POST", "/digital-access/setup", null, {
+      session_id: sid,
+      company_brn,
+    }),
   calculateValuation: (sid: string, data: object) =>
     apiRequest("POST", "/valuation/calculate", { session_id: sid, ...data }),
   setupLogistics: (sid: string, data: object) =>
@@ -77,15 +115,15 @@ type Step = {
 };
 
 const STEPS: Step[] = [
-  { id: 0, title: "Entity Verification",   subtitle: "SSM & BRN Registration",  icon: Building2 },
-  { id: 1, title: "Consignee Details",      subtitle: "Buyer & Importer Info",    icon: UserSquare2 },
-  { id: 2, title: "Classification",         subtitle: "HS Code & Duty Lookup",    icon: FileSearch },
-  { id: 3, title: "Special Permits",        subtitle: "SIRIM / Halal / MITI",     icon: Award },
-  { id: 4, title: "Digital Access",         subtitle: "MyCIEDS & Dagang Net",     icon: KeyRound },
-  { id: 5, title: "Financial Valuation",    subtitle: "FOB, Freight & FX",        icon: Coins },
-  { id: 6, title: "Logistics & Metrics",    subtitle: "Mode, Vessel, Weight",     icon: PackageSearch },
-  { id: 7, title: "Trade Docs & Signatory", subtitle: "Invoice, B/L, Declaration",icon: FileText },
-  { id: 8, title: "Customs Submission",     subtitle: "K2 Form Preview",          icon: FileCheck2 },
+  { id: 0, title: "Entity Verification",    subtitle: "SSM & BRN Registration",   icon: Building2 },
+  { id: 1, title: "Consignee Details",       subtitle: "Buyer & Importer Info",     icon: UserSquare2 },
+  { id: 2, title: "Classification",          subtitle: "HS Code & Duty Lookup",     icon: FileSearch },
+  { id: 3, title: "Special Permits",         subtitle: "SIRIM / Halal / MITI",      icon: Award },
+  { id: 4, title: "Digital Access",          subtitle: "MyCIEDS & Dagang Net",      icon: KeyRound },
+  { id: 5, title: "Financial Valuation",     subtitle: "FOB, Freight & FX",         icon: Coins },
+  { id: 6, title: "Logistics & Metrics",     subtitle: "Mode, Vessel, Weight",      icon: PackageSearch },
+  { id: 7, title: "Trade Docs & Signatory",  subtitle: "Invoice, B/L, Declaration", icon: FileText },
+  { id: 8, title: "Customs Submission",      subtitle: "K2 Form Preview",           icon: FileCheck2 },
 ];
 
 type ChecklistItem = { label: string; status: ChecklistStatus };
@@ -103,39 +141,60 @@ type ExportDoc = {
 
 const EXPORT_DOCS: ExportDoc[] = [
   {
-    id: "commercial-invoice", label: "Commercial Invoice",
+    id: "commercial-invoice",
+    label: "Commercial Invoice",
     sublabel: "Buyer & seller details, FOB value, FX",
-    icon: FileText, requiredSteps: [0, 1, 2, 5], coreRequired: true,
+    icon: FileText,
+    requiredSteps: [0, 1, 2, 5],
+    coreRequired: true,
   },
   {
-    id: "packing-list", label: "Packing List",
+    id: "packing-list",
+    label: "Packing List",
     sublabel: "Item weights, dimensions & quantities",
-    icon: FileSpreadsheet, requiredSteps: [0, 1, 2, 6], coreRequired: true,
+    icon: FileSpreadsheet,
+    requiredSteps: [0, 1, 2, 6],
+    coreRequired: true,
   },
   {
-    id: "bol", label: "Bill of Lading / Air Waybill",
+    id: "bol",
+    label: "Bill of Lading / Air Waybill",
     sublabel: "Carrier, vessel & routing information",
-    icon: Ship, requiredSteps: [0, 1, 2, 6, 7], coreRequired: true,
+    icon: Ship,
+    requiredSteps: [0, 1, 2, 6, 7],
+    coreRequired: true,
   },
   {
-    id: "k2", label: "K2 Declaration Form",
+    id: "k2",
+    label: "K2 Declaration Form",
     sublabel: "Customs export declaration (signed)",
-    icon: ClipboardList, requiredSteps: [0, 1, 2, 3, 4, 5, 6, 7], coreRequired: true,
+    icon: ClipboardList,
+    requiredSteps: [0, 1, 2, 3, 4, 5, 6, 7],
+    coreRequired: true,
   },
   {
-    id: "coo", label: "Certificate of Origin",
+    id: "coo",
+    label: "Certificate of Origin",
     sublabel: "ATIGA / FTA Form D",
-    icon: Stamp, requiredSteps: [0, 1, 2, 3], conditionalKey: "needsCoo",
+    icon: Stamp,
+    requiredSteps: [0, 1, 2, 3],
+    conditionalKey: "needsCoo",
   },
   {
-    id: "sirim", label: "SIRIM Certificate",
+    id: "sirim",
+    label: "SIRIM Certificate",
     sublabel: "Standards & quality compliance",
-    icon: ShieldCheck, requiredSteps: [0, 2, 3], conditionalKey: "needsSirim",
+    icon: ShieldCheck,
+    requiredSteps: [0, 2, 3],
+    conditionalKey: "needsSirim",
   },
   {
-    id: "halal", label: "Halal Certificate",
+    id: "halal",
+    label: "Halal Certificate",
     sublabel: "JAKIM-recognised certification",
-    icon: Leaf, requiredSteps: [0, 2, 3, 4], conditionalKey: "needsHalal",
+    icon: Leaf,
+    requiredSteps: [0, 2, 3, 4],
+    conditionalKey: "needsHalal",
   },
 ];
 
@@ -154,27 +213,55 @@ const docStatus = (doc: ExportDoc, completed: Set<number>): DocStatus => {
   return "locked";
 };
 
-type ActionButton = { label: string; icon: React.ElementType; intent: "primary" | "ghost"; action: string };
+type ActionButton = {
+  label: string;
+  icon: React.ElementType;
+  intent: "primary" | "ghost";
+  action: string;
+};
+
+// Map of which actions expect a file upload and which endpoint to call
+const UPLOAD_ACTION_MAP: Record<string, { accept: string; endpoint: string }> = {
+  "upload-ssm":     { accept: ".pdf,.jpg,.jpeg,.png", endpoint: "/entity/upload-ssm" },
+  "upload-product": { accept: ".pdf,.jpg,.jpeg,.png", endpoint: "/classification/upload-product" },
+};
 
 type Message =
   | { id: string; role: "user"; kind: "text"; content: string }
   | { id: string; role: "user"; kind: "upload"; content: string; fileName: string }
   | { id: string; role: "assistant"; kind: "processing"; content: string }
   | { id: string; role: "assistant"; kind: "text"; content: string }
-  | { id: string; role: "assistant"; kind: "checklist"; content: string; items: ChecklistItem[]; actions?: ActionButton[] }
+  | {
+      id: string;
+      role: "assistant";
+      kind: "checklist";
+      content: string;
+      items: ChecklistItem[];
+      actions?: ActionButton[];
+    }
   | { id: string; role: "assistant"; kind: "blocked"; content: string }
-  | { id: string; role: "assistant"; kind: "reference"; content: string; refTitle: string; refUrl: string };
+  | {
+      id: string;
+      role: "assistant";
+      kind: "reference";
+      content: string;
+      refTitle: string;
+      refUrl: string;
+    };
 
 const genId = () => Math.random().toString(36).slice(2);
 
 // ─────────────────────────────────────────────────────────────────────────────
-// STEP FLOW  (UI script — same as original, unchanged)
+// STEP FLOW
 // ─────────────────────────────────────────────────────────────────────────────
 const STEP_FLOW: Record<number, { intro: Message; onComplete: Message }> = {
   0: {
     intro: {
-      id: "i0", role: "assistant", kind: "checklist",
-      content: "To verify your entity, I need confirmation against SSM (Suruhanjaya Syarikat Malaysia). Upload your business registration so I can map dependencies.",
+      id: "i0",
+      role: "assistant",
+      kind: "checklist",
+      content:
+        "To verify your entity, I need confirmation against SSM (Suruhanjaya Syarikat Malaysia). Upload your business registration so I can map dependencies.",
       items: [
         { label: "SSM Certificate (Form 9 / Form D)", status: "REQUIRED" },
         { label: "Business Registration Number (BRN)", status: "REQUIRED" },
@@ -186,14 +273,20 @@ const STEP_FLOW: Record<number, { intro: Message; onComplete: Message }> = {
       ],
     },
     onComplete: {
-      id: "c0", role: "assistant", kind: "text",
-      content: "✅ Entity verified. SSM No. 202301045678-A linked to RMCD records. Now collecting your overseas buyer details.",
+      id: "c0",
+      role: "assistant",
+      kind: "text",
+      content:
+        "✅ Entity verified. SSM No. 202301045678-A linked to RMCD records. Now collecting your overseas buyer details.",
     },
   },
   1: {
     intro: {
-      id: "i1", role: "assistant", kind: "checklist",
-      content: "Every export declaration needs the consignee on record. I'll pre-fill the Commercial Invoice and B/L from this.",
+      id: "i1",
+      role: "assistant",
+      kind: "checklist",
+      content:
+        "Every export declaration needs the consignee on record. I'll pre-fill the Commercial Invoice and B/L from this.",
       items: [
         { label: "Consignee (Buyer) name & full address", status: "REQUIRED" },
         { label: "Importer contact (email & phone)", status: "REQUIRED" },
@@ -206,14 +299,20 @@ const STEP_FLOW: Record<number, { intro: Message; onComplete: Message }> = {
       ],
     },
     onComplete: {
-      id: "c1", role: "assistant", kind: "text",
-      content: "✅ Consignee captured: PT Sumber Rasa, Jakarta Pusat 10110, Indonesia. Tax ID 01.234.567.8-901.000. Mapping product classification next.",
+      id: "c1",
+      role: "assistant",
+      kind: "text",
+      content:
+        "✅ Consignee captured: PT Sumber Rasa, Jakarta Pusat 10110, Indonesia. Tax ID 01.234.567.8-901.000. Mapping product classification next.",
     },
   },
   2: {
     intro: {
-      id: "i2", role: "assistant", kind: "checklist",
-      content: "Now mapping your product against the WCO Harmonized System. The HS Code drives every downstream permit and duty calculation.",
+      id: "i2",
+      role: "assistant",
+      kind: "checklist",
+      content:
+        "Now mapping your product against the WCO Harmonized System. The HS Code drives every downstream permit and duty calculation.",
       items: [
         { label: "Product description & specs", status: "REQUIRED" },
         { label: "HS Code lookup (8-digit)", status: "PENDING" },
@@ -225,26 +324,38 @@ const STEP_FLOW: Record<number, { intro: Message; onComplete: Message }> = {
       ],
     },
     onComplete: {
-      id: "c2", role: "assistant", kind: "text",
-      content: "✅ Classified as HS 0902.30.10 (Black tea, fermented, in packings ≤ 3kg). Duty: 5% under ATIGA. Now checking permit dependencies.",
+      id: "c2",
+      role: "assistant",
+      kind: "text",
+      content:
+        "✅ Classified as HS 0902.30.10 (Black tea, fermented, in packings ≤ 3kg). Duty: 5% under ATIGA. Now checking permit dependencies.",
     },
   },
   3: {
     intro: {
-      id: "i3", role: "assistant", kind: "reference",
-      content: "Your HS Code triggers SIRIM compliance. Halal cert recommended for ASEAN F&B markets. MITI export licence not required at this volume.",
+      id: "i3",
+      role: "assistant",
+      kind: "reference",
+      content:
+        "Your HS Code triggers SIRIM compliance. Halal cert recommended for ASEAN F&B markets. MITI export licence not required at this volume.",
       refTitle: "SIRIM QAS — Product Certification",
       refUrl: "https://www.sirim-qas.com.my/",
     },
     onComplete: {
-      id: "c3", role: "assistant", kind: "text",
-      content: "✅ SIRIM cert validated. JAKIM Halal logo permitted. COO (Form D) required for ATIGA duty exemption. Proceeding to digital access setup.",
+      id: "c3",
+      role: "assistant",
+      kind: "text",
+      content:
+        "✅ SIRIM cert validated. JAKIM Halal logo permitted. COO (Form D) required for ATIGA duty exemption. Proceeding to digital access setup.",
     },
   },
   4: {
     intro: {
-      id: "i4", role: "assistant", kind: "checklist",
-      content: "K2 declaration must be submitted via Dagang Net. You'll need a Digital Certificate for authentication.",
+      id: "i4",
+      role: "assistant",
+      kind: "checklist",
+      content:
+        "K2 declaration must be submitted via Dagang Net. You'll need a Digital Certificate for authentication.",
       items: [
         { label: "MyCIEDS account", status: "REQUIRED" },
         { label: "Dagang Net subscription", status: "REQUIRED" },
@@ -255,14 +366,19 @@ const STEP_FLOW: Record<number, { intro: Message; onComplete: Message }> = {
       ],
     },
     onComplete: {
-      id: "c4", role: "assistant", kind: "text",
+      id: "c4",
+      role: "assistant",
+      kind: "text",
       content: "✅ Dagang Net linked. Digital Certificate active until 2027. Now valuing the shipment.",
     },
   },
   5: {
     intro: {
-      id: "i5", role: "assistant", kind: "checklist",
-      content: "RMCD requires a full valuation breakdown to assess duties. I'll convert FX automatically using Bank Negara reference rates.",
+      id: "i5",
+      role: "assistant",
+      kind: "checklist",
+      content:
+        "RMCD requires a full valuation breakdown to assess duties. I'll convert FX automatically using Bank Negara reference rates.",
       items: [
         { label: "FOB value (goods at Malaysian port)", status: "REQUIRED" },
         { label: "Insurance cost (CIF component)", status: "REQUIRED" },
@@ -275,14 +391,20 @@ const STEP_FLOW: Record<number, { intro: Message; onComplete: Message }> = {
       ],
     },
     onComplete: {
-      id: "c5", role: "assistant", kind: "text",
-      content: "✅ Valuation locked. FOB USD 1,000 · Insurance USD 25 · Freight USD 45. FX 4.72 RM/USD (BNM 22 Apr 2026). ATIGA Form D claimed — duty exemption RM 320.",
+      id: "c5",
+      role: "assistant",
+      kind: "text",
+      content:
+        "✅ Valuation locked. FOB USD 1,000 · Insurance USD 25 · Freight USD 45. FX 4.72 RM/USD (BNM 22 Apr 2026). ATIGA Form D claimed — duty exemption RM 320.",
     },
   },
   6: {
     intro: {
-      id: "i6", role: "assistant", kind: "checklist",
-      content: "Logistics specifics flow into both the K2 form and the Bill of Lading. Get this right or your shipment gets held at the port.",
+      id: "i6",
+      role: "assistant",
+      kind: "checklist",
+      content:
+        "Logistics specifics flow into both the K2 form and the Bill of Lading. Get this right or your shipment gets held at the port.",
       items: [
         { label: "Mode of Transport (Sea / Air / Rail / Road)", status: "REQUIRED" },
         { label: "Vessel name or Flight number", status: "REQUIRED" },
@@ -298,14 +420,20 @@ const STEP_FLOW: Record<number, { intro: Message; onComplete: Message }> = {
       ],
     },
     onComplete: {
-      id: "c6", role: "assistant", kind: "text",
-      content: "✅ Shipment: SEA · MV Bunga Mas 5 · ETD 02 May 2026 · Port Klang → Tanjung Priok. 480 kg / 1.2 m³ · 12 cartons on 1 EUR pallet · Container MSKU-7842150.",
+      id: "c6",
+      role: "assistant",
+      kind: "text",
+      content:
+        "✅ Shipment: SEA · MV Bunga Mas 5 · ETD 02 May 2026 · Port Klang → Tanjung Priok. 480 kg / 1.2 m³ · 12 cartons on 1 EUR pallet · Container MSKU-7842150.",
     },
   },
   7: {
     intro: {
-      id: "i7", role: "assistant", kind: "checklist",
-      content: "Generating Commercial Invoice, Packing List, and the Bill of Lading from your verified data. The K2 form needs a named signatory.",
+      id: "i7",
+      role: "assistant",
+      kind: "checklist",
+      content:
+        "Generating Commercial Invoice, Packing List, and the Bill of Lading from your verified data. The K2 form needs a named signatory.",
       items: [
         { label: "Commercial Invoice", status: "PENDING" },
         { label: "Packing List", status: "PENDING" },
@@ -320,28 +448,39 @@ const STEP_FLOW: Record<number, { intro: Message; onComplete: Message }> = {
       ],
     },
     onComplete: {
-      id: "c7", role: "assistant", kind: "text",
-      content: "✅ INV-2026-0042, PL-2026-0042, B/L MAEU-558410 generated. Signed by Aisyah Rahman (Director, NRIC 880412-14-5566). Ready for K2 submission.",
+      id: "c7",
+      role: "assistant",
+      kind: "text",
+      content:
+        "✅ INV-2026-0042, PL-2026-0042, B/L MAEU-558410 generated. Signed by Aisyah Rahman (Director, NRIC 880412-14-5566). Ready for K2 submission.",
     },
   },
   8: {
     intro: {
-      id: "i8", role: "assistant", kind: "text",
-      content: "All dependencies satisfied. K2 Customs Declaration is ready for preview and submission to RMCD via Dagang Net.",
+      id: "i8",
+      role: "assistant",
+      kind: "text",
+      content:
+        "All dependencies satisfied. K2 Customs Declaration is ready for preview and submission to RMCD via Dagang Net.",
     },
     onComplete: {
-      id: "c8", role: "assistant", kind: "text",
-      content: "🎉 K2 submitted. Reference: K2-MY-2026-118742. RMCD acknowledgement expected within 4 business hours.",
+      id: "c8",
+      role: "assistant",
+      kind: "text",
+      content:
+        "🎉 K2 submitted. Reference: K2-MY-2026-118742. RMCD acknowledgement expected within 4 business hours.",
     },
   },
 };
 
-// Permit flags become active after Step 3 result is parsed from backend
-const DEFAULT_PERMIT_FLAGS: PermitFlags = { needsSirim: false, needsHalal: false, needsCoo: false };
+const DEFAULT_PERMIT_FLAGS: PermitFlags = {
+  needsSirim: false,
+  needsHalal: false,
+  needsCoo: false,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DEMO DATA used when calling the backend for each step.
-// In production, replace these with values collected from real input forms.
+// DEMO DATA
 // ─────────────────────────────────────────────────────────────────────────────
 const DEMO = {
   entity: {
@@ -366,9 +505,7 @@ const DEMO = {
     product_type: "Black Tea / Food & Beverage",
     destination_country: "Indonesia",
   },
-  digitalAccess: {
-    company_brn: "202301045678",
-  },
+  digitalAccess: { company_brn: "202301045678" },
   valuation: {
     fob_value_myr: 4720,
     destination_country: "Indonesia",
@@ -391,35 +528,44 @@ const DEMO = {
 export default function AssistantPage() {
   const navigate = useNavigate();
 
-  // Session state — created on mount via backend
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
 
-  // Step / progress state
   const [completed, setCompleted] = useState<Set<number>>(new Set());
   const [activeStep, setActiveStep] = useState(0);
   const [permitFlags, setPermitFlags] = useState<PermitFlags>(DEFAULT_PERMIT_FLAGS);
 
-  // Chat state
   const [messages, setMessages] = useState<Message[]>([
     {
-      id: "welcome", role: "assistant", kind: "text",
-      content: "Hi — I'm your Compliance Architect. I'll guide you through every regulatory dependency in order: Entity → Consignee → HS Code → Permits → Digital Access → Valuation → Logistics → Docs & Signatory → K2. Let's start with entity verification.",
+      id: "welcome",
+      role: "assistant",
+      kind: "text",
+      content:
+        "Hi — I'm your Compliance Architect. I'll guide you through every regulatory dependency in order: Entity → Consignee → HS Code → Permits → Digital Access → Valuation → Logistics → Docs & Signatory → K2. Let's start with entity verification.",
     },
     STEP_FLOW[0].intro,
   ]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
 
-  // Doc generation state
   const [generatingId, setGeneratingId] = useState<string | null>(null);
   const [generatedIds, setGeneratedIds] = useState<Set<string>>(new Set());
 
+  // ── File upload refs ──────────────────────────────────────────────────────
+  // One hidden <input type="file"> handles all upload actions.
+  // pendingUpload tracks which action triggered it and what endpoint to use.
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const pendingUploadRef = useRef<{
+    action: string;
+    accept: string;
+    endpoint: string;
+  } | null>(null);
+
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  // ── Create session on mount ─────────────────────────────────────────────
   useEffect(() => {
-    api.createSession()
+    api
+      .createSession()
       .then((s: { session_id: string }) => setSessionId(s.session_id))
       .catch((err: Error) => setSessionError(err.message));
   }, []);
@@ -431,16 +577,19 @@ export default function AssistantPage() {
   const total = STEPS.length;
   const progress = Math.round((completed.size / total) * 100);
 
-  const docsWithStatus = EXPORT_DOCS.map((d) => ({ ...d, status: docStatus(d, completed) }));
-  const readyDocs    = docsWithStatus.filter((d) => d.status === "ready");
-  const partialDocs  = docsWithStatus.filter((d) => d.status === "partial");
-  const lockedDocs   = docsWithStatus.filter((d) => d.status === "locked");
+  const docsWithStatus = EXPORT_DOCS.map((d) => ({
+    ...d,
+    status: docStatus(d, completed),
+  }));
+  const readyDocs   = docsWithStatus.filter((d) => d.status === "ready");
+  const partialDocs = docsWithStatus.filter((d) => d.status === "partial");
+  const lockedDocs  = docsWithStatus.filter((d) => d.status === "locked");
 
   const gatingDocs      = EXPORT_DOCS.filter((d) => isGating(d, permitFlags));
   const canProceed      = gatingDocs.length > 0 && gatingDocs.every((d) => generatedIds.has(d.id));
   const gatingGenerated = gatingDocs.filter((d) => generatedIds.has(d.id)).length;
 
-  // ── UI: advance to next step (purely visual) ────────────────────────────
+  // ── Advance UI to next step ──────────────────────────────────────────────
   const advanceUI = useCallback(() => {
     setMessages((m) => {
       const next = [...m, STEP_FLOW[activeStep].onComplete];
@@ -452,152 +601,263 @@ export default function AssistantPage() {
     setActiveStep((s) => Math.min(s + 1, total - 1));
   }, [activeStep, total]);
 
-  // ── Wait until sessionId is set (polls every 100ms, max 5s) ────────────
+  // ── Wait for session ID (polls up to 5 s) ───────────────────────────────
   const waitForSession = useCallback((): Promise<string> => {
     return new Promise((resolve, reject) => {
-      // If already available, return immediately
       if (sessionId) { resolve(sessionId); return; }
       const start = Date.now();
-      const interval = setInterval(() => {
-        // Read the ref directly so we always get the latest value
-        setSessionId((current) => {
-          if (current) {
-            clearInterval(interval);
-            resolve(current);
-          } else if (Date.now() - start > 5000) {
-            clearInterval(interval);
+      const iv = setInterval(() => {
+        setSessionId((cur) => {
+          if (cur) { clearInterval(iv); resolve(cur); }
+          else if (Date.now() - start > 5000) {
+            clearInterval(iv);
             reject(new Error("Backend did not respond within 5 s. Is your server running at " + BASE_URL + "?"));
           }
-          return current;
+          return cur;
         });
       }, 100);
     });
   }, [sessionId]);
 
-  // ── Call the real backend for the current step ──────────────────────────
-  const callStepAPI = useCallback(async () => {
-    const sid = await waitForSession();
-
-    switch (activeStep) {
-      case 0:
-        await api.verifyEntity(sid, DEMO.entity);
-        break;
-      case 1:
-        await api.addConsignee(sid, DEMO.consignee);
-        break;
-      case 2:
-        await api.classifyHSCode(sid, DEMO.classification);
-        break;
-      case 3: {
-        const result = await api.checkPermits(sid, DEMO.permits);
-        // Read permit flags from backend response and update conditional docs
-        setPermitFlags({
-          needsSirim: result.sirim_required ?? false,
-          needsHalal: result.halal_required ?? false,
-          needsCoo:   (result.permits_required?.length ?? 0) > 0,
-        });
-        break;
+  // ── Call the real backend for a regular (non-upload) step ───────────────
+  const callStepAPI = useCallback(
+    async (sid: string) => {
+      switch (activeStep) {
+        case 0: await api.verifyEntity(sid, DEMO.entity); break;
+        case 1: await api.addConsignee(sid, DEMO.consignee); break;
+        case 2: await api.classifyHSCode(sid, DEMO.classification); break;
+        case 3: {
+          const result = await api.checkPermits(sid, DEMO.permits);
+          setPermitFlags({
+            needsSirim: result.sirim_required ?? false,
+            needsHalal: result.halal_required ?? false,
+            needsCoo: (result.permits_required?.length ?? 0) > 0,
+          });
+          break;
+        }
+        case 4: await api.setupDigitalAccess(sid, DEMO.digitalAccess.company_brn); break;
+        case 5: await api.calculateValuation(sid, DEMO.valuation); break;
+        case 6: await api.setupLogistics(sid, DEMO.logistics); break;
+        case 7: await api.generateDocs(sid); break;
+        case 8: await api.submitK2(sid); break;
+        default: break;
       }
-      case 4:
-        await api.setupDigitalAccess(sid, DEMO.digitalAccess.company_brn);
-        break;
-      case 5:
-        await api.calculateValuation(sid, DEMO.valuation);
-        break;
-      case 6:
-        await api.setupLogistics(sid, DEMO.logistics);
-        break;
-      case 7:
-        await api.generateDocs(sid);
-        break;
-      case 8:
-        await api.submitK2(sid);
-        break;
-      default:
-        break;
-    }
-  }, [waitForSession, activeStep]);
+    },
+    [activeStep]
+  );
+
+  // ── Shared helper: run API call, handle errors, advance UI ──────────────
+  const runStepWithFeedback = useCallback(
+    async (sid: string, apiCall: () => Promise<void>) => {
+      const processingId = genId();
+      setMessages((m) => [
+        ...m,
+        {
+          id: processingId,
+          role: "assistant",
+          kind: "processing",
+          content: "Mapping dependencies against RMCD & MITI regulations…",
+        } as Message,
+      ]);
+      setSending(true);
+      try {
+        await apiCall();
+        setMessages((m) => m.filter((x) => x.id !== processingId));
+        advanceUI();
+      } catch (err) {
+        const errText = err instanceof Error ? err.message : String(err);
+        setMessages((m) => m.filter((x) => x.id !== processingId));
+        setMessages((m) => [
+          ...m,
+          {
+            id: genId(),
+            role: "assistant",
+            kind: "text",
+            content: `⚠️ Backend error (continuing in demo mode): ${errText}`,
+          } as Message,
+        ]);
+        advanceUI();
+      } finally {
+        setSending(false);
+      }
+    },
+    [advanceUI]
+  );
+
+  // ── Handle file selected from the hidden <input type="file"> ────────────
+  const handleFileSelected = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      // Reset so the same file can be picked again later
+      e.target.value = "";
+
+      if (!file || !pendingUploadRef.current) return;
+
+      const { endpoint } = pendingUploadRef.current;
+      pendingUploadRef.current = null;
+
+      // Show the file in the chat as a user upload bubble
+      setMessages((m) => [
+        ...m,
+        {
+          id: genId(),
+          role: "user",
+          kind: "upload",
+          content: "uploaded-file",
+          fileName: file.name,
+        } as Message,
+      ]);
+
+      let sid: string;
+      try {
+        sid = await waitForSession();
+      } catch (err) {
+        const errText = err instanceof Error ? err.message : String(err);
+        setMessages((m) => [
+          ...m,
+          {
+            id: genId(),
+            role: "assistant",
+            kind: "text",
+            content: `⚠️ Session not ready: ${errText}`,
+          } as Message,
+        ]);
+        return;
+      }
+
+      await runStepWithFeedback(sid, () => apiUpload(endpoint, file, { session_id: sid }));
+    },
+    [waitForSession, runStepWithFeedback]
+  );
 
   // ── Handle action button clicks ─────────────────────────────────────────
-  const handleAction = useCallback(async (action: string, label: string) => {
-    setMessages((m) => [...m, { id: genId(), role: "user", kind: "text", content: label }]);
-    setSending(true);
+  const handleAction = useCallback(
+    async (action: string, label: string) => {
+      // --- Upload actions: open file picker, real work done in handleFileSelected ---
+      const uploadConfig = UPLOAD_ACTION_MAP[action];
+      if (uploadConfig) {
+        pendingUploadRef.current = { action, ...uploadConfig };
+        if (fileInputRef.current) {
+          fileInputRef.current.accept = uploadConfig.accept;
+          fileInputRef.current.click();
+        }
+        return;
+      }
 
-    const processingMsg: Message = {
-      id: genId(), role: "assistant", kind: "processing",
-      content: "Mapping dependencies against RMCD & MITI regulations...",
-    };
-    setMessages((m) => [...m, processingMsg]);
+      // --- All other actions: show user bubble then call step API ---
+      setMessages((m) => [
+        ...m,
+        { id: genId(), role: "user", kind: "text", content: label } as Message,
+      ]);
 
-    try {
-      await callStepAPI();
-    } catch (err) {
-      // Backend error — show warning but still advance UI so user isn't stuck
-      const errText = err instanceof Error ? err.message : String(err);
-      setMessages((m) => m.filter((x) => x.id !== processingMsg.id));
-      setMessages((m) => [...m, {
-        id: genId(), role: "assistant", kind: "text",
-        content: `⚠️ Backend error (continuing in demo mode): ${errText}`,
-      }]);
-      advanceUI();
-      setSending(false);
-      return;
-    }
+      let sid: string;
+      try {
+        sid = await waitForSession();
+      } catch (err) {
+        const errText = err instanceof Error ? err.message : String(err);
+        setMessages((m) => [
+          ...m,
+          {
+            id: genId(),
+            role: "assistant",
+            kind: "text",
+            content: `⚠️ Session not ready: ${errText}`,
+          } as Message,
+        ]);
+        return;
+      }
 
-    setMessages((m) => m.filter((x) => x.id !== processingMsg.id));
-    advanceUI();
-    setSending(false);
-  }, [callStepAPI, advanceUI]);
+      await runStepWithFeedback(sid, () => callStepAPI(sid));
+    },
+    [waitForSession, callStepAPI, runStepWithFeedback]
+  );
 
   // ── Handle free-text chat ───────────────────────────────────────────────
   const handleSend = useCallback(async () => {
     if (!input.trim() || sending) return;
     const raw = input.trim();
-    setMessages((m) => [...m, { id: genId(), role: "user", kind: "text", content: raw }]);
     setInput("");
+    setMessages((m) => [
+      ...m,
+      { id: genId(), role: "user", kind: "text", content: raw } as Message,
+    ]);
     setSending(true);
-
     try {
       const sid = await waitForSession();
       const res = await api.chat(sid, raw);
-      setMessages((m) => [...m, {
-        id: genId(), role: "assistant", kind: "text",
-        content: res.response || "No response from server.",
-      }]);
+      setMessages((m) => [
+        ...m,
+        {
+          id: genId(),
+          role: "assistant",
+          kind: "text",
+          // Backend /chat returns { reply: "..." } — NOT { response: "..." }
+          content: res.reply || res.response || "No response from server.",
+        } as Message,
+      ]);
     } catch (err) {
-      // Backend unreachable — fall back gracefully
-      setMessages((m) => [...m, {
-        id: genId(), role: "assistant", kind: "text",
-        content: "⚠️ Could not reach backend. Check that your server is running on " + BASE_URL,
-      }]);
+      const errText = err instanceof Error ? err.message : String(err);
+      setMessages((m) => [
+        ...m,
+        {
+          id: genId(),
+          role: "assistant",
+          kind: "text",
+          content: `⚠️ ${errText}. Make sure your backend is running at ${BASE_URL}`,
+        } as Message,
+      ]);
     } finally {
       setSending(false);
     }
-  }, [input, sending, waitForSession, advanceUI]);
+  }, [input, sending, waitForSession]);
+
+  // ── Paperclip: open generic file picker and send as chat attachment ──────
+  const handlePaperclip = useCallback(() => {
+    pendingUploadRef.current = {
+      action: "chat-attachment",
+      accept: ".pdf,.jpg,.jpeg,.png,.docx,.xlsx",
+      endpoint: "/documents/upload",
+    };
+    if (fileInputRef.current) {
+      fileInputRef.current.accept = ".pdf,.jpg,.jpeg,.png,.docx,.xlsx";
+      fileInputRef.current.click();
+    }
+  }, []);
 
   // ── Try jumping to a step ───────────────────────────────────────────────
-  const tryJumpTo = useCallback((stepId: number) => {
-    if (completed.has(stepId) || stepId === activeStep) {
-      setActiveStep(stepId);
-      return;
-    }
-    const blocking = STEPS.slice(0, stepId).find((s) => !completed.has(s.id));
-    if (!blocking) return;
-    setMessages((m) => [...m, {
-      id: genId(), role: "assistant", kind: "blocked",
-      content: `Action Blocked: You must complete "${blocking.title}" (${blocking.subtitle}) before accessing "${STEPS[stepId].title}".`,
-    }]);
-  }, [completed, activeStep]);
+  const tryJumpTo = useCallback(
+    (stepId: number) => {
+      if (completed.has(stepId) || stepId === activeStep) {
+        setActiveStep(stepId);
+        return;
+      }
+      const blocking = STEPS.slice(0, stepId).find((s) => !completed.has(s.id));
+      if (!blocking) return;
+      setMessages((m) => [
+        ...m,
+        {
+          id: genId(),
+          role: "assistant",
+          kind: "blocked",
+          content: `Action Blocked: You must complete "${blocking.title}" (${blocking.subtitle}) before accessing "${STEPS[stepId].title}".`,
+        } as Message,
+      ]);
+    },
+    [completed, activeStep]
+  );
 
   // ── Doc generation ──────────────────────────────────────────────────────
-  const handleGenerate = useCallback((id: string) => {
-    if (generatedIds.has(id) || generatingId) return;
-    setGeneratingId(id);
-    setTimeout(() => {
-      setGeneratingId(null);
-      setGeneratedIds((prev) => new Set([...prev, id]));
-    }, 1400);
-  }, [generatedIds, generatingId]);
+  const handleGenerate = useCallback(
+    (id: string) => {
+      if (generatedIds.has(id) || generatingId) return;
+      setGeneratingId(id);
+      setTimeout(() => {
+        setGeneratingId(null);
+        setGeneratedIds((prev) => new Set([...prev, id]));
+      }, 1400);
+    },
+    [generatedIds, generatingId]
+  );
 
   // ─────────────────────────────────────────────────────────────────────────
   // RENDER
@@ -606,12 +866,22 @@ export default function AssistantPage() {
     <div className="min-h-screen bg-secondary/30">
       <TopNav />
 
-      {/* Session error banner */}
+      {/* Hidden file input — shared by all upload actions and paperclip */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        className="hidden"
+        onChange={handleFileSelected}
+      />
+
       {sessionError && (
         <div className="mx-auto max-w-7xl px-4 pt-4">
           <div className="flex items-center gap-2 rounded-xl border border-danger/40 bg-danger-soft/50 px-4 py-3 text-sm text-danger">
             <AlertTriangle className="h-4 w-4 shrink-0" />
-            <span>Cannot connect to backend at <code>{BASE_URL}</code>: {sessionError}. Running in demo mode.</span>
+            <span>
+              Cannot connect to backend at <code>{BASE_URL}</code>: {sessionError}. Running in
+              demo mode.
+            </span>
           </div>
         </div>
       )}
@@ -619,7 +889,7 @@ export default function AssistantPage() {
       <main className="mx-auto max-w-7xl px-4 py-6">
         <div className="grid gap-6 md:grid-cols-[240px_1fr] lg:grid-cols-[240px_1fr_300px] xl:grid-cols-[260px_1fr_320px]">
 
-          {/* ── LEFT: Checklist stepper ────────────────────────────────── */}
+          {/* ── LEFT: Checklist stepper ──────────────────────────────── */}
           <aside className="lg:sticky lg:top-20 lg:self-start">
             <div className="rounded-2xl border border-border bg-gradient-card p-4 shadow-soft-md">
               <div className="mb-3 flex items-center justify-between">
@@ -630,14 +900,17 @@ export default function AssistantPage() {
               </div>
               <div className="mb-4">
                 <div className="mb-1 flex justify-between text-[10px] font-medium text-muted-foreground">
-                  <span>Progress</span><span>{progress}%</span>
+                  <span>Progress</span>
+                  <span>{progress}%</span>
                 </div>
                 <div className="h-1.5 w-full overflow-hidden rounded-full bg-secondary">
-                  <div className="h-full rounded-full bg-gradient-primary transition-base" style={{ width: `${progress}%` }} />
+                  <div
+                    className="h-full rounded-full bg-gradient-primary transition-base"
+                    style={{ width: `${progress}%` }}
+                  />
                 </div>
               </div>
 
-              {/* Session status indicator */}
               <div className="mb-3 flex items-center gap-1.5 text-[10px]">
                 {sessionId ? (
                   <>
@@ -667,31 +940,53 @@ export default function AssistantPage() {
                   return (
                     <li key={step.id} className="relative">
                       {!isLast && (
-                        <span className={`absolute left-[19px] top-9 h-[calc(100%-12px)] w-px ${isCompleted ? "bg-success/40" : "bg-border"}`} />
+                        <span
+                          className={`absolute left-[19px] top-9 h-[calc(100%-12px)] w-px ${
+                            isCompleted ? "bg-success/40" : "bg-border"
+                          }`}
+                        />
                       )}
                       <button
                         onClick={() => tryJumpTo(step.id)}
                         className={`relative flex w-full items-start gap-3 rounded-xl p-2 text-left transition-base ${
-                          isActive    ? "bg-primary-soft ring-1 ring-primary/30" :
-                          isCompleted ? "hover:bg-secondary/60" :
-                                        "opacity-60 hover:opacity-80"
+                          isActive
+                            ? "bg-primary-soft ring-1 ring-primary/30"
+                            : isCompleted
+                            ? "hover:bg-secondary/60"
+                            : "opacity-60 hover:opacity-80"
                         }`}
                       >
-                        <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${
-                          isCompleted ? "bg-success text-primary-foreground" :
-                          isActive    ? "bg-primary text-primary-foreground shadow-glow" :
-                                        "bg-secondary text-muted-foreground"
-                        }`}>
-                          {isCompleted ? <CheckCircle2 className="h-4 w-4" /> :
-                            isLocked   ? <Lock className="h-3.5 w-3.5" /> :
-                                         <Icon className="h-4 w-4" />}
+                        <div
+                          className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${
+                            isCompleted
+                              ? "bg-success text-primary-foreground"
+                              : isActive
+                              ? "bg-primary text-primary-foreground shadow-glow"
+                              : "bg-secondary text-muted-foreground"
+                          }`}
+                        >
+                          {isCompleted ? (
+                            <CheckCircle2 className="h-4 w-4" />
+                          ) : isLocked ? (
+                            <Lock className="h-3.5 w-3.5" />
+                          ) : (
+                            <Icon className="h-4 w-4" />
+                          )}
                         </div>
                         <div className="min-w-0 flex-1 pt-0.5">
                           <div className="flex items-center gap-2">
-                            <span className="text-[10px] font-semibold text-muted-foreground">STEP {step.id + 1}</span>
-                            {isActive && <span className="rounded-full bg-primary px-1.5 py-px text-[9px] font-bold text-primary-foreground">NOW</span>}
+                            <span className="text-[10px] font-semibold text-muted-foreground">
+                              STEP {step.id + 1}
+                            </span>
+                            {isActive && (
+                              <span className="rounded-full bg-primary px-1.5 py-px text-[9px] font-bold text-primary-foreground">
+                                NOW
+                              </span>
+                            )}
                           </div>
-                          <div className="text-[13px] font-semibold text-foreground">{step.title}</div>
+                          <div className="text-[13px] font-semibold text-foreground">
+                            {step.title}
+                          </div>
                           <div className="text-[11px] text-muted-foreground">{step.subtitle}</div>
                         </div>
                       </button>
@@ -703,25 +998,30 @@ export default function AssistantPage() {
               {/* Doc status summary */}
               <div className="mt-4 border-t border-border pt-3">
                 <div className="mb-2 flex items-center justify-between">
-                  <h3 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Doc Status</h3>
+                  <h3 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Doc Status
+                  </h3>
                   <span className="rounded-full bg-secondary px-2 py-0.5 text-[10px] font-semibold text-muted-foreground">
                     {generatedIds.size}/{EXPORT_DOCS.length}
                   </span>
                 </div>
 
-                {generatingId && (() => {
-                  const doc = EXPORT_DOCS.find((d) => d.id === generatingId);
-                  if (!doc) return null;
-                  return (
-                    <div className="mb-2 flex items-start gap-2 rounded-lg border border-primary/30 bg-primary-soft px-2.5 py-2">
-                      <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-primary" />
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-[11px] font-semibold text-foreground">{doc.label}</div>
-                        <div className="text-[10px] text-muted-foreground">Generating…</div>
+                {generatingId &&
+                  (() => {
+                    const doc = EXPORT_DOCS.find((d) => d.id === generatingId);
+                    if (!doc) return null;
+                    return (
+                      <div className="mb-2 flex items-start gap-2 rounded-lg border border-primary/30 bg-primary-soft px-2.5 py-2">
+                        <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-primary" />
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-[11px] font-semibold text-foreground">
+                            {doc.label}
+                          </div>
+                          <div className="text-[10px] text-muted-foreground">Generating…</div>
+                        </div>
                       </div>
-                    </div>
-                  );
-                })()}
+                    );
+                  })()}
 
                 <ul className="space-y-1.5">
                   {EXPORT_DOCS.map((doc) => {
@@ -741,14 +1041,23 @@ export default function AssistantPage() {
                         ) : (
                           <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-success" />
                         )}
-                        <span className={`flex-1 truncate ${isDone ? "text-muted-foreground line-through" : "text-foreground"}`}>
+                        <span
+                          className={`flex-1 truncate ${
+                            isDone ? "text-muted-foreground line-through" : "text-foreground"
+                          }`}
+                        >
                           {doc.label}
                         </span>
                         {gating && (
-                          <span className="shrink-0 rounded-sm bg-primary/10 px-1 py-px text-[8px] font-bold uppercase text-primary">Req</span>
+                          <span className="shrink-0 rounded-sm bg-primary/10 px-1 py-px text-[8px] font-bold uppercase text-primary">
+                            Req
+                          </span>
                         )}
                         {!isDone && !isGenerating && blockingStep && !gating && (
-                          <span className="shrink-0 rounded bg-secondary px-1.5 py-px text-[9px] font-semibold text-muted-foreground" title={`Needs: ${blockingStep.title}`}>
+                          <span
+                            className="shrink-0 rounded bg-secondary px-1.5 py-px text-[9px] font-semibold text-muted-foreground"
+                            title={`Needs: ${blockingStep.title}`}
+                          >
                             S{blockingStep.id + 1}
                           </span>
                         )}
@@ -767,8 +1076,12 @@ export default function AssistantPage() {
                     </div>
                     <div className="h-1 overflow-hidden rounded-full bg-secondary">
                       <div
-                        className={`h-full rounded-full transition-base ${canProceed ? "bg-success" : "bg-gradient-primary"}`}
-                        style={{ width: `${Math.round((gatingGenerated / gatingDocs.length) * 100)}%` }}
+                        className={`h-full rounded-full transition-base ${
+                          canProceed ? "bg-success" : "bg-gradient-primary"
+                        }`}
+                        style={{
+                          width: `${Math.round((gatingGenerated / gatingDocs.length) * 100)}%`,
+                        }}
                       />
                     </div>
                   </div>
@@ -777,7 +1090,7 @@ export default function AssistantPage() {
             </div>
           </aside>
 
-          {/* ── MIDDLE: Chat + Landed Cost ─────────────────────────────── */}
+          {/* ── MIDDLE: Chat + Landed Cost ───────────────────────────── */}
           <div className="flex flex-col gap-4 min-w-0">
             <section className="flex min-h-[70vh] flex-col rounded-2xl border border-border bg-gradient-card shadow-soft-md">
               {/* Chat header */}
@@ -793,12 +1106,15 @@ export default function AssistantPage() {
                     </div>
                   </div>
                 </div>
-                {/* Connection pill */}
-                <div className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold ${
-                  sessionId ? "bg-success-soft text-success" :
-                  sessionError ? "bg-danger-soft text-danger" :
-                  "bg-secondary text-muted-foreground"
-                }`}>
+                <div
+                  className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold ${
+                    sessionId
+                      ? "bg-success-soft text-success"
+                      : sessionError
+                      ? "bg-danger-soft text-danger"
+                      : "bg-secondary text-muted-foreground"
+                  }`}
+                >
                   {sessionId ? (
                     <><span className="h-1.5 w-1.5 rounded-full bg-success" />Live</>
                   ) : sessionError ? (
@@ -812,7 +1128,12 @@ export default function AssistantPage() {
               {/* Messages */}
               <div className="flex-1 space-y-4 overflow-y-auto px-5 py-5">
                 {messages.map((msg) => (
-                  <MessageBubble key={msg.id} msg={msg} onAction={handleAction} isSessionReady={!!sessionId} />
+                  <MessageBubble
+                    key={msg.id}
+                    msg={msg}
+                    onAction={handleAction}
+                    isSessionReady={!!sessionId}
+                  />
                 ))}
                 {sending && (
                   <div className="flex items-start gap-3">
@@ -830,26 +1151,45 @@ export default function AssistantPage() {
               {/* Input */}
               <div className="border-t border-border bg-card/60 p-3">
                 <div className="flex items-end gap-2 rounded-2xl border border-border bg-background px-3 py-2 focus-within:border-primary/40">
-                  <button className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-secondary transition-base">
+                  {/* Paperclip — now opens file picker */}
+                  <button
+                    type="button"
+                    onClick={handlePaperclip}
+                    className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-secondary transition-base"
+                    title="Attach a document"
+                  >
                     <Paperclip className="h-4 w-4" />
                   </button>
                   <textarea
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        handleSend();
+                      }
+                    }}
                     placeholder="Type business details or ask about a regulation…"
                     rows={1}
                     className="flex-1 resize-none bg-transparent px-1 py-1.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none max-h-24"
                   />
-                  <button className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-secondary transition-base">
+                  <button
+                    type="button"
+                    className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-secondary transition-base"
+                  >
                     <Mic className="h-4 w-4" />
                   </button>
                   <button
+                    type="button"
                     onClick={handleSend}
                     disabled={!input.trim() || sending}
                     className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-glow hover:opacity-90 disabled:opacity-50 transition-base"
                   >
-                    {sending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowUp className="h-3.5 w-3.5" strokeWidth={2.5} />}
+                    {sending ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <ArrowUp className="h-3.5 w-3.5" strokeWidth={2.5} />
+                    )}
                   </button>
                 </div>
                 <div className="mt-1.5 flex items-center justify-between px-1 text-[10px] text-muted-foreground">
@@ -863,10 +1203,14 @@ export default function AssistantPage() {
             <div className="overflow-hidden rounded-2xl border border-border bg-gradient-card shadow-soft-sm">
               <div className="flex items-center justify-between border-b border-border bg-card/60 px-4 py-3">
                 <div>
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Estimated</div>
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Estimated
+                  </div>
                   <div className="text-sm font-semibold text-foreground">Landed Cost</div>
                 </div>
-                <span className="rounded-full bg-warning-soft px-2 py-0.5 text-[10px] font-semibold text-warning">Not Final</span>
+                <span className="rounded-full bg-warning-soft px-2 py-0.5 text-[10px] font-semibold text-warning">
+                  Not Final
+                </span>
               </div>
               <div className="flex flex-wrap gap-x-6 gap-y-3 px-4 py-4">
                 {[
@@ -897,12 +1241,14 @@ export default function AssistantPage() {
             </div>
           </div>
 
-          {/* ── RIGHT: Document Pack ───────────────────────────────────── */}
+          {/* ── RIGHT: Document Pack ─────────────────────────────────── */}
           <aside className="lg:sticky lg:top-20 lg:self-start">
             <div className="overflow-hidden rounded-2xl border border-border bg-gradient-card shadow-soft-md">
               <div className="flex items-center justify-between border-b border-border bg-card/60 px-4 py-3">
                 <div>
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Export</div>
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Export
+                  </div>
                   <div className="text-sm font-semibold text-foreground">Document Pack</div>
                 </div>
                 <span className="rounded-full bg-primary-soft px-2 py-0.5 text-[10px] font-semibold text-primary">
@@ -922,31 +1268,47 @@ export default function AssistantPage() {
                       const isGenerated  = generatedIds.has(doc.id);
                       const gating      = isGating(doc, permitFlags);
                       return (
-                        <div key={doc.id} className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2.5 transition-base hover:border-primary/30 hover:bg-primary-soft/30">
+                        <div
+                          key={doc.id}
+                          className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2.5 transition-base hover:border-primary/30 hover:bg-primary-soft/30"
+                        >
                           <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-success-soft">
                             <Icon className="h-3.5 w-3.5 text-success" />
                           </div>
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-1">
-                              <div className="truncate text-[11px] font-semibold text-foreground">{doc.label}</div>
+                              <div className="truncate text-[11px] font-semibold text-foreground">
+                                {doc.label}
+                              </div>
                               {gating && (
-                                <span className="shrink-0 rounded-sm bg-primary/10 px-1 py-px text-[8px] font-bold uppercase text-primary">Req</span>
+                                <span className="shrink-0 rounded-sm bg-primary/10 px-1 py-px text-[8px] font-bold uppercase text-primary">
+                                  Req
+                                </span>
                               )}
                             </div>
-                            <div className="truncate text-[10px] text-muted-foreground">{doc.sublabel}</div>
+                            <div className="truncate text-[10px] text-muted-foreground">
+                              {doc.sublabel}
+                            </div>
                           </div>
                           <button
+                            type="button"
                             onClick={() => handleGenerate(doc.id)}
                             disabled={isGenerated || isGenerating}
                             className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-lg transition-base ${
-                              isGenerated   ? "bg-success text-primary-foreground" :
-                              isGenerating  ? "bg-primary/20 text-primary" :
-                                              "bg-primary text-primary-foreground shadow-glow hover:opacity-90"
+                              isGenerated
+                                ? "bg-success text-primary-foreground"
+                                : isGenerating
+                                ? "bg-primary/20 text-primary"
+                                : "bg-primary text-primary-foreground shadow-glow hover:opacity-90"
                             }`}
                           >
-                            {isGenerated  ? <CheckCircle2 className="h-3 w-3" /> :
-                             isGenerating ? <Loader2 className="h-3 w-3 animate-spin" /> :
-                                            <Download className="h-3 w-3" />}
+                            {isGenerated ? (
+                              <CheckCircle2 className="h-3 w-3" />
+                            ) : isGenerating ? (
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                            ) : (
+                              <Download className="h-3 w-3" />
+                            )}
                           </button>
                         </div>
                       );
@@ -967,18 +1329,27 @@ export default function AssistantPage() {
                         .map((sid) => STEPS.find((s) => s.id === sid)?.title)
                         .filter(Boolean);
                       return (
-                        <div key={doc.id} className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2.5 opacity-75">
+                        <div
+                          key={doc.id}
+                          className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2.5 opacity-75"
+                        >
                           <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-warning-soft">
                             <Icon className="h-3.5 w-3.5 text-warning" />
                           </div>
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-1">
-                              <div className="truncate text-[11px] font-semibold text-foreground">{doc.label}</div>
+                              <div className="truncate text-[11px] font-semibold text-foreground">
+                                {doc.label}
+                              </div>
                               {gating && (
-                                <span className="shrink-0 rounded-sm bg-primary/10 px-1 py-px text-[8px] font-bold uppercase text-primary">Req</span>
+                                <span className="shrink-0 rounded-sm bg-primary/10 px-1 py-px text-[8px] font-bold uppercase text-primary">
+                                  Req
+                                </span>
                               )}
                             </div>
-                            <div className="truncate text-[10px] text-warning">Need: {missing.slice(0, 2).join(", ")}</div>
+                            <div className="truncate text-[10px] text-warning">
+                              Need: {missing.slice(0, 2).join(", ")}
+                            </div>
                           </div>
                           <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-secondary text-muted-foreground">
                             <Lock className="h-3 w-3" />
@@ -999,15 +1370,22 @@ export default function AssistantPage() {
                       const gating      = isGating(doc, permitFlags);
                       const missingCount = doc.requiredSteps.filter((sid) => !completed.has(sid)).length;
                       return (
-                        <div key={doc.id} className="flex items-center gap-2 rounded-xl border border-border bg-card/50 px-3 py-2.5 opacity-50">
+                        <div
+                          key={doc.id}
+                          className="flex items-center gap-2 rounded-xl border border-border bg-card/50 px-3 py-2.5 opacity-50"
+                        >
                           <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-secondary">
                             <Icon className="h-3.5 w-3.5 text-muted-foreground" />
                           </div>
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-1">
-                              <div className="truncate text-[11px] font-semibold text-muted-foreground">{doc.label}</div>
+                              <div className="truncate text-[11px] font-semibold text-muted-foreground">
+                                {doc.label}
+                              </div>
                               {gating && (
-                                <span className="shrink-0 rounded-sm bg-muted px-1 py-px text-[8px] font-bold uppercase text-muted-foreground">Req</span>
+                                <span className="shrink-0 rounded-sm bg-muted px-1 py-px text-[8px] font-bold uppercase text-muted-foreground">
+                                  Req
+                                </span>
                               )}
                             </div>
                             <div className="truncate text-[10px] text-muted-foreground">
@@ -1026,7 +1404,10 @@ export default function AssistantPage() {
                 {readyDocs.filter((d) => !generatedIds.has(d.id)).length > 1 && (
                   <div className="pb-1 pt-3">
                     <button
-                      onClick={() => readyDocs.forEach((d) => !generatedIds.has(d.id) && handleGenerate(d.id))}
+                      type="button"
+                      onClick={() =>
+                        readyDocs.forEach((d) => !generatedIds.has(d.id) && handleGenerate(d.id))
+                      }
                       className="w-full rounded-xl bg-gradient-primary px-4 py-2.5 text-[12px] font-semibold text-primary-foreground shadow-glow transition-base hover:opacity-90"
                     >
                       Generate All Ready Docs
@@ -1039,22 +1420,27 @@ export default function AssistantPage() {
               </div>
             </div>
           </aside>
-
         </div>
       </main>
 
-      {/* ── Proceed to Logistics FAB ──────────────────────────────────────── */}
+      {/* ── Proceed to Logistics FAB ────────────────────────────────────── */}
       {canProceed && (
         <div className="pointer-events-none fixed bottom-6 right-6 z-50 flex flex-col items-end gap-2">
           <span className="absolute inset-0 -z-10 animate-ping rounded-2xl bg-primary opacity-20" />
           <button
-            onClick={() => navigate("/logistics", {
-              state: {
-                carriedDocs: EXPORT_DOCS
-                  .filter((d) => generatedIds.has(d.id))
-                  .map((d) => ({ id: d.id, label: d.label, sublabel: d.sublabel, status: "ready" })),
-              },
-            })}
+            type="button"
+            onClick={() =>
+              navigate("/logistics", {
+                state: {
+                  carriedDocs: EXPORT_DOCS.filter((d) => generatedIds.has(d.id)).map((d) => ({
+                    id: d.id,
+                    label: d.label,
+                    sublabel: d.sublabel,
+                    status: "ready",
+                  })),
+                },
+              })
+            }
             className="pointer-events-auto flex items-center gap-3 rounded-2xl bg-gradient-primary px-5 py-3.5 text-sm font-semibold text-primary-foreground shadow-[0_8px_32px_rgba(0,0,0,0.25)] ring-1 ring-primary/40 transition-all hover:scale-[1.03] hover:shadow-[0_12px_40px_rgba(0,0,0,0.35)] active:scale-[0.98]"
           >
             <Ship className="h-4 w-4" />
@@ -1071,16 +1457,29 @@ export default function AssistantPage() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SUB-COMPONENTS (unchanged from original)
+// SUB-COMPONENTS
 // ─────────────────────────────────────────────────────────────────────────────
-function MessageBubble({ msg, onAction, isSessionReady }: { msg: Message; onAction: (action: string, label: string) => void; isSessionReady: boolean }) {
+function MessageBubble({
+  msg,
+  onAction,
+  isSessionReady,
+}: {
+  msg: Message;
+  onAction: (action: string, label: string) => void;
+  isSessionReady: boolean;
+}) {
   if (msg.role === "user") {
     return (
       <div className="flex justify-end">
         <div className="max-w-[80%] rounded-2xl rounded-tr-sm bg-primary px-4 py-2.5 text-sm text-primary-foreground shadow-soft-sm">
           {msg.kind === "upload" ? (
-            <div className="flex items-center gap-2"><Upload className="h-3.5 w-3.5" /><span>{msg.fileName}</span></div>
-          ) : msg.content}
+            <div className="flex items-center gap-2">
+              <Upload className="h-3.5 w-3.5" />
+              <span>{msg.fileName}</span>
+            </div>
+          ) : (
+            msg.content
+          )}
         </div>
       </div>
     );
@@ -1093,7 +1492,9 @@ function MessageBubble({ msg, onAction, isSessionReady }: { msg: Message; onActi
           <AlertTriangle className="h-4 w-4 text-danger" />
         </div>
         <div className="max-w-[85%] rounded-2xl rounded-tl-sm border border-danger/40 bg-danger-soft/50 px-4 py-3">
-          <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-danger">Dependency Blocked</div>
+          <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-danger">
+            Dependency Blocked
+          </div>
           <p className="text-sm text-foreground">{msg.content}</p>
         </div>
       </div>
@@ -1121,8 +1522,12 @@ function MessageBubble({ msg, onAction, isSessionReady }: { msg: Message; onActi
           <div className="rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-2.5 text-sm text-foreground">
             {msg.content}
           </div>
-          <a href={msg.refUrl} target="_blank" rel="noreferrer"
-            className="flex items-center gap-2 rounded-xl border border-primary/30 bg-primary-soft px-3 py-2 text-xs font-medium text-primary hover:bg-primary-soft/70 transition-base">
+          <a
+            href={msg.refUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="flex items-center gap-2 rounded-xl border border-primary/30 bg-primary-soft px-3 py-2 text-xs font-medium text-primary hover:bg-primary-soft/70 transition-base"
+          >
             <ExternalLink className="h-3.5 w-3.5" />
             <span>{msg.refTitle}</span>
             <ArrowRight className="ml-auto h-3.5 w-3.5" />
@@ -1141,7 +1546,9 @@ function MessageBubble({ msg, onAction, isSessionReady }: { msg: Message; onActi
             {msg.content}
           </div>
           <div className="rounded-2xl border border-border bg-background p-3">
-            <div className="mb-2 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Compliance Checklist</div>
+            <div className="mb-2 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
+              Compliance Checklist
+            </div>
             <ul className="space-y-1.5">
               {msg.items.map((item, i) => (
                 <li key={i} className="flex items-center justify-between gap-2 text-sm">
@@ -1158,6 +1565,7 @@ function MessageBubble({ msg, onAction, isSessionReady }: { msg: Message; onActi
                 return (
                   <button
                     key={i}
+                    type="button"
                     onClick={() => onAction(a.action, a.label)}
                     disabled={!isSessionReady}
                     className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition-base disabled:opacity-40 disabled:cursor-not-allowed ${
@@ -1178,6 +1586,7 @@ function MessageBubble({ msg, onAction, isSessionReady }: { msg: Message; onActi
     );
   }
 
+  // default: text
   return (
     <div className="flex items-start gap-3">
       <Avatar />

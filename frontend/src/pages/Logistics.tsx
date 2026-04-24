@@ -819,19 +819,20 @@ const Logistics = () => {
                   const isUploading = doc.status === "uploading";
                   const isMissing   = doc.status === "missing";
                   const isDone      = isCarried || isUploaded;
+                  const canSelectFile = !isUploading;
 
                   return (
                     <div
                       key={doc.id}
                       onDragOver={(e) => e.preventDefault()}
-                      onDrop={(e) => isMissing && handleDrop(doc.id, e)}
+                      onDrop={(e) => canSelectFile && handleDrop(doc.id, e)}
                       className={`group relative overflow-hidden rounded-2xl border-2 p-5 transition-base ${
                         isCarried   ? "border-success/30 bg-success-soft/30" :
                         isUploaded  ? "border-success/40 bg-success-soft/40" :
                         isUploading ? "border-primary/40 bg-primary-soft/40" :
                         "border-dashed border-border bg-secondary/30 hover:border-primary/40 hover:bg-primary-soft/30 cursor-pointer"
                       }`}
-                      onClick={() => isMissing && fileInputRefs.current[doc.id]?.click()}
+                      onClick={() => canSelectFile && fileInputRefs.current[doc.id]?.click()}
                     >
                       <input
                         ref={(el) => { fileInputRefs.current[doc.id] = el; }}
@@ -892,6 +893,16 @@ const Logistics = () => {
                             {isCarried ? "From AI Assistant" : doc.fileName}
                           </span>
                           <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                fileInputRefs.current[doc.id]?.click();
+                              }}
+                              className="inline-flex items-center gap-1 rounded-md border border-border bg-card px-2 py-0.5 text-[10px] font-semibold text-foreground hover:border-primary hover:text-primary"
+                            >
+                              <Upload className="h-3 w-3" /> {isCarried ? "Upload" : "Replace"}
+                            </button>
                             {!isCarried && (doc.fileUrl || doc.previewUrl) && (
                               <button
                                 type="button"
@@ -1359,20 +1370,31 @@ const Logistics = () => {
                 {docs.map((doc) => (
                   <div key={doc.id} className="flex items-center justify-between gap-2">
                     <span className="text-[12px] text-foreground truncate flex-1">{doc.title}</span>
-                    <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-                      doc.status === "carried" || doc.status === "uploaded"
-                        ? "bg-success-soft text-success" :
-                      doc.status === "uploading"
-                        ? "bg-primary-soft text-primary" :
-                      doc.optional
-                        ? "bg-secondary text-muted-foreground"
-                        : "bg-warning-soft text-warning"
-                    }`}>
-                      {doc.status === "carried"   ? "Carried"  :
-                       doc.status === "uploaded"  ? "Uploaded" :
-                       doc.status === "uploading" ? "Parsing"  :
-                       doc.optional               ? "Optional" : "Missing"}
-                    </span>
+                    <div className="flex items-center gap-1.5">
+                      {(doc.fileUrl || doc.previewUrl) && (
+                        <button
+                          type="button"
+                          onClick={() => handleOpenPreview(doc)}
+                          className="inline-flex items-center gap-1 rounded-md border border-border bg-card px-2 py-0.5 text-[10px] font-semibold text-foreground hover:border-primary hover:text-primary"
+                        >
+                          <Eye className="h-3 w-3" /> Preview
+                        </button>
+                      )}
+                      <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                        doc.status === "carried" || doc.status === "uploaded"
+                          ? "bg-success-soft text-success" :
+                        doc.status === "uploading"
+                          ? "bg-primary-soft text-primary" :
+                        doc.optional
+                          ? "bg-secondary text-muted-foreground"
+                          : "bg-warning-soft text-warning"
+                      }`}>
+                        {doc.status === "carried"   ? "Carried"  :
+                         doc.status === "uploaded"  ? "Uploaded" :
+                         doc.status === "uploading" ? "Parsing"  :
+                         doc.optional               ? "Optional" : "Missing"}
+                      </span>
+                    </div>
                   </div>
                 ))}
               </div>

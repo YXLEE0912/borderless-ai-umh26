@@ -184,6 +184,11 @@ const normalizeOriginRegionValue = (value: unknown): OriginRegion | null => {
   return null;
 };
 
+const isWeightBearingDocument = (title?: string, preview?: string) => {
+  const text = `${title || ""} ${preview || ""}`.toLowerCase();
+  return /packing list|bill of lading|air waybill|waybill|net\s*weight|gross\s*weight|chargeable\s*weight|billable\s*weight|shipment\s*weight|cargo\s*weight/.test(text);
+};
+
 const normalizeExtractedDocumentData = (data: ExtractedDocumentDataLike) => {
   const product = pickFirstText(data, [
     "product_name",
@@ -267,13 +272,17 @@ const normalizeExtractedDocumentData = (data: ExtractedDocumentDataLike) => {
   ]);
   const originRegion = normalizeOriginRegionValue(data.origin_region || data["origin region"] || data.origin || data.state || data["origin country"]);
   const weightKg = pickFirstNumber(data, [
+    "net_weight",
+    "net weight",
+    "net_weight_kg",
+    "net weight kg",
+    "gross_weight",
+    "gross weight",
+    "gross_weight_kg",
+    "gross weight kg",
     "weight_kg",
     "weight kg",
     "weight",
-    "gross_weight",
-    "gross weight",
-    "net_weight",
-    "net weight",
     "billable_weight",
     "billable weight",
     "chargeable_weight",
@@ -657,8 +666,7 @@ const generateAndDownloadPDF = (
       ["Incoterm", summary.incoterm || ""],
       ["Goods Quantity", summary.goodsQuantity != null ? formatGoodsValue(summary.goodsQuantity) : ""],
       ["Unit Price", summary.unitPrice != null ? formatCurrency(convertFromBaseCurrency(summary.unitPrice, currency), currency) : ""],
-      ["Goods Cost", summary.goodsCost != null ? formatCurrency(convertFromBaseCurrency(summary.goodsCost, currency), currency) : ""],
-      ["Weight", summary.weightKg != null ? `${summary.weightKg} kg` : ""],
+      ["Net Weight", summary.weightKg != null ? `${summary.weightKg} kg` : ""],
       ["Currency", getCurrencyDisplayLabel(currency)],
     ].filter(([, v]) => Boolean(v)).map(([k, v]) => `
       <div style="border:1px solid #E5E7EB;border-radius:12px;padding:12px 14px;background:#fff;">
@@ -992,7 +1000,7 @@ const Logistics = () => {
   const costRows: BreakdownRow[] = quote ? [
     { label: "Goods Quantity", value: goodsQuantity, note: "Extracted from uploaded document", waived: false, valueType: "number" },
     { label: "Unit Price", value: effectiveUnitPrice, note: "Price per item", waived: false },
-    { label: "Goods Cost", value: goodsDeclaredValue, note: "Quantity × Unit Price", waived: false },
+    { label: "Declared Value", value: goodsDeclaredValue, note: "Quantity × Unit Price", waived: false },
     { label: "Import Duty", value: quote.customs_duty, note: null, waived: quote.customs_duty === 0 },
     { label: "VAT / GST (7%)", value: quote.import_tax, note: null, waived: false },
     {
@@ -1011,7 +1019,7 @@ const Logistics = () => {
   ] : [
     { label: "Goods Quantity", value: goodsQuantity, note: "Extracted from uploaded document", waived: false, valueType: "number" },
     { label: "Unit Price", value: effectiveUnitPrice, note: "Price per item", waived: false },
-    { label: "Goods Cost", value: goodsDeclaredValue, note: "Quantity × Unit Price", waived: false },
+    { label: "Declared Value", value: goodsDeclaredValue, note: "Quantity × Unit Price", waived: false },
     { label: "Import Duty", value: 0, note: "Select shipping to calculate", waived: false },
     { label: "VAT / GST (7%)", value: hasUploadedFiles ? 3 : 0, note: hasUploadedFiles ? "Demo estimate from uploaded documents" : "Select shipping to calculate", waived: false },
     {
@@ -1046,19 +1054,25 @@ const Logistics = () => {
       const normalized = pipeline.normalized_quote_request;
       pipelineQuote = pipeline.quote;
       const extractedFromDocument = normalizeExtractedDocumentData(extraction.data as ExtractedDocumentDataLike);
+      const weightBearing = isWeightBearingDocument(selectedDoc?.title || selectedDoc?.subtitle || docId, extraction.extracted_text_preview || undefined);
       extracted = {
         ...extractedFromDocument,
         product: normalized.product_name || extractedFromDocument.product,
         destinationCountry: normalized.destination_country || extractedFromDocument.destinationCountry,
         originRegion: normalized.origin_region || extractedFromDocument.originRegion,
-        weightKg: normalized.weight_kg ?? extractedFromDocument.weightKg,
+        weightKg: weightBearing ? (normalized.weight_kg ?? extractedFromDocument.weightKg) : extractedFromDocument.weightKg,
         goodsValue: normalized.declared_value ?? extractedFromDocument.goodsValue,
       };
       setCurrency(normalizeCurrency(normalized.currency));
     } catch {
       try {
         const extraction = await extractDocumentFields(file, docId);
-        extracted = normalizeExtractedDocumentData(extraction.data as ExtractedDocumentDataLike);
+        const extractedFromDocument = normalizeExtractedDocumentData(extraction.data as ExtractedDocumentDataLike);
+        const weightBearing = isWeightBearingDocument(selectedDoc?.title || selectedDoc?.subtitle || docId, extraction.extracted_text_preview || undefined);
+        extracted = {
+          ...extractedFromDocument,
+          weightKg: weightBearing ? extractedFromDocument.weightKg : undefined,
+        };
       } catch {
         extracted = {};
       }
@@ -1303,7 +1317,6 @@ const Logistics = () => {
 
   const total = costRows.reduce((sum, r) => sum + ((r.valueType || "currency") === "currency" ? r.value : 0), 0);
   const displayGoodsQuantity = goodsQuantity;
-  const displayGoodsCost = goodsDeclaredValue;
   const displayTotal = convertFromBaseCurrency(total, currency);
 
   const buildHistoryEntry = (): ReportHistoryEntry => ({
@@ -1929,8 +1942,8 @@ const Logistics = () => {
                       <div className="mt-1 text-[11px] text-muted-foreground">Auto-filled from upload, editable if the document is missing unit price.</div>
                     </div>
                     <div className="rounded-xl border border-border bg-card px-3 py-2.5">
-                      <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Computed goods cost</div>
-                      <div className="mt-1 text-sm font-semibold text-foreground">{formatCurrency(convertFromBaseCurrency(displayGoodsCost, currency), currency)}</div>
+                      <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Computed declared value</div>
+                      <div className="mt-1 text-sm font-semibold text-foreground">{formatCurrency(convertFromBaseCurrency(goodsDeclaredValue, currency), currency)}</div>
                     </div>
                   </div>
                 </div>
@@ -1944,7 +1957,7 @@ const Logistics = () => {
                           <tr>
                             <th className="border-b border-border py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Product</th>
                             <th className="border-b border-border py-2 text-right text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Quantity</th>
-                            <th className="border-b border-border py-2 text-right text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Weight (kg)</th>
+                            <th className="border-b border-border py-2 text-right text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Net Weight (kg)</th>
                             <th className="border-b border-border py-2 text-right text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Unit Price</th>
                             <th className="border-b border-border py-2 text-right text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Line Cost</th>
                           </tr>
@@ -1963,7 +1976,7 @@ const Logistics = () => {
                       </table>
                     </div>
                     <div className="mt-3 text-[11px] text-muted-foreground">
-                      Shipping uses total uploaded weight: {(effectiveCostContext.weight_kg || 0).toLocaleString("en-MY", { maximumFractionDigits: 2 })} kg.
+                      Shipping uses total uploaded net weight: {(effectiveCostContext.weight_kg || 0).toLocaleString("en-MY", { maximumFractionDigits: 2 })} kg.
                     </div>
                   </div>
                 )}
@@ -2011,7 +2024,7 @@ const Logistics = () => {
                       {formatCurrency(displayTotal, currency)}
                     </div>
                     <div className="mt-1 text-[11px] text-background/60">
-                      Includes quantity-based goods cost, shipping, taxes, and service fees
+                      Includes quantity-based declared value, shipping, taxes, and service fees
                     </div>
                   </div>
                 </div>
@@ -2083,12 +2096,12 @@ const Logistics = () => {
                   ["Complete Address", summaryDestinationAddress],
                   ["Product",  summaryProduct],
                   ["HS Code",  summaryHsCode],
-                  ["Weight",   summaryWeight != null ? `${summaryWeight} kg` : ""],
+                  ["Net Weight",   summaryWeight != null ? `${summaryWeight} kg` : ""],
                   ["Origin Region", originRegion === "east" ? "East Malaysia" : "West Malaysia"],
                   ["Currency", currency],
                   ["Goods Quantity", displayGoodsQuantity > 0 ? formatGoodsValue(displayGoodsQuantity) : ""],
                   ["Unit Price", formatCurrency(convertFromBaseCurrency(unitPrice, currency), currency)],
-                  ["Goods Cost", formatCurrency(convertFromBaseCurrency(displayGoodsCost, currency), currency)],
+                  
                   ["Landed Cost", formatCurrency(displayTotal, currency)],
                   ["Incoterm", summaryIncoterm],
                 ].filter(([, v]) => Boolean(v)).map(([k, v]) => (

@@ -6,6 +6,8 @@ This folder contains the first FastAPI backend slice for the Product Scanner.
 
 - `GET /api/v1/health`
 - `POST /api/v1/scans`
+- `POST /api/v1/documents/generate`
+- `POST /api/v1/costs/quote`
 - `GET /api/v1/scans/{scan_id}`
 - `GET /api/v1/scans/{scan_id}/chat`
 - `POST /api/v1/scans/{scan_id}/follow-up`
@@ -17,6 +19,7 @@ This folder contains the first FastAPI backend slice for the Product Scanner.
 - HS confidence gate: when HS confidence is below threshold (default 0.65), result is forced to `review` for manual verification
 - Strict HS mode (default enabled): when HS policy matches with enough confidence, keyword layers are treated as secondary warnings
 - Decision trace in response: `result.decision_steps` explains each major decision step and status transition
+- Agent 2 document generator and Agent 3 landed-cost calculator can now be chained from the frontend
 
 ## Rules to store
 
@@ -75,10 +78,49 @@ Audit behavior: each `POST /api/v1/scans` call writes a row to `rule_execution_l
 
 ## Local setup
 
-1. Copy `.env.example` to `.env`.
-2. Create a `scans` table in Supabase.
+1. Copy `.env.example` to `.env` and fill in your API keys and Supabase values.
+2. Create and activate a virtual environment.
 3. Install dependencies from `requirements.txt`.
-4. Run the app with `uvicorn app.main:app --reload --port 8000`.
+4. Run the FastAPI app with Uvicorn.
+
+Agent 3 uses `UMH_3_API_KEY` when you want to keep the cost module keyed the same way as the other agents.
+Agent 1 can read `A_AI_API_KEY`, `AI_API_KEY`, or `Z_AI_API_KEY` for backward compatibility.
+
+### Install
+
+From the `backend` directory:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+If you already have a virtual environment, just activate it and install the requirements.
+
+### Run
+
+Start the backend locally with:
+
+```bash
+uvicorn app.main:app --reload --port 8000
+```
+
+The API will be available at `http://127.0.0.1:8000`.
+
+### Optional checks
+
+Run the app without auto-reload for a production-style local run:
+
+```bash
+uvicorn app.main:app --port 8000
+```
+
+If you need to verify the health endpoint after startup, open:
+
+```bash
+curl http://127.0.0.1:8000/api/v1/health
+```
 
 ## Scan request
 

@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = None
     gemini_api_key_backup: str | None = None
     gemini_vision_model: str = "gemini-2.5-flash"
+
+    umh_3_api_key: str | None = None
 
 
     supabase_url: str | None = None

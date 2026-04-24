@@ -128,8 +128,6 @@ Send `multipart/form-data` to `POST /api/v1/scans` with:
 
 - optional `product_prompt`
 - optional `destination_country`
-- optional `merchant_name`
-- optional `merchant_ssm`
 - optional `product_image`
 
 At least one of `product_prompt` or `product_image` is required.
@@ -138,7 +136,7 @@ At least one of `product_prompt` or `product_image` is required.
 
 - `POST /api/v1/scans/{scan_id}/follow-up` accepts JSON:
 	- `message` required
-	- optional `destination_country`, `merchant_name`, `merchant_ssm`
+	- optional `destination_country`
 - Backend stores both user and assistant messages in `scan_chat_messages`.
 - `GET /api/v1/scans/{scan_id}/chat` returns chronological chat history.
 

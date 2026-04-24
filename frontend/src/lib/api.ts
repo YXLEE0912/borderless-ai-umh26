@@ -168,6 +168,16 @@ export type DocumentExtractionAndQuoteResponse = {
 
 export type BackendScanStatus = "green" | "conditional" | "restricted" | "review";
 
+export type BackendScanAnalysis = {
+  verdict: string;
+  verdict_reason: string;
+  destination_country?: string | null;
+  why_this_status: string[];
+  restrictions: string[];
+  missing_information: string[];
+  next_steps: string[];
+};
+
 export type BackendScanResult = {
   product_name: string;
   materials_detected: string[];
@@ -176,7 +186,6 @@ export type BackendScanResult = {
   hs_code_reasoning: string;
   status: BackendScanStatus;
   compliance_summary: string;
-  ssm_check: string;
   required_documents: string[];
   required_permits: string[];
   required_agencies: string[];
@@ -187,6 +196,7 @@ export type BackendScanResult = {
   extraction_notes: string[];
   decision_steps: { phase: string; decision: string; reason: string }[];
   follow_up_questions: string[];
+  analysis: BackendScanAnalysis;
   source: string;
 };
 
@@ -313,18 +323,33 @@ export async function extractAndQuoteDocument(
   return response.json() as Promise<DocumentExtractionAndQuoteResponse>;
 }
 
+export type ScanFollowUpRequest = {
+  message: string;
+  destination_country?: string;
+};
+
+export type ScanFollowUpResponse = {
+  scan_id: string;
+  status: BackendScanStatus;
+  result: BackendScanResult;
+  chat_messages: Array<{
+    id?: string | null;
+    scan_id: string;
+    role: "user" | "assistant";
+    message: string;
+    metadata: Record<string, unknown>;
+    created_at: string;
+  }>;
+};
+
 export async function scanProduct(payload: {
   product_prompt?: string;
   destination_country?: string;
-  merchant_name?: string;
-  merchant_ssm?: string;
   product_image?: File | null;
 }): Promise<BackendScanCreateResponse> {
   const formData = new FormData();
   if (payload.product_prompt) formData.append("product_prompt", payload.product_prompt);
   if (payload.destination_country) formData.append("destination_country", payload.destination_country);
-  if (payload.merchant_name) formData.append("merchant_name", payload.merchant_name);
-  if (payload.merchant_ssm) formData.append("merchant_ssm", payload.merchant_ssm);
   if (payload.product_image) formData.append("product_image", payload.product_image);
 
   const response = await fetch(`${API_BASE_URL}/scans`, {
@@ -338,6 +363,23 @@ export async function scanProduct(payload: {
   }
 
   return response.json() as Promise<BackendScanCreateResponse>;
+}
+
+export async function followUpScan(scanId: string, payload: ScanFollowUpRequest): Promise<ScanFollowUpResponse> {
+  const response = await fetch(`${API_BASE_URL}/scans/${encodeURIComponent(scanId)}/follow-up`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(detail || `Request failed with status ${response.status}`);
+  }
+
+  return response.json() as Promise<ScanFollowUpResponse>;
 }
 
 export { API_BASE_URL };

@@ -6,7 +6,7 @@ import re
 import httpx
 
 from app.core.config import Settings
-from app.schemas.scan import ScanResult, ScanStatus
+from app.schemas.scan import ScanAnalysis, ScanResult, ScanStatus
 from app.services.gemini_vision_client import GeminiVisionClient
 from app.services.rules_engine import apply_rules
 from app.services.rules_repository import RulesRepository
@@ -38,8 +38,6 @@ class ProductScanner:
         image_bytes: bytes | None = None,
         image_content_type: str | None = None,
         image_filename: str | None = None,
-        merchant_name: str | None = None,
-        merchant_ssm: str | None = None,
     ) -> ScanResult:
         # Step 1: Analyze image with Gemini vision if provided
         gemini_vision_summary = None
@@ -55,6 +53,8 @@ class ProductScanner:
                 # Gemini vision failure is not blocking; we can still use ILMU with original prompt
                 pass
 
+        effective_destination_country = destination_country or _extract_destination_country_from_prompt(prompt)
+
         # Step 2: Build enhanced prompt with Gemini vision results
         enhanced_prompt = _build_enhanced_prompt(
             original_prompt=prompt,
@@ -67,12 +67,10 @@ class ProductScanner:
             try:
                 raw_result = await self.zai_client.analyze(
                     prompt=enhanced_prompt,
-                    destination_country=destination_country,
+                    destination_country=effective_destination_country,
                     image_bytes=image_bytes,
                     image_content_type=image_content_type,
                     image_filename=image_filename,
-                    merchant_name=merchant_name,
-                    merchant_ssm=merchant_ssm,
                 )
                 parsed = _parse_model_result(raw_result)
                 base_result = _normalize_result(parsed, source="z-ai")
@@ -96,30 +94,35 @@ class ProductScanner:
         result = apply_rules(
             result=base_result,
             prompt=enhanced_prompt,
-            destination_country=destination_country,
-            merchant_ssm=merchant_ssm,
+            destination_country=effective_destination_country,
             rules_bundle=rules_bundle,
         )
 
         follow_up_questions = _build_follow_up_questions(
             result=result,
             prompt=enhanced_prompt,
-            destination_country=destination_country,
+            destination_country=effective_destination_country,
             image_bytes=image_bytes,
-            merchant_name=merchant_name,
-            merchant_ssm=merchant_ssm,
         )
-        if follow_up_questions:
-            notes = _dedupe_string_list(
+
+        analysis = _build_structured_analysis(
+            result=result,
+            destination_country=effective_destination_country,
+            follow_up_questions=follow_up_questions,
+            prompt=enhanced_prompt,
+        )
+
+        base_updates = {
+            "analysis": analysis,
+        }
+
+        if follow_up_questions and result.status != ScanStatus.restricted:
+            base_updates["follow_up_questions"] = follow_up_questions
+            base_updates["extraction_notes"] = _dedupe_string_list(
                 result.extraction_notes + ["Additional details are needed to improve classification confidence."]
             )
-            return result.model_copy(
-                update={
-                    "follow_up_questions": follow_up_questions,
-                    "extraction_notes": notes,
-                }
-            )
-        return result
+
+        return result.model_copy(update=base_updates)
 
 
 def _build_enhanced_prompt(original_prompt: str, gemini_vision_summary: dict | None) -> str:
@@ -207,7 +210,6 @@ def _normalize_result(data: dict, source: str) -> ScanResult:
         hs_code_reasoning=str(data.get("hs_code_reasoning", "")).strip(),
         status=status,
         compliance_summary=str(data.get("compliance_summary", "")).strip(),
-        ssm_check=str(data.get("ssm_check", "unknown")).strip() or "unknown",
         required_documents=[str(item) for item in data.get("required_documents", []) if str(item).strip()],
         required_permits=[str(item) for item in data.get("required_permits", []) if str(item).strip()],
         required_agencies=[str(item) for item in data.get("required_agencies", []) if str(item).strip()],
@@ -256,7 +258,6 @@ def _fallback_result(prompt: str, reason: str | None = None) -> ScanResult:
         hs_code_reasoning="Fallback mode: HS code needs manual confirmation.",
         status=status,
         compliance_summary=summary,
-        ssm_check="unknown",
         required_documents=documents,
         required_permits=permits,
         required_agencies=agencies,
@@ -273,7 +274,19 @@ def _fallback_result(prompt: str, reason: str | None = None) -> ScanResult:
 
 def _detect_materials(prompt: str) -> list[str]:
     material_map = {
+        "synthetic leather": "synthetic leather",
+        "faux leather": "synthetic leather",
+        "vegan leather": "synthetic leather",
+        "pu leather": "synthetic leather",
+        "pvc leather": "synthetic leather",
+        "genuine leather": "leather",
+        "real leather": "leather",
+        "cowhide": "leather",
+        "hide": "leather",
+        "skin": "leather",
         "leather": "leather",
+        "suede-like": "suede-like textile",
+        "suede look": "suede-like textile",
         "cotton": "cotton",
         "plastic": "plastic",
         "steel": "steel",
@@ -284,7 +297,12 @@ def _detect_materials(prompt: str) -> list[str]:
         "electronics": "electronics",
     }
     lowered = prompt.lower()
-    return [value for key, value in material_map.items() if key in lowered]
+    detected = [value for key, value in material_map.items() if key in lowered]
+
+    if "synthetic leather" in detected and "leather" in detected and not any(term in lowered for term in ["real leather", "genuine leather", "cowhide", "hide", "skin"]):
+        detected = [item for item in detected if item != "leather"]
+
+    return _dedupe_string_list(detected)
 
 
 def _normalize_string_list(value) -> list[str]:
@@ -342,10 +360,12 @@ def _build_follow_up_questions(
     prompt: str,
     destination_country: str | None,
     image_bytes: bytes | None,
-    merchant_name: str | None,
-    merchant_ssm: str | None,
 ) -> list[str]:
-    questions = list(result.follow_up_questions)
+    if result.status == ScanStatus.restricted:
+        return []
+
+    context = _classify_material_context(prompt=prompt, materials=result.materials_detected)
+    questions = _filter_follow_up_questions(result.follow_up_questions, context)
     lowered_prompt = prompt.lower()
 
     if image_bytes is None:
@@ -367,25 +387,175 @@ def _build_follow_up_questions(
     if not destination_country:
         questions.append("Which destination country will this product be exported to?")
 
-    if not merchant_name:
-        questions.append("What is the registered merchant/company name for this shipment?")
-
-    if not merchant_ssm:
-        questions.append("Please provide the 12-digit Malaysia SSM registration number for validation.")
-    elif result.ssm_check == "invalid_format":
-        questions.append("The SSM appears invalid. Can you confirm the correct 12-digit SSM number?")
+    if not result.materials_detected:
+        questions.append("Please tell me the product material (for example solid wood, MDF, plastic, metal, fabric, food ingredient).")
 
     if not result.hs_code_candidates or result.hs_code_confidence < 0.55:
         questions.append(
             "Please share product specs: exact material composition (%), intended use, and product dimensions/weight."
         )
 
-    if any(keyword in lowered_prompt for keyword in ["food", "cosmetic", "chemical", "animal", "plant"]):
+    if any(keyword in lowered_prompt for keyword in ["food", "cosmetic", "chemical", "plant"]) or context["animal_signal"]:
         questions.append(
             "Do you have supporting certificates (for example health, phytosanitary, or safety certificates) for this product category?"
         )
 
     return _dedupe_string_list(questions)[:6]
+
+
+def _build_structured_analysis(
+    *,
+    result: ScanResult,
+    destination_country: str | None,
+    follow_up_questions: list[str],
+    prompt: str,
+) -> ScanAnalysis:
+    intent = _detect_user_intent(prompt=prompt)
+
+    if result.status == ScanStatus.restricted:
+        verdict = "Prohibited"
+        verdict_reason = "This item matches hard prohibition rules and should not be exported."
+    elif result.status == ScanStatus.conditional:
+        verdict = "Allowed With Restrictions"
+        verdict_reason = "Export is allowed only after the listed permits and compliance checks are completed."
+    elif result.status == ScanStatus.green:
+        verdict = "Allowed"
+        verdict_reason = "No blocking rule was matched, but standard export compliance checks still apply."
+    else:
+        verdict = "Needs More Info"
+        verdict_reason = "The classification confidence is low, so more details are required before a reliable decision."
+
+    why_this_status = [result.compliance_summary] if result.compliance_summary else []
+
+    if result.status == ScanStatus.restricted and result.rule_hits:
+        why_this_status.extend([f"Blocked by rule: {hit}" for hit in result.rule_hits[:4]])
+    elif result.rule_hits:
+        why_this_status.extend([item for item in (_humanize_rule_hit(hit) for hit in result.rule_hits[:4]) if item])
+
+    restrictions = []
+    if result.required_permits:
+        restrictions.append(f"Permits required: {', '.join(result.required_permits)}")
+    if result.required_agencies:
+        agency_preview = result.required_agencies[:3]
+        if len(result.required_agencies) > 3:
+            agency_preview.append("others")
+        restrictions.append(f"Agency checks: {', '.join(agency_preview)}")
+    if result.required_documents and intent["wants_documents"]:
+        doc_preview = result.required_documents[:4]
+        if len(result.required_documents) > 4:
+            doc_preview.append("others")
+        restrictions.append(f"Common documents: {', '.join(doc_preview)}")
+
+    missing_information = [] if result.status == ScanStatus.restricted else list(follow_up_questions[:4])
+
+    next_steps: list[str] = []
+    if verdict == "Prohibited":
+        next_steps.append("Do not ship this item until a compliance specialist confirms legal alternatives.")
+    elif verdict == "Allowed With Restrictions":
+        next_steps.append("Prepare permits and agency checks before booking shipment.")
+    elif verdict == "Allowed":
+        next_steps.append("Proceed with export planning and confirm final HS code and destination procedures.")
+    else:
+        next_steps.append("Provide missing details so the system can finalize the compliance decision.")
+
+    if destination_country is None:
+        next_steps.append("Specify destination country to run destination-specific restrictions.")
+
+    return ScanAnalysis(
+        verdict=verdict,
+        verdict_reason=verdict_reason,
+        destination_country=destination_country,
+        why_this_status=_dedupe_string_list(why_this_status),
+        restrictions=_dedupe_string_list(restrictions),
+        missing_information=_dedupe_string_list(missing_information),
+        next_steps=_dedupe_string_list(next_steps),
+    )
+
+
+def _classify_material_context(*, prompt: str, materials: list[str] | None = None) -> dict[str, bool]:
+    combined = f"{prompt} {' '.join(materials or [])}".lower()
+
+    real_leather_terms = ["real leather", "genuine leather", "cowhide", "hide", "skin"]
+    synthetic_leather_terms = ["synthetic leather", "faux leather", "vegan leather", "pu leather", "pvc leather", "leatherette"]
+    suede_like_terms = ["suede-like", "suede look", "imitation suede", "mock suede", "microfiber suede"]
+
+    has_real_leather = any(term in combined for term in real_leather_terms)
+    has_synthetic_leather = any(term in combined for term in synthetic_leather_terms)
+    has_suede_like = any(term in combined for term in suede_like_terms)
+    has_animal_terms = any(term in combined for term in ["animal", "meat", "poultry", "fish", "dairy", "egg", "gelatin"])
+
+    animal_signal = has_real_leather or has_animal_terms
+    if has_synthetic_leather and not has_real_leather and not has_animal_terms:
+        animal_signal = False
+
+    return {
+        "animal_signal": animal_signal,
+        "synthetic_leather_only": has_synthetic_leather and not has_real_leather and not has_animal_terms,
+        "has_suede_like": has_suede_like,
+    }
+
+
+def _filter_follow_up_questions(questions: list[str], context: dict[str, bool]) -> list[str]:
+    if not questions:
+        return []
+
+    filtered: list[str] = []
+    for question in questions:
+        lowered = question.lower()
+        if context["synthetic_leather_only"] and any(token in lowered for token in ["species", "raw/unprocessed", "unprocessed", "heat treatment", "fumigation"]):
+            continue
+        filtered.append(question)
+    return filtered
+
+
+def _humanize_rule_hit(rule_id: str) -> str:
+    mapping = {
+        "MY-L3-ANIMAL": "Animal-origin material controls may apply.",
+        "MY-L3-PLANT": "Plant-origin material controls may apply.",
+        "MY-L3-FOOD": "Food-related certification checks may apply.",
+        "MY-L3-WILDLIFE": "Wildlife or protected-species checks may apply.",
+        "MY-L2-DUALUSE": "Possible dual-use control identified; licensing may be required.",
+        "MY-L2-TELECOM": "Telecom-related regulatory approval may be required.",
+    }
+    return mapping.get(rule_id, "")
+
+
+def _extract_destination_country_from_prompt(prompt: str) -> str | None:
+    lowered = prompt.lower()
+
+    aliases = {
+        "united states": "US",
+        "usa": "US",
+        "us": "US",
+        "united kingdom": "UK",
+        "uk": "UK",
+        "china": "China",
+        "singapore": "Singapore",
+        "japan": "Japan",
+        "korea": "Korea",
+        "south korea": "Korea",
+        "europe": "EU",
+        "eu": "EU",
+        "canada": "Canada",
+        "australia": "Australia",
+        "thailand": "Thailand",
+        "vietnam": "Vietnam",
+        "indonesia": "Indonesia",
+        "malaysia": "Malaysia",
+    }
+
+    direct_match = re.search(
+        r"\b(?:to|into|for)\s+(united\s+states|usa|us|united\s+kingdom|uk|china|singapore|japan|korea|south\s+korea|europe|eu|canada|australia|thailand|vietnam|indonesia|malaysia)\b",
+        lowered,
+    )
+    if direct_match:
+        return aliases.get(direct_match.group(1), direct_match.group(1).title())
+
+    for key, value in aliases.items():
+        if re.search(rf"\b{re.escape(key)}\b", lowered):
+            return value
+
+    return None
 
 
 def _dedupe_string_list(values: list[str]) -> list[str]:
@@ -401,3 +571,11 @@ def _dedupe_string_list(values: list[str]) -> list[str]:
         seen.add(key)
         out.append(normalized)
     return out
+
+
+def _detect_user_intent(*, prompt: str) -> dict[str, bool]:
+    text = (prompt or "").lower()
+
+    return {
+        "wants_documents": any(keyword in text for keyword in ["document", "paperwork", "permit", "certificate", "license", "licence"]),
+    }

@@ -2,12 +2,57 @@ import { useRef, useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import TopNav from "@/components/TopNav";
 import {
-  UploadCloud, Mic, Sparkles, ScanLine, ArrowRight, RefreshCw,
+  Mic, Sparkles, ScanLine, ArrowRight, RefreshCw,
   CheckCircle2, AlertTriangle, Image as ImageIcon, X, Loader2,
-  PackageSearch, Globe2, FileText, Tag, Lightbulb, Send,
-  ChevronRight, Info
+  Send,
+  Info, Square
 } from "lucide-react";
-import { scanProduct, type BackendScanResult } from "@/lib/api";
+import { scanProduct, followUpScan, type BackendScanResult, type BackendScanAnalysis } from "@/lib/api";
+
+type SpeechRecognitionResultLike = {
+  isFinal: boolean;
+  0: { transcript: string };
+};
+
+type SpeechRecognitionEventLike = {
+  resultIndex: number;
+  results: ArrayLike<SpeechRecognitionResultLike>;
+};
+
+type SpeechRecognitionLike = {
+  lang: string;
+  interimResults: boolean;
+  continuous: boolean;
+  onstart: (() => void) | null;
+  onend: (() => void) | null;
+  onerror: (() => void) | null;
+  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
+  start: () => void;
+  stop: () => void;
+};
+
+type SpeechRecognitionCtorLike = new () => SpeechRecognitionLike;
+
+const BAHASA_VOICE_HINTS = [
+  "hantar", "eksport", "produk", "dokumen", "permit", "barang", "ke", "dan", "yang", "adalah",
+];
+
+const resolveRecognitionLanguage = (queryText: string): string => {
+  const storedPreference = (localStorage.getItem("app.language") || "").toLowerCase().trim();
+  if (storedPreference.includes("bahasa")) return "ms-MY";
+  if (storedPreference.includes("english")) return "en-US";
+  if (storedPreference.includes("中文") || storedPreference.includes("chinese")) return "zh-CN";
+  if (storedPreference.includes("arab")) return "ar-SA";
+
+  const normalizedQuery = queryText.toLowerCase();
+  if (BAHASA_VOICE_HINTS.some((token) => normalizedQuery.includes(token))) return "ms-MY";
+
+  const browserLocale = (navigator.language || "en-US").toLowerCase();
+  if (browserLocale.startsWith("ms")) return "ms-MY";
+  if (browserLocale.startsWith("zh")) return "zh-CN";
+  if (browserLocale.startsWith("ar")) return "ar-SA";
+  return "en-US";
+};
 
 type MessageRole = "user" | "assistant";
 
@@ -15,6 +60,7 @@ type Message = {
   id: string;
   role: MessageRole;
   content: string;
+  repliedTo?: string;
   type?: "text" | "hint" | "result" | "image";
   result?: ScanResult;
   imagePreview?: string;
@@ -28,6 +74,9 @@ type HintChip = {
 };
 
 type ScanResult = {
+  scanId?: string;
+  intent?: ScanIntent;
+  analysis: BackendScanAnalysis;
   product: string;
   hsCode: string;
   confidence: "High" | "Medium" | "Low";
@@ -36,151 +85,156 @@ type ScanResult = {
   rawText: string;
   invalid?: boolean;
   invalidMessage?: string;
+  materialsDetected?: string[];
+  hsCodeCandidates?: string[];
+  complianceSummary?: string;
+  requiredDocuments?: string[];
+  requiredPermits?: string[];
+  requiredAgencies?: string[];
+  extractionNotes?: string[];
+  decisionSteps?: { phase: string; decision: string; reason: string }[];
+  followUpQuestions?: string[];
+  source?: string;
+  ruleHits?: string[];
 };
 
-const QUICK_HINTS: HintChip[] = [
-  { icon: Globe2, label: "Restrictions for China?", value: " restrictions for China" },
-  { icon: Tag, label: "What's the HS code?", value: " what is the HS code?" },
-  { icon: FileText, label: "Required documents?", value: " what documents are required for export?" },
-  { icon: PackageSearch, label: "Can this be exported?", value: " can this be exported from Malaysia?" },
+type ScanIntent = {
+  wantsDocuments: boolean;
+  wantsPermitDetails: boolean;
+  wantsExportCheck: boolean;
+  wantsTechnicalTrace: boolean;
+};
+
+const COUNTRY_KEYWORDS = [
+  "china", "singapore", "us", "usa", "united states", "japan", "korea", "south korea", "uk", "united kingdom",
+  "europe", "eu", "australia", "canada", "thailand", "vietnam", "indonesia", "malaysia",
 ];
 
-const EXAMPLE_PROMPTS = [
-  "rattan bag to China",
-  "wood furniture to US",
-  "dried mango to Singapore",
-  "electronics to Japan",
-  "batik fabric to UK",
-  "palm oil to EU",
-];
+const DOCUMENT_KEYWORDS = ["document", "documents", "paperwork", "permit", "permits", "cert", "certificate", "licence", "license"];
 
-const PRODUCT_HINTS: HintChip[] = [
-  { icon: PackageSearch, label: "Rattan bag to China", value: "rattan bag to China" },
-  { icon: PackageSearch, label: "Wood furniture to US", value: "wood furniture to US" },
-  { icon: PackageSearch, label: "Dried mango to Japan", value: "dried mango to Japan" },
-  { icon: PackageSearch, label: "Electronics to Singapore", value: "electronics to Singapore" },
-];
+const normalizeText = (value: string) => value.toLowerCase().trim();
 
-const SYSTEM_PROMPT = `You are the "Product Entry Specialist" for Borderless AI.
-PERSONALITY:
-- Friendly, localized tone (Manglish / mixed English + simple Chinese OK)
-- Sound like a helpful Malaysian friend (casual but clear)
-- No jargon, no long explanations
+const extractDestinationCountry = (text: string): string | undefined => {
+  const normalized = normalizeText(text);
+  const countryMatch = COUNTRY_KEYWORDS.find((keyword) => normalized.includes(keyword));
+  if (!countryMatch) return undefined;
+  if (countryMatch === "usa") return "US";
+  if (countryMatch === "united states") return "US";
+  if (countryMatch === "uk" || countryMatch === "united kingdom") return "UK";
+  if (countryMatch === "eu" || countryMatch === "europe") return "EU";
+  return countryMatch.replace(/\b\w/g, (character) => character.toUpperCase());
+};
 
----
-STEP 1 — VALIDITY CHECK (do this first, strictly):
+const detectIntent = (text: string): ScanIntent => {
+  const normalized = normalizeText(text);
+  return {
+    wantsDocuments: DOCUMENT_KEYWORDS.some((keyword) => normalized.includes(keyword)),
+    wantsPermitDetails: normalized.includes("permit") || normalized.includes("licence") || normalized.includes("license"),
+    wantsExportCheck: normalized.includes("can it export") || normalized.includes("can i export") || normalized.includes("export"),
+    wantsTechnicalTrace:
+      normalized.includes("decision trace") ||
+      normalized.includes("technical") ||
+      normalized.includes("rule hit") ||
+      normalized.includes("why") ||
+      normalized.includes("reason"),
+  };
+};
 
-Mark as INVALID if ANY of these are true:
-- Input is ONLY a greeting (hi, hello, hey, yo, wassup, apa khabar, etc.) with NO product mentioned
-- Input is random/nonsense text with no identifiable product
-- Input has a greeting + question but ZERO product noun (e.g. "hi what is the HS code?" — no product = invalid)
+const compactRestriction = (line: string): string => {
+  const normalized = line.trim();
+  if (!normalized) return "";
+  if (/^permits required:/i.test(normalized)) return normalized.replace(/^permits required:/i, "Permits:");
+  if (/^agency checks:/i.test(normalized)) return normalized.replace(/^agency checks:/i, "Agencies:");
+  if (/^common documents:/i.test(normalized)) return normalized.replace(/^common documents:/i, "Documents:");
+  return normalized;
+};
 
-Mark as VALID if:
-- A real product is mentioned (e.g. bag, chair, mango, laptop, rattan furniture, dried fruit, electronics)
-- Even casual phrasing like "eh can send this?" with an image counts as valid
-- Greeting + product is OK: "hi can I export rattan bag to China?" = VALID
+const isOpaqueRuleToken = (line: string): boolean => /^[A-Z]{2,}-[A-Z0-9-]{2,}$/i.test(line.trim());
 
-If INVALID, return:
-{
-  "invalid": true,
-  "message": "Eh bro, you never tell me what product leh 😅 Try something like: 'rattan bag to China' or 'dried mango to Japan'"
-}
-
----
-STEP 2 — If VALID product detected, do ALL of these:
-
-A. IDENTIFY PRODUCT
-- Detect product type (bag, chair, food, electronics, etc.)
-- Detect material if possible (wood, leather, fabric, metal)
-
-B. IDENTIFY TARGET MARKET
-- Extract country from query (China, Singapore, US, Japan, etc.)
-- If no country mentioned, assume China as default
-
-C. HS CODE
-- Estimate a real 6-digit HS Code based on the product
-- Must be a real HS code, not 0000.00
-
-D. FEASIBILITY
-Classify into ONE:
-✅ Green Light — generally allowed
-⚠️ Conditional — allowed with permits/certs/registration
-❌ Restricted — prohibited or heavily restricted
-
-E. INSIGHTS — THIS IS THE MOST IMPORTANT PART
-- ALWAYS answer the user's specific question in the insights if they asked one
-- Plus add any relevant practical blockers (SSM, permits, quarantine, VAT hint)
-- Tone: casual Manglish, short sentences, max 5 insight items
-
----
-OUTPUT FORMAT (STRICT JSON only, no markdown, no extra text):
-
-{
-  "feasibility": "green" | "yellow" | "red",
-  "feasibilityLabel": "✅ Green Light" | "⚠️ Conditional" | "❌ Restricted",
-  "product": {
-    "name": "Product name",
-    "material": "Material"
-  },
-  "hsCode": "XXXX.XX",
-  "confidence": "High" | "Medium" | "Low",
-  "insights": [
-    { "tone": "ok" | "warn" | "bad", "text": "insight text" }
-  ],
-  "transition": "transition message"
-}
-
-TRANSITION RULE:
-- Green or Conditional: "Can move one 👍 Want me to show you step-by-step how to export this? I build roadmap for you."
-- Restricted: suggest a brief alternative`;
-
-const parseAIResponse = (text: string): ScanResult => {
-  try {
-    const clean = text.replace(/```json|```/g, "").trim();
-    const parsed = JSON.parse(clean);
-    if (parsed.invalid) {
-      return {
-        product: "", hsCode: "", confidence: "Medium", status: "invalid",
-        insights: [], rawText: "", invalid: true,
-        invalidMessage: parsed.message || "Hmm bro, I cannot detect product 😅",
-      };
-    }
-    return {
-      product: parsed.product?.name || "Unknown Product",
-      hsCode: parsed.hsCode || "0000.00",
-      confidence: parsed.confidence || "Medium",
-      status: parsed.feasibility || "green",
-      insights: parsed.insights || [],
-      rawText: parsed.transition || "",
-    };
-  } catch {
-    return {
-      product: "Product", hsCode: "0000.00", confidence: "Medium", status: "yellow",
-      insights: [{ tone: "warn", text: text.slice(0, 200) }], rawText: "",
-    };
+const dedupeNormalized = (values: string[]): string[] => {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    const normalized = value.trim();
+    if (!normalized) continue;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(normalized);
   }
+  return out;
 };
 
-const mapBackendResult = (result: BackendScanResult): ScanResult => {
+const mapBackendResult = (result: BackendScanResult, scanId?: string, intent?: ScanIntent): ScanResult => {
   const status: ScanResult["status"] =
     result.status === "green" ? "green" :
     result.status === "restricted" ? "red" :
     result.status === "conditional" ? "yellow" : "yellow";
 
+  const wantsDocuments = Boolean(intent?.wantsDocuments);
+  const baseAnalysis: BackendScanAnalysis = result.analysis || {
+    verdict: "Needs More Info",
+    verdict_reason: result.compliance_summary || "More details are needed before a reliable decision.",
+    destination_country: null,
+    why_this_status: result.compliance_summary ? [result.compliance_summary] : [],
+    restrictions: [],
+    missing_information: result.follow_up_questions || [],
+    next_steps: [],
+  };
+
+  const reason = (baseAnalysis.verdict_reason || "").trim().toLowerCase();
+  const whyThisStatus = dedupeNormalized(
+    (baseAnalysis.why_this_status || [])
+      .filter((line) => !isOpaqueRuleToken(line))
+      .filter((line) => line.trim().toLowerCase() !== reason)
+  ).slice(0, 2);
+
+  const restrictions = dedupeNormalized((baseAnalysis.restrictions || []).map(compactRestriction));
+
+  const analysis: BackendScanAnalysis = {
+    ...baseAnalysis,
+    why_this_status: whyThisStatus,
+    restrictions,
+  };
+
   return {
+    scanId,
+    intent,
+    analysis,
     product: result.product_name || "Unknown Product",
     hsCode: result.hs_code_candidates[0] || "0000.00",
+    hsCodeCandidates: result.hs_code_candidates,
     confidence:
       result.hs_code_confidence >= 0.8 ? "High" :
       result.hs_code_confidence >= 0.5 ? "Medium" : "Low",
     status,
     insights: [
-      { tone: status === "green" ? "ok" : status === "yellow" ? "warn" : "bad", text: result.compliance_summary || "Backend scan completed." },
-      ...result.required_documents.slice(0, 2).map((doc) => ({ tone: "warn" as const, text: `Required document: ${doc}` })),
-      ...result.follow_up_questions.slice(0, 2).map((question) => ({ tone: "warn" as const, text: question })),
+      ...(wantsDocuments ? result.required_documents.slice(0, 2).map((doc) => ({ tone: "warn" as const, text: `Required document: ${doc}` })) : []),
     ],
     rawText: result.decision_steps.map((step) => `${step.phase}: ${step.decision}`).join(" · ") || result.hs_code_reasoning || "",
+    materialsDetected: result.materials_detected,
+    complianceSummary: result.compliance_summary,
+    requiredDocuments: result.required_documents,
+    requiredPermits: result.required_permits,
+    requiredAgencies: result.required_agencies,
+    extractionNotes: result.extraction_notes,
+    decisionSteps: result.decision_steps,
+    followUpQuestions: result.follow_up_questions,
+    source: result.source,
+    ruleHits: result.rule_hits,
   };
+};
+
+const STATUS_META: Record<Exclude<ScanResult["status"], "invalid">, { label: string; toneClass: string; icon: React.ElementType }> = {
+  green: { label: "Allowed", toneClass: "bg-success-soft text-success border-success/20", icon: CheckCircle2 },
+  yellow: { label: "Allowed With Restrictions", toneClass: "bg-warning-soft text-warning border-warning/30", icon: AlertTriangle },
+  red: { label: "Prohibited", toneClass: "bg-[hsl(var(--error-soft))] text-destructive border-destructive/20", icon: X },
+};
+
+const CONFIDENCE_META: Record<ScanResult["confidence"], { width: string; toneClass: string }> = {
+  High: { width: "88%", toneClass: "bg-success" },
+  Medium: { width: "64%", toneClass: "bg-warning" },
+  Low: { width: "36%", toneClass: "bg-destructive" },
 };
 
 const genId = () => Math.random().toString(36).slice(2);
@@ -188,29 +242,97 @@ const genId = () => Math.random().toString(36).slice(2);
 const WELCOME_MESSAGE: Message = {
   id: "welcome",
   role: "assistant",
-  type: "hint",
-  content: "Hey! 👋 I'm your AI export scanner. Tell me what product you want to export — I'll check HS codes, trade rules, and feasibility for you.\n\nTry one of these examples:",
-  hints: PRODUCT_HINTS,
+  type: "text",
+  content: "Hey! I'm your AI export scanner. Tell me the product and destination. If details are too general, I will ask for material and other missing info.",
 };
 
 export default function Scan() {
   const navigate = useNavigate();
-  const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
 
   const [messages, setMessages] = useState<Message[]>([WELCOME_MESSAGE]);
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [dragOver, setDragOver] = useState(false);
+  const [selectedReply, setSelectedReply] = useState<string>("");
   const [scanning, setScanning] = useState(false);
   const [lastResult, setLastResult] = useState<ScanResult | null>(null);
+  const [isListening, setIsListening] = useState(false);
+  const [speechSupported, setSpeechSupported] = useState(true);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, scanning]);
+
+  useEffect(() => {
+    const recognitionCtor = (
+      (window as Window & { SpeechRecognition?: SpeechRecognitionCtorLike }).SpeechRecognition ||
+      (window as Window & { webkitSpeechRecognition?: SpeechRecognitionCtorLike }).webkitSpeechRecognition
+    );
+
+    if (!recognitionCtor) {
+      setSpeechSupported(false);
+      return;
+    }
+
+    const recognition = new recognitionCtor();
+    recognition.lang = "en-US";
+    recognition.interimResults = false;
+    recognition.continuous = false;
+
+    recognition.onstart = () => setIsListening(true);
+    recognition.onend = () => setIsListening(false);
+    recognition.onerror = () => setIsListening(false);
+    recognition.onresult = (event) => {
+      let transcript = "";
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        const result = event.results[index];
+        transcript += result?.[0]?.transcript || "";
+      }
+      const clean = transcript.trim();
+      if (!clean) return;
+
+      setQuery((previous) => (previous.trim() ? `${previous.trim()} ${clean}` : clean));
+      textareaRef.current?.focus();
+    };
+
+    recognitionRef.current = recognition;
+
+    return () => {
+      recognition.stop();
+      recognitionRef.current = null;
+    };
+  }, []);
+
+  const handleMicClick = () => {
+    if (!speechSupported || !recognitionRef.current) {
+      setMessages((previous) => [
+        ...previous,
+        {
+          id: genId(),
+          role: "assistant",
+          type: "text",
+          content: "Speech-to-text is not supported in this browser. Please type your prompt.",
+        },
+      ]);
+      return;
+    }
+
+    if (isListening) {
+      recognitionRef.current.stop();
+      return;
+    }
+
+    try {
+      recognitionRef.current.lang = resolveRecognitionLanguage(query);
+      recognitionRef.current.start();
+    } catch {
+      setIsListening(false);
+    }
+  };
 
   const handleFiles = (files: FileList | null) => {
     if (!files || !files[0]) return;
@@ -218,64 +340,92 @@ export default function Scan() {
     setFile(f);
     const url = URL.createObjectURL(f);
     setPreview(url);
-    // Add image preview message
-    setMessages(prev => [...prev, {
-      id: genId(), role: "user", type: "image",
-      content: f.name, imagePreview: url,
-    }, {
-      id: genId(), role: "assistant", type: "hint",
-      content: "Nice, got your product image! 📸 Now tell me where you want to export it — or just hit scan and I'll analyse it.",
-      hints: PRODUCT_HINTS.slice(0, 2).map(h => ({ ...h, label: `Send to ${h.value.split(' to ')[1] || 'China'}`, value: h.value })),
-    }]);
+    textareaRef.current?.focus();
   };
 
-  const toBase64 = (f: File): Promise<string> =>
-    new Promise((res, rej) => {
-      const r = new FileReader();
-      r.onload = () => res((r.result as string).split(",")[1]);
-      r.onerror = rej;
-      r.readAsDataURL(f);
-    });
-
   const sendMessage = async (overrideQuery?: string) => {
-    const activeQuery = overrideQuery ?? query.trim();
+    const typedQuery = (overrideQuery ?? query.trim()).trim();
+    const replyContext = selectedReply.trim();
+    const activeQuery = [replyContext, typedQuery].filter(Boolean).join("\n");
     if (!activeQuery && !file) return;
+
+    if (!activeQuery && file) {
+      setMessages(prev => [...prev, {
+        id: genId(), role: "assistant", type: "hint",
+        content: "Please add a short prompt so I can run an accurate scan. Example format: product, material, destination country.",
+        hints: [
+          { icon: Info, label: "Describe product and material", value: "This is a woven rattan handbag made from finished rattan." },
+          { icon: Info, label: "Add destination country", value: "Destination country: China" },
+        ],
+      }]);
+      return;
+    }
+
+    const activeFile = file;
+    const intent = detectIntent(activeQuery);
 
     const userMsg: Message = {
       id: genId(), role: "user", type: "text",
-      content: activeQuery || "Please analyse this product image.",
+      content: typedQuery || replyContext || "Please analyse this product image.",
+      repliedTo: replyContext || undefined,
     };
 
     setMessages(prev => [...prev, userMsg]);
     setQuery("");
+    setSelectedReply("");
+
     setScanning(true);
 
     try {
-      const response = await scanProduct({
-        product_prompt: activeQuery || undefined,
-        destination_country: "China",
-        product_image: file,
-      });
+      const activeScanId = lastResult?.scanId;
+      const shouldUseFollowUp = Boolean(activeScanId) && !activeFile;
 
-      const parsed = mapBackendResult(response.result);
-      setLastResult(parsed);
+      let nextResult: ScanResult;
+      if (shouldUseFollowUp) {
+        const destinationCountry = extractDestinationCountry(activeQuery);
+        const response = await followUpScan(activeScanId!, {
+          message: activeQuery || "Please continue the compliance analysis.",
+          ...(destinationCountry ? { destination_country: destinationCountry } : {}),
+        });
+        nextResult = mapBackendResult(response.result, response.scan_id, intent);
+      } else {
+        const destinationCountry = extractDestinationCountry(activeQuery);
+        const response = await scanProduct({
+          product_prompt: activeQuery || undefined,
+          ...(destinationCountry ? { destination_country: destinationCountry } : {}),
+          product_image: activeFile,
+        });
+        nextResult = mapBackendResult(response.result, response.scan_id, intent);
+      }
 
-      if (parsed.invalid) {
+      setLastResult(nextResult);
+
+      if (nextResult.invalid) {
         setMessages(prev => [...prev, {
-          id: genId(), role: "assistant", type: "hint",
-          content: parsed.invalidMessage || "Hmm, I need a product name to scan! 😅",
-          hints: PRODUCT_HINTS,
+          id: genId(), role: "assistant", type: "text",
+          content: nextResult.invalidMessage || "Hmm, I need a product name to scan! 😅",
         }]);
       } else {
+        const followUpHints = (nextResult.followUpQuestions || []).slice(0, 4).map((question) => ({
+          icon: Info,
+          label: question,
+          value: question,
+        }));
+
         setMessages(prev => [...prev, {
           id: genId(), role: "assistant", type: "result",
-          content: "", result: parsed,
-        }]);
+          content: "", result: nextResult,
+        }, ...(followUpHints.length > 0 ? [{
+          id: genId(), role: "assistant" as const, type: "hint" as const,
+          content: "To improve accuracy, answer one of these:",
+          hints: followUpHints,
+        }] : [])]);
       }
-    } catch {
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Alamak something went wrong 😅 Cuba lagi!";
       setMessages(prev => [...prev, {
         id: genId(), role: "assistant", type: "text",
-        content: "Alamak something went wrong 😅 Cuba lagi!",
+        content: message,
       }]);
     } finally {
       setScanning(false);
@@ -285,15 +435,8 @@ export default function Scan() {
   };
 
   const handleHint = (value: string) => {
-    setQuery(value);
-    sendMessage(value);
-  };
-
-  const handleFollowUp = (append: string) => {
-    if (lastResult) {
-      const q = lastResult.product + append;
-      sendMessage(q);
-    }
+    setSelectedReply(value.trim());
+    textareaRef.current?.focus();
   };
 
   const reset = () => {
@@ -301,6 +444,7 @@ export default function Scan() {
     setFile(null);
     setPreview(null);
     setQuery("");
+    setSelectedReply("");
     setLastResult(null);
   };
 
@@ -348,12 +492,20 @@ export default function Scan() {
 
                 {/* Text message */}
                 {msg.type === "text" && (
-                  <div className={`rounded-2xl px-4 py-3 text-sm leading-relaxed ${
-                    msg.role === "user"
-                      ? "bg-primary text-primary-foreground rounded-tr-sm"
-                      : "bg-card border border-border text-foreground rounded-tl-sm"
-                  }`}>
-                    {msg.content}
+                  <div className="space-y-1.5">
+                    {msg.role === "user" && msg.repliedTo && (
+                      <div className="max-w-[85%] ml-auto rounded-xl border border-primary/25 bg-primary/10 px-3 py-2 text-xs text-primary-foreground/90">
+                        <div className="text-[10px] uppercase tracking-wider text-primary-foreground/70">Replying to</div>
+                        <div className="truncate text-primary-foreground">{msg.repliedTo}</div>
+                      </div>
+                    )}
+                    <div className={`rounded-2xl px-4 py-3 text-sm leading-relaxed ${
+                      msg.role === "user"
+                        ? "bg-primary text-primary-foreground rounded-tr-sm"
+                        : "bg-card border border-border text-foreground rounded-tl-sm"
+                    }`}>
+                      {msg.content}
+                    </div>
                   </div>
                 )}
 
@@ -387,79 +539,131 @@ export default function Scan() {
                 {msg.type === "result" && msg.result && (
                   <div className="w-full rounded-2xl rounded-tl-sm border border-border bg-card shadow-soft-md overflow-hidden">
                     {/* Result header */}
-                    <div className={`px-4 py-3 border-b border-border flex items-center justify-between ${
+                    <div className={`px-4 py-3 border-b border-border flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between ${
                       msg.result.status === "green" ? "bg-success-soft/40" :
                       msg.result.status === "yellow" ? "bg-warning-soft/40" : "bg-[hsl(var(--error-soft))]"
                     }`}>
-                      <div>
+                      <div className="space-y-1.5">
                         <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Scan Result</div>
-                        <div className="text-base font-semibold text-foreground mt-0.5">{msg.result.product}</div>
-                        <div className="flex items-center gap-2 mt-1">
-                          <span className="rounded-md bg-secondary px-2 py-0.5 text-[11px] font-medium text-foreground">
-                            HS {msg.result.hsCode}
-                          </span>
-                          <span className="rounded-md bg-warning-soft px-2 py-0.5 text-[11px] font-medium text-warning">
-                            {msg.result.confidence} confidence
-                          </span>
+                        <div className="text-base font-semibold text-foreground">{msg.result.product}</div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          {msg.result.analysis.destination_country && (
+                            <span className="rounded-md bg-primary-soft px-2 py-0.5 text-[11px] font-medium text-primary">
+                              Destination: {msg.result.analysis.destination_country}
+                            </span>
+                          )}
+                          <span className="rounded-md bg-secondary px-2 py-0.5 text-[11px] font-medium text-foreground">HS {msg.result.hsCode}</span>
+                          <span className="rounded-md bg-warning-soft px-2 py-0.5 text-[11px] font-medium text-warning">{msg.result.confidence} confidence</span>
+                          {msg.result.source && (
+                            <span className="rounded-md bg-card px-2 py-0.5 text-[11px] font-medium text-muted-foreground">Source: {msg.result.source}</span>
+                          )}
                         </div>
                       </div>
-                      {msg.result.status === "green" && (
-                        <span className="inline-flex items-center gap-1.5 rounded-full bg-success-soft px-2.5 py-1 text-[11px] font-semibold text-success">
-                          <CheckCircle2 className="h-3 w-3" /> Green Light
-                        </span>
-                      )}
-                      {msg.result.status === "yellow" && (
-                        <span className="inline-flex items-center gap-1.5 rounded-full bg-warning-soft px-2.5 py-1 text-[11px] font-semibold text-warning">
-                          <AlertTriangle className="h-3 w-3" /> Conditional
-                        </span>
-                      )}
-                      {msg.result.status === "red" && (
-                        <span className="inline-flex items-center gap-1.5 rounded-full bg-[hsl(var(--error-soft))] px-2.5 py-1 text-[11px] font-semibold text-destructive">
-                          <X className="h-3 w-3" /> Restricted
-                        </span>
-                      )}
+                      {msg.result.status !== "invalid" && (() => {
+                        const meta = STATUS_META[msg.result.status];
+                        const Icon = meta.icon;
+                        return (
+                          <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${meta.toneClass}`}>
+                            <Icon className="h-3 w-3" /> {meta.label}
+                          </span>
+                        );
+                      })()}
                     </div>
 
-                    {/* Insights */}
-                    <div className="px-4 py-3 space-y-2">
-                      {msg.result.insights.map((ins, i) => (
-                        <div key={i} className={`flex items-start gap-2.5 rounded-xl border px-3 py-2.5 text-[13px] ${
-                          ins.tone === "ok" ? "border-success/20 bg-success-soft/60 text-foreground" :
-                          ins.tone === "warn" ? "border-warning/30 bg-warning-soft/60 text-foreground" :
-                          "border-destructive/20 bg-[hsl(var(--error-soft))] text-foreground"
-                        }`}>
-                          {ins.tone === "ok" ? <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-success" /> :
-                           ins.tone === "warn" ? <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" /> :
-                           <X className="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" />}
-                          <span className="leading-relaxed">{ins.text}</span>
+                    <div className="px-4 py-3 space-y-3">
+                      <div className="rounded-xl border border-border bg-background/60 px-3 py-2.5 text-[13px] text-foreground">
+                        <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1">Summary</div>
+                        {msg.result.analysis.verdict_reason || msg.result.complianceSummary || "No summary returned."}
+                      </div>
+
+                      {msg.result.analysis.why_this_status?.map((line, i) => (
+                        <div key={`why-${i}`} className="flex items-start gap-2 text-[13px] text-foreground">
+                          <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
+                          <span className="leading-relaxed">{line}</span>
                         </div>
                       ))}
-                    </div>
 
-                    {/* Transition + follow-up chips */}
-                    {msg.result.rawText && (
-                      <div className="px-4 pb-3">
-                        <div className="flex items-start gap-2 rounded-xl border border-primary/20 bg-primary-soft/40 px-3 py-2.5 text-[13px] text-foreground">
-                          <Sparkles className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
-                          <span>{msg.result.rawText}</span>
+                      {(msg.result.status !== "green" || msg.result.intent?.wantsExportCheck || msg.result.intent?.wantsPermitDetails) && msg.result.analysis.restrictions?.length ? (
+                        <div className="rounded-xl border border-warning/30 bg-warning-soft/30 p-3">
+                          <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Restrictions</div>
+                          <ul className="mt-2 space-y-1 text-sm text-foreground">
+                            {msg.result.analysis.restrictions.map((item) => (
+                              <li key={item} className="flex gap-2">
+                                <span className="mt-2 h-1.5 w-1.5 rounded-full bg-warning shrink-0" />
+                                <span>{item}</span>
+                              </li>
+                            ))}
+                          </ul>
                         </div>
-                      </div>
-                    )}
+                      ) : null}
 
-                    {/* Follow-up chips */}
-                    <div className="px-4 pb-3">
-                      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-2">Ask more</div>
-                      <div className="flex flex-wrap gap-1.5">
-                        {QUICK_HINTS.map((h) => {
-                          const Icon = h.icon;
-                          return (
-                            <button key={h.label} onClick={() => handleFollowUp(h.value)}
-                              className="inline-flex items-center gap-1.5 rounded-full border border-border bg-secondary px-2.5 py-1 text-[11px] font-medium text-muted-foreground hover:border-primary/40 hover:bg-primary-soft hover:text-primary transition-base">
-                              <Icon className="h-3 w-3" />{h.label}
-                            </button>
-                          );
-                        })}
-                      </div>
+                      {msg.result.intent?.wantsDocuments && (
+                        <div className="rounded-xl border border-border bg-background/50 p-3">
+                          <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Required documents</div>
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {msg.result.requiredDocuments?.length ? msg.result.requiredDocuments.map((item) => (
+                              <span key={item} className="rounded-full border border-border bg-card px-2.5 py-1 text-[11px] text-foreground">{item}</span>
+                            )) : <span className="text-sm text-muted-foreground">None listed</span>}
+                          </div>
+                        </div>
+                      )}
+
+                        {msg.result.analysis.next_steps?.length ? (
+                          <div className="rounded-xl border border-border bg-background/50 p-3 xl:col-span-2">
+                            <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Recommended next steps</div>
+                            <ul className="mt-2 space-y-1 text-sm text-foreground">
+                              {msg.result.analysis.next_steps.map((step) => (
+                                <li key={step} className="flex gap-2">
+                                  <span className="mt-2 h-1.5 w-1.5 rounded-full bg-primary shrink-0" />
+                                  <span>{step}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        ) : null}
+
+                        {msg.result.intent?.wantsTechnicalTrace && (
+                          <div className="rounded-xl border border-border bg-background/50 p-3 xl:col-span-2">
+                            <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Technical decision timeline</div>
+                            <div className="mt-2 space-y-2">
+                              {msg.result.decisionSteps?.length ? msg.result.decisionSteps.map((step, index) => (
+                                <div key={`${step.phase}-${index}`} className="flex gap-3 rounded-lg border border-border bg-card px-3 py-2">
+                                  <div className="mt-0.5 h-2.5 w-2.5 rounded-full bg-primary shrink-0" />
+                                  <div className="min-w-0">
+                                    <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{step.phase}</div>
+                                    <div className="text-sm font-medium text-foreground">{step.decision}</div>
+                                    <div className="text-xs text-muted-foreground">{step.reason}</div>
+                                  </div>
+                                </div>
+                              )) : <div className="text-sm text-muted-foreground">No decision trace returned.</div>}
+                            </div>
+                          </div>
+                        )}
+
+                        {msg.result.intent?.wantsTechnicalTrace && msg.result.ruleHits?.length ? (
+                          <div className="rounded-xl border border-border bg-background/50 p-3 xl:col-span-2">
+                            <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Rule hits</div>
+                            <div className="mt-2 flex flex-wrap gap-2">
+                              {msg.result.ruleHits.map((rule) => (
+                                <span key={rule} className="rounded-full bg-secondary px-2.5 py-1 text-[11px] text-foreground">{rule}</span>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+
+                        {msg.result.intent?.wantsTechnicalTrace && msg.result.extractionNotes?.length ? (
+                          <div className="rounded-xl border border-border bg-background/50 p-3 xl:col-span-2">
+                            <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Extraction notes</div>
+                            <ul className="mt-2 space-y-1 text-sm text-foreground">
+                              {msg.result.extractionNotes.map((note) => (
+                                <li key={note} className="flex gap-2">
+                                  <span className="mt-2 h-1.5 w-1.5 rounded-full bg-primary shrink-0" />
+                                  <span>{note}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        ) : null}
                     </div>
 
                     {/* CTA */}
@@ -515,61 +719,77 @@ export default function Scan() {
             </div>
           )}
 
-          {/* Drag & drop zone (compact) */}
-          <div
-            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-            onDragLeave={() => setDragOver(false)}
-            onDrop={(e) => { e.preventDefault(); setDragOver(false); handleFiles(e.dataTransfer.files); }}
-            className={`mb-2 flex items-center justify-center gap-2 rounded-xl border-2 border-dashed py-3 text-xs text-muted-foreground cursor-pointer transition-base ${
-              dragOver ? "border-primary bg-primary-soft text-primary" : "border-border hover:border-primary/40 hover:bg-card/60"
-            }`}
-            onClick={() => fileInputRef.current?.click()}
-          >
-            <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={(e) => handleFiles(e.target.files)} />
-            <UploadCloud className="h-4 w-4" />
-            <span>Drop product photo here or <span className="font-medium text-primary">browse</span></span>
-          </div>
+          {selectedReply && (
+            <div className="mb-2 flex items-center justify-between gap-2 rounded-xl border border-border bg-card px-3 py-2 text-xs text-foreground">
+              <div className="min-w-0">
+                <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Replying</div>
+                <div className="truncate">{selectedReply}</div>
+              </div>
+              <button
+                onClick={() => setSelectedReply("")}
+                className="rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-foreground transition-base"
+                aria-label="Clear reply"
+                title="Clear reply"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          )}
+          <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={(e) => handleFiles(e.target.files)} />
 
           {/* Text input */}
-          <div className="flex items-end gap-2 rounded-2xl border border-border bg-card p-2 shadow-soft-sm focus-within:border-primary focus-within:ring-4 focus-within:ring-primary/10 transition-base">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary-soft text-primary">
-              <Sparkles className="h-4 w-4" />
-            </div>
+          <div className="flex items-end gap-2 rounded-2xl border border-border/80 bg-card/95 px-2 py-2 shadow-soft-sm focus-within:border-primary/50 focus-within:ring-4 focus-within:ring-primary/10 transition-base">
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-border bg-background text-muted-foreground hover:border-primary/30 hover:bg-primary-soft hover:text-primary transition-base"
+              title="Add product image"
+              aria-label="Add product image"
+            >
+              <ImageIcon className="h-4 w-4" />
+            </button>
             <textarea
               ref={textareaRef}
               value={query}
               onChange={(e) => { setQuery(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 128) + "px"; }}
               onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
-              placeholder="e.g. rattan bag to China, dried mango to Japan…"
+              placeholder="Describe the product and destination country"
               rows={1}
-              className="flex-1 resize-none bg-transparent px-1 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none max-h-32"
+              className="flex-1 resize-none bg-transparent px-2 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none max-h-32"
             />
-            <div className="flex items-center gap-1">
-              <button className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-secondary hover:text-foreground transition-base">
-                <Mic className="h-4 w-4" />
+            <div className="flex items-center gap-1.5 pl-1">
+              <button
+                onClick={handleMicClick}
+                disabled={scanning}
+                className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border transition-base ${
+                  isListening
+                    ? "border-primary/40 bg-primary-soft text-primary"
+                    : "border-transparent text-muted-foreground hover:border-border hover:bg-secondary hover:text-foreground"
+                }`}
+                title={isListening ? "Stop voice input" : "Start voice input"}
+                aria-label={isListening ? "Stop voice input" : "Start voice input"}
+              >
+                {isListening ? <Square className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
               </button>
               <button
                 onClick={() => sendMessage()}
                 disabled={scanning || (!file && !query.trim())}
-                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-glow hover:bg-primary/90 disabled:opacity-50 transition-base"
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-glow hover:bg-primary/90 disabled:opacity-50 disabled:shadow-none transition-base"
               >
                 {scanning ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
               </button>
             </div>
           </div>
 
-          <div className="mt-2 flex items-center justify-between px-1">
-            <div className="flex flex-wrap gap-1.5">
-              {QUICK_HINTS.slice(0, 3).map((h) => {
-                const Icon = h.icon;
-                return (
-                  <button key={h.label} onClick={() => handleFollowUp(h.value)}
-                    className="inline-flex items-center gap-1 rounded-full border border-border bg-card px-2.5 py-1 text-[11px] text-muted-foreground hover:border-primary/40 hover:bg-primary-soft hover:text-primary transition-base">
-                    <Icon className="h-3 w-3" />{h.label}
-                  </button>
-                );
-              })}
+          {isListening && (
+            <div className="mt-2 flex items-center justify-start px-1">
+              <div className="inline-flex items-center gap-1.5 rounded-full border border-primary/30 bg-primary-soft px-2.5 py-1 text-[11px] text-primary">
+                <span className="inline-block h-1.5 w-1.5 rounded-full bg-primary animate-pulse" />
+                Listening... tap stop when done
+              </div>
             </div>
+          )}
+
+          <div className="mt-2 flex items-center justify-end px-1">
             <button onClick={reset} className="text-[11px] text-muted-foreground hover:text-foreground transition-base flex items-center gap-1">
               <RefreshCw className="h-3 w-3" /> Reset
             </button>

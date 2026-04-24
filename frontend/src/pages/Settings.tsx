@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowLeft, Bell, Globe2, Lock, Moon, Shield, Sun } from "lucide-react";
 import { toast } from "sonner";
@@ -14,6 +14,23 @@ const Settings = () => {
   const [twoFA, setTwoFA] = useState(true);
   const [language, setLanguage] = useState("English");
   const [currency, setCurrency] = useState("MYR");
+
+  useEffect(() => {
+    const storedLanguage = localStorage.getItem("app.language");
+    const storedCurrency = localStorage.getItem("app.currency");
+    if (storedLanguage) setLanguage(storedLanguage);
+    if (storedCurrency) setCurrency(storedCurrency);
+  }, []);
+
+  const handleLanguageChange = (value: string) => {
+    setLanguage(value);
+    localStorage.setItem("app.language", value);
+  };
+
+  const handleCurrencyChange = (value: string) => {
+    setCurrency(value);
+    localStorage.setItem("app.currency", value);
+  };
 
   return (
     <div className="min-h-screen bg-background">
@@ -102,13 +119,13 @@ const Settings = () => {
               <Select
                 label="Language"
                 value={language}
-                onChange={setLanguage}
+                onChange={handleLanguageChange}
                 options={["English", "Bahasa Malaysia", "中文 (简体)", "العربية"]}
               />
               <Select
                 label="Currency"
                 value={currency}
-                onChange={setCurrency}
+                onChange={handleCurrencyChange}
                 options={["MYR", "USD", "SGD", "CNY", "EUR"]}
               />
             </div>
@@ -136,7 +153,11 @@ const Settings = () => {
 
           <div className="flex justify-end">
             <button
-              onClick={() => toast.success("Settings saved")}
+              onClick={() => {
+                localStorage.setItem("app.language", language);
+                localStorage.setItem("app.currency", currency);
+                toast.success("Settings saved");
+              }}
               className="rounded-lg bg-primary px-5 py-2 text-sm font-medium text-primary-foreground shadow-soft-sm hover:bg-primary/90 transition-base"
             >
               Save settings

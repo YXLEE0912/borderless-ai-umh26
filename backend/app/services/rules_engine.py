@@ -18,11 +18,11 @@ def apply_rules(
     result: ScanResult,
     prompt: str,
     destination_country: str | None,
-    merchant_ssm: str | None,
     rules_bundle: dict | None = None,
 ) -> ScanResult:
     rules = rules_bundle or load_local_rules()
     normalized_text = _normalize_text(" ".join([prompt, result.product_name, " ".join(result.materials_detected)]))
+    material_context = _build_material_context(normalized_text)
 
     rule_hits: list[str] = list(result.rule_hits)
     required_documents = _dedupe(result.required_documents)
@@ -104,7 +104,7 @@ def apply_rules(
     elif not hs_code_reasoning and result.hs_code_candidates:
         hs_code_reasoning = "HS candidates identified, but no HS policy mapping matched in the active ruleset."
 
-    layer1_hits = _find_matches(malaysia_rules["layer1_absolute_prohibition"], normalized_text)
+    layer1_hits = _find_matches(malaysia_rules["layer1_absolute_prohibition"], normalized_text, material_context)
     if layer1_hits:
         status = ScanStatus.restricted
         for hit in layer1_hits:
@@ -118,7 +118,7 @@ def apply_rules(
         )
 
     if status != ScanStatus.restricted:
-        layer2_hits = _find_matches(malaysia_rules["layer2_license_required"], normalized_text)
+        layer2_hits = _find_matches(malaysia_rules["layer2_license_required"], normalized_text, material_context)
         if layer2_hits:
             if strict_hs_mode and hs_hits:
                 for hit in layer2_hits:
@@ -144,7 +144,7 @@ def apply_rules(
                     reason=f"Matched license-required rules: {', '.join(hit['rule_id'] for hit in layer2_hits)}",
                 )
 
-        layer3_hits = _find_matches(malaysia_rules["layer3_conditional"], normalized_text)
+        layer3_hits = _find_matches(malaysia_rules["layer3_conditional"], normalized_text, material_context)
         if layer3_hits:
             if strict_hs_mode and hs_hits:
                 for hit in layer3_hits:
@@ -189,16 +189,6 @@ def apply_rules(
             reason=f"Destination overlays matched: {', '.join(destination_hits)}",
         )
 
-    ssm_check = _evaluate_ssm(merchant_ssm)
-    if ssm_check != "valid":
-        extraction_notes.append("Merchant SSM should be validated before submission to customs workflow.")
-        _add_decision_step(
-            decision_steps,
-            phase="merchant_validation",
-            decision="ssm_review_required",
-            reason=f"ssm_check={ssm_check}",
-        )
-
     if hs_gate_triggered and status != ScanStatus.restricted:
         status = ScanStatus.review
 
@@ -219,7 +209,6 @@ def apply_rules(
         hs_code_reasoning=hs_code_reasoning,
         status=status,
         compliance_summary=result.compliance_summary,
-        ssm_check=ssm_check,
         required_documents=_dedupe(required_documents),
         required_permits=_dedupe(required_permits),
         required_agencies=_dedupe(required_agencies),
@@ -334,21 +323,89 @@ def _apply_destination_rules(*, rules: dict, normalized_text: str, destination_c
     return notes, hits
 
 
-def _find_matches(layer_rules: list[dict], normalized_text: str) -> list[dict]:
+def _find_matches(layer_rules: list[dict], normalized_text: str, material_context: dict[str, bool]) -> list[dict]:
     matches: list[dict] = []
     for rule in layer_rules:
-        if _contains_any(normalized_text, rule.get("keywords", [])):
+        matched_keywords = _matched_keywords(normalized_text, rule.get("keywords", []))
+        if not matched_keywords:
+            continue
+
+        if str(rule.get("rule_id", "")).strip().upper() == "MY-L3-ANIMAL":
+            has_non_leather_signal = any(keyword.lower() != "leather" for keyword in matched_keywords)
+            leather_only_hit = ("leather" in [keyword.lower() for keyword in matched_keywords]) and not has_non_leather_signal
+
+            # Do not classify synthetic/faux/vegan leather as animal-based unless stronger animal signals exist.
+            if material_context.get("synthetic_leather_only") and leather_only_hit:
+                continue
+
+            if not material_context.get("animal_signal") and leather_only_hit:
+                continue
+
             matches.append(rule)
     return matches
 
 
-def _evaluate_ssm(merchant_ssm: str | None) -> str:
-    if not merchant_ssm:
-        return "missing"
-    normalized = merchant_ssm.strip()
-    if re.fullmatch(r"\d{12}", normalized):
-        return "valid"
-    return "invalid_format"
+def _build_material_context(normalized_text: str) -> dict[str, bool]:
+    real_leather_terms = [
+        "real leather",
+        "genuine leather",
+        "cowhide",
+        "sheepskin",
+        "goatskin",
+        "animal hide",
+        "animal skin",
+        "hide",
+        "skin",
+    ]
+    synthetic_leather_terms = [
+        "synthetic leather",
+        "faux leather",
+        "vegan leather",
+        "pu leather",
+        "pvc leather",
+        "artificial leather",
+        "leatherette",
+    ]
+    suede_like_terms = [
+        "suede-like",
+        "suede like",
+        "suede-look",
+        "suede look",
+        "mock suede",
+        "imitation suede",
+        "microfiber suede",
+    ]
+    animal_terms = ["animal", "meat", "poultry", "fish", "dairy", "egg", "gelatin"]
+
+    has_real_leather = _contains_any(normalized_text, real_leather_terms)
+    has_synthetic_leather = _contains_any(normalized_text, synthetic_leather_terms)
+    has_suede_like = _contains_any(normalized_text, suede_like_terms)
+    has_generic_animal_terms = _contains_any(normalized_text, animal_terms)
+
+    animal_signal = has_real_leather or has_generic_animal_terms
+    if has_synthetic_leather and not has_real_leather and not has_generic_animal_terms:
+        animal_signal = False
+
+    return {
+        "has_real_leather": has_real_leather,
+        "has_synthetic_leather": has_synthetic_leather,
+        "has_suede_like": has_suede_like,
+        "synthetic_leather_only": has_synthetic_leather and not has_real_leather and not has_generic_animal_terms,
+        "animal_signal": animal_signal,
+    }
+
+
+def _matched_keywords(text: str, keywords: list[str]) -> list[str]:
+    return [keyword for keyword in keywords if _keyword_in_text(text, str(keyword))]
+
+
+def _keyword_in_text(text: str, keyword: str) -> bool:
+    clean_keyword = keyword.strip().lower()
+    if not clean_keyword:
+        return False
+    if " " in clean_keyword or "-" in clean_keyword:
+        return clean_keyword in text
+    return re.search(rf"\\b{re.escape(clean_keyword)}\\b", text) is not None
 
 
 def _extract_logistics_fields(prompt: str) -> dict[str, str]:
@@ -382,7 +439,7 @@ def _country_to_key(value: str) -> str:
 
 
 def _contains_any(text: str, keywords: list[str]) -> bool:
-    return any(keyword.lower() in text for keyword in keywords)
+    return any(_keyword_in_text(text, str(keyword)) for keyword in keywords)
 
 
 def _normalize_text(value: str) -> str:

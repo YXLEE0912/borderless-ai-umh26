@@ -26,8 +26,6 @@ async def create_scan(
     request: Request,
     product_prompt: Annotated[str | None, Form()] = None,
     destination_country: Annotated[str | None, Form()] = None,
-    merchant_name: Annotated[str | None, Form()] = None,
-    merchant_ssm: Annotated[str | None, Form()] = None,
     product_image: Annotated[UploadFile | None, File()] = None,
 ):
     scanner = request.app.state.scanner
@@ -66,8 +64,6 @@ async def create_scan(
         image_bytes=image_bytes,
         image_content_type=image_content_type,
         image_filename=image_filename,
-        merchant_name=merchant_name,
-        merchant_ssm=merchant_ssm,
     )
     execution_ms = int((perf_counter() - scan_started) * 1000)
 
@@ -77,8 +73,6 @@ async def create_scan(
         "updated_at": created_at,
         "prompt": normalized_prompt,
         "destination_country": destination_country,
-        "merchant_name": merchant_name,
-        "merchant_ssm": merchant_ssm,
         "image_asset": image_asset,
         "result": result.model_dump(),
     }
@@ -102,14 +96,11 @@ async def create_scan(
                 "required_documents": result.required_documents,
                 "required_permits": result.required_permits,
                 "required_agencies": result.required_agencies,
-                "ssm_check": result.ssm_check,
                 "source": result.source,
                 "execution_ms": execution_ms,
                 "request_payload": {
                     "product_prompt": normalized_prompt,
                     "destination_country": destination_country,
-                    "merchant_name": merchant_name,
-                    "merchant_ssm": merchant_ssm,
                     "image_filename": image_filename,
                 },
                 "response_payload": result.model_dump(),
@@ -176,8 +167,6 @@ async def continue_scan_follow_up(
     follow_up_prompt = _compose_follow_up_prompt(existing_prompt=existing_prompt, user_message=payload.message)
 
     destination_country = payload.destination_country or record.get("destination_country")
-    merchant_name = payload.merchant_name or record.get("merchant_name")
-    merchant_ssm = payload.merchant_ssm or record.get("merchant_ssm")
 
     result = await scanner.analyze(
         prompt=follow_up_prompt,
@@ -185,8 +174,6 @@ async def continue_scan_follow_up(
         image_bytes=None,
         image_content_type=None,
         image_filename=None,
-        merchant_name=merchant_name,
-        merchant_ssm=merchant_ssm,
     )
 
     now = datetime.now(timezone.utc)
@@ -197,8 +184,6 @@ async def continue_scan_follow_up(
         {
             "updated_at": now,
             "destination_country": destination_country,
-            "merchant_name": merchant_name,
-            "merchant_ssm": merchant_ssm,
             "result": result.model_dump(),
         },
     )
@@ -213,8 +198,6 @@ async def continue_scan_follow_up(
             "message": payload.message.strip(),
             "metadata": {
                 "destination_country": destination_country,
-                "merchant_name": merchant_name,
-                "merchant_ssm": merchant_ssm,
             },
             "created_at": now,
             "updated_at": now,

@@ -27,8 +27,6 @@ class ZAIClient:
         image_bytes: bytes | None = None,
         image_content_type: str | None = None,
         image_filename: str | None = None,
-        merchant_name: str | None = None,
-        merchant_ssm: str | None = None,
     ) -> str:
         if not self.api_key:
             raise RuntimeError("Z.ai API key is not configured")
@@ -39,8 +37,6 @@ class ZAIClient:
                 "text": self._build_prompt(
                     prompt=prompt,
                     destination_country=destination_country,
-                    merchant_name=merchant_name,
-                    merchant_ssm=merchant_ssm,
                     image_filename=image_filename,
                 ),
             }
@@ -73,7 +69,6 @@ class ZAIClient:
                         "hs_code_reasoning (short explanation of why those HS candidates were selected), "
                         "status (one of: green, conditional, restricted, review), "
                         "compliance_summary (string), "
-                        "ssm_check (one of: valid, invalid_format, missing, unknown), "
                         "required_documents (array), "
                         "required_permits (array), "
                         "required_agencies (array), "
@@ -244,18 +239,14 @@ class ZAIClient:
         self,
         prompt: str,
         destination_country: str | None,
-        merchant_name: str | None,
-        merchant_ssm: str | None,
         image_filename: str | None,
     ) -> str:
         return (
             f"Product prompt: {prompt}\n"
             f"Destination country: {destination_country or 'unknown'}\n"
-            f"Merchant name: {merchant_name or 'unknown'}\n"
-            f"Merchant SSM: {merchant_ssm or 'unknown'}\n"
             f"Image filename: {image_filename or 'unknown'}\n"
             "Tasks: identify material, estimate HS candidates, check Malaysia prohibition layers, indicate permit and agency, "
-            "validate SSM format if provided, and output sea logistics document checklist."
+            "and output sea logistics document checklist."
         )
 
     def _build_data_url(self, content: bytes, content_type: str) -> str:

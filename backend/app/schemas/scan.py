@@ -16,6 +16,16 @@ class ChatMessageRole(str, Enum):
     assistant = "assistant"
 
 
+class ScanAnalysis(BaseModel):
+    verdict: str = "Needs More Info"
+    verdict_reason: str = "More information is required before a reliable decision can be made."
+    destination_country: str | None = None
+    why_this_status: list[str] = Field(default_factory=list)
+    restrictions: list[str] = Field(default_factory=list)
+    missing_information: list[str] = Field(default_factory=list)
+    next_steps: list[str] = Field(default_factory=list)
+
+
 class ScanResult(BaseModel):
     product_name: str = ""
     materials_detected: list[str] = Field(default_factory=list)
@@ -24,7 +34,6 @@ class ScanResult(BaseModel):
     hs_code_reasoning: str = ""
     status: ScanStatus = ScanStatus.review
     compliance_summary: str = ""
-    ssm_check: str = "unknown"
     required_documents: list[str] = Field(default_factory=list)
     required_permits: list[str] = Field(default_factory=list)
     required_agencies: list[str] = Field(default_factory=list)
@@ -35,6 +44,7 @@ class ScanResult(BaseModel):
     extraction_notes: list[str] = Field(default_factory=list)
     decision_steps: list[dict[str, str]] = Field(default_factory=list)
     follow_up_questions: list[str] = Field(default_factory=list)
+    analysis: ScanAnalysis = Field(default_factory=ScanAnalysis)
     source: str = "fallback"
 
 
@@ -52,8 +62,6 @@ class ScanReadResponse(BaseModel):
     updated_at: datetime
     prompt: str
     destination_country: str | None = None
-    merchant_name: str | None = None
-    merchant_ssm: str | None = None
     image_asset: str | None = None
     result: ScanResult
 
@@ -61,8 +69,6 @@ class ScanReadResponse(BaseModel):
 class ScanFollowUpRequest(BaseModel):
     message: str = Field(min_length=1, max_length=3000)
     destination_country: str | None = None
-    merchant_name: str | None = None
-    merchant_ssm: str | None = None
 
 
 class ScanChatMessage(BaseModel):

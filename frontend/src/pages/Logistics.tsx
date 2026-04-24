@@ -7,7 +7,7 @@ import {
   Upload, FileText, FileCheck2, FileSpreadsheet, CheckCircle2,
   Plane, Ship, ArrowRight, Sparkles, TrendingDown, Info,
   Clock, Leaf, Shield, ClipboardList, ShieldCheck, Stamp,
-  X, Loader2, Download, Eye
+  X, Loader2, Download, Eye, History
 } from "lucide-react";
 
 type DocStatus = "carried" | "uploaded" | "uploading" | "missing";
@@ -43,10 +43,18 @@ type ShipmentInsight = {
   product?: string;
   hsCode?: string;
   destinationCountry?: string;
+  destinationAddress?: string;
   originRegion?: OriginRegion;
   weightKg?: number;
   goodsValue?: number;
   incoterm?: string;
+};
+
+type ProductLineItem = {
+  docId: string;
+  productName: string;
+  quantity: number;
+  weightKg: number;
 };
 
 // Master list of all possible export documents
@@ -60,11 +68,48 @@ const ALL_DOC_DEFS: Omit<ShipDoc, "status" | "size" | "fileName">[] = [
   { id: "halal",              title: "Halal Certificate",         subtitle: "JAKIM-recognised certification",       icon: Leaf,          optional: true  },
 ];
 
-type BreakdownRow = { label: string; value: number; note: string | null; waived: boolean };
+type BreakdownRow = { label: string; value: number; note: string | null; waived: boolean; valueType?: "currency" | "number" };
+type ExtractedDocumentDataLike = Record<string, unknown>;
+type HistoryDocSnapshot = {
+  id: string;
+  title: string;
+  subtitle: string;
+  status: DocStatus;
+  optional?: boolean;
+  fileName?: string;
+  previewUrl?: string;
+  mimeType?: string;
+  size?: string;
+};
+type ReportHistorySummary = {
+  product?: string;
+  hsCode?: string;
+  destinationCountry?: string;
+  destinationAddress?: string;
+  weightKg?: number;
+  goodsQuantity?: number;
+  unitPrice?: number;
+  goodsCost?: number;
+  incoterm?: string;
+};
 
 type CurrencyCode = "MYR" | "USD" | "SGD" | "CNY" | "EUR";
+type ReportHistoryEntry = {
+  id: string;
+  createdAt: string;
+  shipmentId: string;
+  shipping: "air" | "sea";
+  currency: CurrencyCode;
+  originRegion: OriginRegion;
+  unitPrice: number;
+  docs: HistoryDocSnapshot[];
+  costRows: BreakdownRow[];
+  summary: ReportHistorySummary;
+};
 
 const BASE_CURRENCY: CurrencyCode = "MYR";
+const REPORT_HISTORY_STORAGE_KEY = "logistics_report_history_v1";
+const REPORT_HISTORY_LIMIT = 25;
 
 const CURRENCY_OPTIONS: Array<{ code: CurrencyCode; label: string; rate: number }> = [
   { code: "MYR", label: "Malaysia Ringgit (RM)", rate: 1 },
@@ -98,6 +143,175 @@ const formatGoodsValue = (value: number) =>
     maximumFractionDigits: 0,
   });
 
+const normalizeTextValue = (value: unknown) => {
+  if (typeof value !== "string") return "";
+  return value.trim();
+};
+
+const normalizeNumberValue = (value: unknown) => {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value !== "string") return null;
+  const cleaned = value.replace(/[,\s]/g, "").replace(/[^0-9.+-]/g, "");
+  if (!cleaned) return null;
+  const parsed = Number(cleaned);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const pickFirstText = (data: ExtractedDocumentDataLike, keys: string[]) => {
+  for (const key of keys) {
+    const value = normalizeTextValue(data[key]);
+    if (value) return value;
+  }
+  return "";
+};
+
+const pickFirstNumber = (data: ExtractedDocumentDataLike, keys: string[]) => {
+  for (const key of keys) {
+    const value = normalizeNumberValue(data[key]);
+    if (value != null) return value;
+  }
+  return null;
+};
+
+const normalizeOriginRegionValue = (value: unknown): OriginRegion | null => {
+  const text = normalizeTextValue(value).toLowerCase();
+  if (!text) return null;
+  if (text.includes("east") || text.includes("sabah") || text.includes("sarawak")) return "east";
+  if (text.includes("west") || text.includes("peninsular") || text.includes("malaysia")) return "west";
+  return null;
+};
+
+const normalizeExtractedDocumentData = (data: ExtractedDocumentDataLike) => {
+  const product = pickFirstText(data, [
+    "product_name",
+    "product",
+    "product description",
+    "product_description",
+    "product desc",
+    "product_desc",
+    "item_name",
+    "item",
+    "item desc",
+    "item_desc",
+    "goods_description",
+    "goods description",
+    "description",
+    "item_description",
+    "item description",
+    "commodity",
+    "merchandise",
+    "cargo description",
+    "cargo_description",
+  ]);
+  const hsCode = pickFirstText(data, [
+    "hs_code",
+    "hs code",
+    "hs no",
+    "hs number",
+    "hs number",
+    "tariff_code",
+    "tariff code",
+    "customs_code",
+    "customs code",
+    "commodity code",
+    "commodity_code",
+  ]);
+  const destinationCountry = pickFirstText(data, [
+    "destination_country",
+    "destination country",
+    "destination",
+    "country of destination",
+    "country_of_destination",
+    "country",
+    "ship to country",
+    "ship_to_country",
+    "consignee country",
+    "consignee_country",
+    "delivery_country",
+    "delivery country",
+    "delivery destination",
+    "destination market",
+    "market",
+  ]);
+  const destinationAddress = pickFirstText(data, [
+    "complete address",
+    "full address",
+    "destination_address",
+    "destination address",
+    "ship to address",
+    "ship_to_address",
+    "ship to",
+    "ship_to",
+    "delivery_address",
+    "delivery address",
+    "delivery location",
+    "recipient address",
+    "recipient_address",
+    "receiver address",
+    "receiver_address",
+    "consignee details",
+    "consignee_address",
+    "consignee address",
+    "shipping_address",
+    "shipping address",
+    "address line 1",
+    "address line 2",
+    "address line 3",
+    "address_line_1",
+    "address_line_2",
+    "address_line_3",
+    "address",
+  ]);
+  const originRegion = normalizeOriginRegionValue(data.origin_region || data["origin region"] || data.origin || data.state || data["origin country"]);
+  const weightKg = pickFirstNumber(data, [
+    "weight_kg",
+    "weight kg",
+    "weight",
+    "gross_weight",
+    "gross weight",
+    "net_weight",
+    "net weight",
+    "billable_weight",
+    "billable weight",
+    "chargeable_weight",
+    "chargeable weight",
+    "volumetric_weight",
+    "volumetric weight",
+    "cargo_weight",
+    "cargo weight",
+  ]);
+  const goodsValue = pickFirstNumber(data, [
+    "declared_value",
+    "declared value",
+    "invoice_value",
+    "invoice value",
+    "invoice amount",
+    "invoice_amount",
+    "goods_value",
+    "goods value",
+    "value",
+    "amount",
+    "total_value",
+    "total value",
+    "item_value",
+    "item value",
+    "merchandise value",
+    "merchandise_value",
+  ]);
+  const incoterm = pickFirstText(data, ["incoterm", "incoterms", "delivery term", "delivery_term"]);
+
+  return {
+    product: product || undefined,
+    hsCode: hsCode || undefined,
+    destinationCountry: destinationCountry || undefined,
+    destinationAddress: destinationAddress || undefined,
+    originRegion: originRegion || undefined,
+    weightKg: weightKg ?? undefined,
+    goodsValue: goodsValue ?? undefined,
+    incoterm: incoterm || undefined,
+  };
+};
+
 const toDataUrl = (file: File) =>
   new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -108,11 +322,17 @@ const toDataUrl = (file: File) =>
 
 const getCurrencyDisplayLabel = (currency: CurrencyCode) => (currency === "CNY" ? "¥" : currency);
 
+const createShipmentId = () => {
+  const datePart = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  const randomPart = Math.random().toString(36).slice(2, 8).toUpperCase();
+  return `SHP-${datePart}-${randomPart}`;
+};
+
 const fallbackBreakdown: BreakdownRow[] = [
   { label: "Goods Value",    value: 4200, note: null,                       waived: false },
   { label: "Import Duty",    value: 0,    note: "Waived — ATIGA Form D",    waived: true  },
   { label: "VAT / GST (7%)", value: 294,  note: null,                       waived: false },
-  { label: "Shipping Fee",   value: 180,  note: "Air freight, insured",     waived: false },
+  { label: "Shipping Fee",   value: 180,  note: "Air freight estimate",     waived: false },
   { label: "Service Fee",    value: 49,   note: "Borderless AI platform",   waived: false },
 ];
 
@@ -122,12 +342,16 @@ const generateAndDownloadPDF = (
   shipping: "air" | "sea",
   breakdownRows: BreakdownRow[],
   currency: CurrencyCode,
+  shipmentId: string,
   summary: {
     product?: string;
     hsCode?: string;
     destinationCountry?: string;
+    destinationAddress?: string;
     weightKg?: number;
-    goodsValue?: number;
+    goodsQuantity?: number;
+    unitPrice?: number;
+    goodsCost?: number;
     incoterm?: string;
   },
   previewOnly = false,
@@ -135,10 +359,13 @@ const generateAndDownloadPDF = (
   const now = new Date();
   const dateStr = now.toLocaleDateString("en-MY", { day: "2-digit", month: "long", year: "numeric" });
   const timeStr = now.toLocaleTimeString("en-MY", { hour: "2-digit", minute: "2-digit" });
-  const total = breakdownRows.reduce((s, r) => s + r.value, 0);
+  const total = breakdownRows.reduce((s, r) => s + ((r.valueType || "currency") === "currency" ? r.value : 0), 0);
   const uploadedCount = docs.filter(d => d.status === "uploaded" || d.status === "carried").length;
   const shippingLabel = shipping === "air" ? "Air Freight" : "Sea Freight";
   const shippingCode = shipping === "air" ? "AIR-EXP" : "SEA-ECO";
+  const shippingRow = breakdownRows.find((row) => row.label === "Shipping Fee");
+  const shippingCostValue = shippingRow?.value ?? 0;
+  const shippingCostNote = shippingRow?.note || (shipping === "air" ? "Air freight estimate" : "Sea freight estimate");
 
   const docVisual = (title: string) => {
     if (title.includes("Invoice")) return "🧾";
@@ -174,16 +401,23 @@ const generateAndDownloadPDF = (
       </tr>`;
   }).join("");
 
-  const breakdownHtmlRows = breakdownRows.map(r => `
+  const breakdownHtmlRows = breakdownRows.map(r => {
+    const rowValueType = r.valueType || "currency";
+    const valueDisplay = rowValueType === "number"
+      ? formatGoodsValue(r.value)
+      : formatCurrency(convertFromBaseCurrency(r.value, currency), currency);
+
+    return `
     <tr style="${r.waived ? "background:#ECFDF5;" : ""}">
       <td style="padding:11px 14px;font-size:13px;color:#111827;font-weight:600;">${r.label}</td>
       <td style="padding:11px 14px;font-size:12px;color:#6B7280;">${r.note || "—"}</td>
       <td style="padding:11px 14px;text-align:right;font-size:13px;font-weight:700;color:${r.waived ? "#059669" : "#111827"};">
         ${r.waived
           ? `${formatCurrency(0, currency)} <span style="font-size:10px;font-weight:600;">(saved ${formatCurrency(convertFromBaseCurrency(420, currency), currency)})</span>`
-          : formatCurrency(convertFromBaseCurrency(r.value, currency), currency)}
+          : valueDisplay}
       </td>
-    </tr>`).join("");
+    </tr>`;
+  }).join("");
 
   const complianceItems = [
     { title: "Business Registration (SSM)", note: "Active · Reg No. 202301234567",  done: true  },
@@ -234,11 +468,57 @@ const generateAndDownloadPDF = (
     `;
   }).join("");
 
+  const submittedDocPages = docs
+    .filter((doc) => doc.status === "uploaded" || doc.status === "carried")
+    .map((doc) => {
+      if (doc.previewUrl) {
+        return `
+          <div style="break-before:page;page-break-before:always;margin-top:20px;">
+            <div class="section-label">Submitted Document Page</div>
+            <hr/>
+            <div style="font-size:14px;font-weight:700;color:#111827;margin-bottom:8px;">${doc.title}</div>
+            <div style="font-size:11px;color:#6B7280;margin-bottom:12px;">${doc.fileName || "Uploaded document image"}</div>
+            <div style="border:1px solid #E5E7EB;border-radius:12px;padding:10px;background:#fff;">
+              <img src="${doc.previewUrl}" alt="${doc.title}" style="width:100%;height:auto;display:block;border-radius:8px;" />
+            </div>
+          </div>
+        `;
+      }
+
+      if (doc.mimeType === "application/pdf" && doc.fileUrl) {
+        return `
+          <div style="break-before:page;page-break-before:always;margin-top:20px;">
+            <div class="section-label">Submitted Document Page</div>
+            <hr/>
+            <div style="font-size:14px;font-weight:700;color:#111827;margin-bottom:8px;">${doc.title}</div>
+            <div style="font-size:11px;color:#6B7280;margin-bottom:12px;">${doc.fileName || "Uploaded PDF document"}</div>
+            <div style="border:1px solid #E5E7EB;border-radius:12px;padding:10px;background:#fff;">
+              <iframe src="${doc.fileUrl}" title="${doc.title}" style="width:100%;height:860px;border:0;border-radius:8px;"></iframe>
+            </div>
+          </div>
+        `;
+      }
+
+      return `
+        <div style="break-before:page;page-break-before:always;margin-top:20px;">
+          <div class="section-label">Submitted Document Page</div>
+          <hr/>
+          <div style="font-size:14px;font-weight:700;color:#111827;margin-bottom:8px;">${doc.title}</div>
+          <div style="font-size:11px;color:#6B7280;margin-bottom:12px;">${doc.fileName || "Document uploaded"}</div>
+          <div style="border:1px dashed #D1D5DB;border-radius:12px;padding:18px;background:#F9FAFB;color:#374151;font-size:12px;line-height:1.6;">
+            Preview image is unavailable for this file type in exported report.<br/>
+            Document status: ${doc.status.toUpperCase()}${doc.mimeType ? `<br/>MIME: ${doc.mimeType}` : ""}
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+
   const html = `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8"/>
-  <title>Export Summary — SHP-MYS-00481</title>
+  <title>Export Summary — ${shipmentId}</title>
   <style>
     * { margin:0;padding:0;box-sizing:border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background:#fff; color:#111827; }
@@ -267,7 +547,7 @@ const generateAndDownloadPDF = (
     </div>
     <div style="text-align:right;">
       <div style="font-size:9px;font-weight:700;color:#93C5FD;letter-spacing:1px;margin-bottom:5px;">SHIPMENT ID</div>
-      <div style="font-size:18px;font-weight:700;color:#fff;margin-bottom:4px;">SHP-MYS-00481</div>
+      <div style="font-size:18px;font-weight:700;color:#fff;margin-bottom:4px;">${shipmentId}</div>
       <div style="font-size:11px;color:#BFDBFE;">Generated ${dateStr}, ${timeStr}</div>
     </div>
   </div>
@@ -278,12 +558,15 @@ const generateAndDownloadPDF = (
   <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-bottom:22px;">
     ${[
       ["Route", summary.destinationCountry ? `🇲🇾 Malaysia → 🇨🇳 ${summary.destinationCountry}` : ""],
+      ["Complete Address", summary.destinationAddress || ""],
       ["Product", summary.product || ""],
       ["HS Code", summary.hsCode || ""],
       ["Shipping Code", shippingCode],
       ["Shipping Method", shippingLabel],
       ["Incoterm", summary.incoterm || ""],
-      ["Goods Value", summary.goodsValue != null ? formatGoodsValue(summary.goodsValue) : ""],
+      ["Goods Quantity", summary.goodsQuantity != null ? formatGoodsValue(summary.goodsQuantity) : ""],
+      ["Unit Price", summary.unitPrice != null ? formatCurrency(convertFromBaseCurrency(summary.unitPrice, currency), currency) : ""],
+      ["Goods Cost", summary.goodsCost != null ? formatCurrency(convertFromBaseCurrency(summary.goodsCost, currency), currency) : ""],
       ["Weight", summary.weightKg != null ? `${summary.weightKg} kg` : ""],
       ["Currency", getCurrencyDisplayLabel(currency)],
     ].filter(([, v]) => Boolean(v)).map(([k, v]) => `
@@ -300,6 +583,7 @@ const generateAndDownloadPDF = (
   <div style="display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap;">
     ${[
       ["Route", summary.destinationCountry ? `🇲🇾 Malaysia → 🇨🇳 ${summary.destinationCountry}` : ""],
+      ["Complete Address", summary.destinationAddress || ""],
       ["Product", summary.product || ""],
       ["HS Code", summary.hsCode || ""],
       ["Incoterm", summary.incoterm || ""],
@@ -376,19 +660,23 @@ const generateAndDownloadPDF = (
       <div style="font-size:9px;font-weight:700;color:#2563EB;letter-spacing:1px;margin-bottom:5px;">${shipping === "air" ? "AIR FREIGHT" : "SEA FREIGHT"}</div>
       <div style="font-size:15px;font-weight:700;color:#0F172A;margin-bottom:4px;">${shipping === "air" ? "Express Delivery" : "Economy Shipping"}</div>
       <div style="font-size:12px;color:#6B7280;">${shipping === "air" ? "3–5 business days  ·  Insured  ·  Door to door" : "14–21 business days  ·  Insured  ·  ECO −62% CO₂"}</div>
+      <div style="font-size:12px;color:#2563EB;margin-top:4px;">${shippingCostNote}</div>
     </div>
     <div style="text-align:right;">
       <div style="font-size:10px;color:#6B7280;margin-bottom:4px;">SHIPPING COST</div>
-      <div style="font-size:24px;font-weight:700;color:#0F172A;">${shipping === "air" ? formatCurrency(convertFromBaseCurrency(480, currency), currency) : formatCurrency(convertFromBaseCurrency(180, currency), currency)}</div>
+      <div style="font-size:24px;font-weight:700;color:#0F172A;">${formatCurrency(convertFromBaseCurrency(shippingCostValue, currency), currency)}</div>
       <div style="font-size:11px;font-weight:700;color:#2563EB;margin-top:3px;">✓  Selected</div>
     </div>
   </div>
+
+  <!-- SUBMITTED DOCUMENT PAGES -->
+  ${submittedDocPages}
 
   <!-- FOOTER -->
   <div style="border-top:1px solid #E5E7EB;padding-top:12px;text-align:center;font-size:10px;color:#9CA3AF;line-height:1.6;">
     This document was generated by Borderless AI on ${dateStr} at ${timeStr}.<br/>
     It is for informational purposes only and does not constitute official customs clearance.<br/>
-    Shipment ID: SHP-MYS-00481 · borderless.ai
+    Shipment ID: ${shipmentId} · borderless.ai
   </div>
 
   <div class="no-print" style="margin-top:24px;text-align:center;">
@@ -421,6 +709,9 @@ const Logistics = () => {
   const [quote, setQuote] = useState<CostQuoteResponse | null>(null);
   const [quoteError, setQuoteError] = useState<string | null>(null);
   const [quoteLoading, setQuoteLoading] = useState(false);
+  const [shipmentId, setShipmentId] = useState(() => createShipmentId());
+  const [reportHistoryOpen, setReportHistoryOpen] = useState(false);
+  const [reportHistory, setReportHistory] = useState<ReportHistoryEntry[]>([]);
 
   // Build the doc list:
   // - If the assistant generated it → status: "carried"
@@ -451,40 +742,63 @@ const Logistics = () => {
     destinationCountry: costContext?.destination_country || routeState.destinationCountry || undefined,
     originRegion: costContext?.origin_region || routeState.originRegion || undefined,
     weightKg: costContext?.weight_kg,
-    goodsValue: costContext?.declared_value,
+    goodsValue: undefined,
   });
   const [originRegion, setOriginRegion] = useState<OriginRegion>(costContext?.origin_region || routeState.originRegion || "west");
-  const documentGoodsValue = insight.goodsValue && insight.goodsValue > 0 ? insight.goodsValue : null;
-  const hasDocumentGoodsValue = documentGoodsValue != null;
+  const extractedGoodsQuantity = insight.goodsValue && insight.goodsValue > 0 ? insight.goodsValue : 0;
+  const hasExtractedGoodsQuantity = extractedGoodsQuantity > 0;
   const [currency, setCurrency] = useState<CurrencyCode>(normalizeCurrency(costContext?.currency));
-  const [goodsValueSource, setGoodsValueSource] = useState<"document" | "manual">(hasDocumentGoodsValue ? "document" : "manual");
-  const [manualGoodsValue, setManualGoodsValue] = useState<number>(documentGoodsValue ?? 0);
+  const initialUnitPrice = 0;
+  const [unitPrice, setUnitPrice] = useState<number>(initialUnitPrice);
+  const [productLineItems, setProductLineItems] = useState<Record<string, ProductLineItem>>({});
   const [generatingSummary, setGeneratingSummary] = useState(false);
   const [previewDoc, setPreviewDoc] = useState<ShipDoc | null>(null);
   const fileInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const costSectionRef = useRef<HTMLDivElement>(null);
   const docsRef = useRef<ShipDoc[]>([]);
+  const lastAutoSaveKeyRef = useRef("");
+  const uploadedCount = docs.filter((d) => d.status === "uploaded" || d.status === "carried").length;
+  const uploadedFileCount = docs.filter((d) => d.status === "uploaded").length;
+  const hasUploadedFiles = uploadedFileCount > 0;
+  const strictDocumentMode = hasUploadedFiles;
+  const canShowShippingEstimate = hasUploadedFiles;
 
-  const summaryProduct = insight.product || costContext?.product_name || routeState.product || "";
-  const summaryDestination = insight.destinationCountry || costContext?.destination_country || routeState.destinationCountry || "";
+  const summaryProduct = insight.product || "";
+  const summaryDestinationCountry = insight.destinationCountry || "";
+  const summaryDestinationAddress = insight.destinationAddress || "";
   const summaryHsCode = insight.hsCode || "";
-  const summaryWeight = insight.weightKg ?? costContext?.weight_kg;
+  const uploadedLineItems = Object.values(productLineItems).filter((item) => Number.isFinite(item.quantity) || Number.isFinite(item.weightKg));
+  const aggregatedQuantity = uploadedLineItems.reduce((sum, item) => sum + Math.max(0, item.quantity || 0), 0);
+  const aggregatedWeight = uploadedLineItems.reduce((sum, item) => sum + Math.max(0, item.weightKg || 0), 0);
+  const summaryWeight = hasUploadedFiles ? (aggregatedWeight > 0 ? aggregatedWeight : (insight.weightKg ?? 0)) : 0;
   const summaryIncoterm = insight.incoterm || (shipping === "sea" ? "CIF Port" : shipping === "air" ? "DAP" : "");
-  const goodsValue = goodsValueSource === "document" && documentGoodsValue != null ? documentGoodsValue : manualGoodsValue;
-  const effectiveCostContext: CostContext = costContext || {
-    product_name: summaryProduct,
-    destination_country: summaryDestination,
-    origin_region: originRegion,
+  const goodsQuantity = aggregatedQuantity > 0 ? aggregatedQuantity : extractedGoodsQuantity;
+  const goodsDeclaredValue = Number((goodsQuantity * Math.max(0, unitPrice)).toFixed(2));
+  const extractedProductNameForCost = hasUploadedFiles ? (insight.product || "") : "";
+  const extractedDestinationForCost = hasUploadedFiles ? ((insight.destinationCountry || insight.destinationAddress || "").trim()) : "";
+  const extractedWeightForCost = hasUploadedFiles ? (aggregatedWeight > 0 ? aggregatedWeight : (insight.weightKg ?? 0)) : 0;
+  const effectiveCostContext: CostContext = {
+    product_name: extractedProductNameForCost,
+    destination_country: extractedDestinationForCost,
+    origin_region: insight.originRegion || originRegion,
     transport_mode: shipping,
-    declared_value: goodsValue,
-    weight_kg: summaryWeight ?? 1,
-    volumetric_weight_kg: null,
+    declared_value: goodsDeclaredValue,
+    weight_kg: extractedWeightForCost,
+    volumetric_weight_kg: costContext?.volumetric_weight_kg ?? null,
     currency,
-    package_count: 1,
+    package_count: costContext?.package_count || 1,
     provided_documents: docs.filter((doc) => doc.status === "carried" || doc.status === "uploaded").map((doc) => doc.title),
   };
-  const previewAirShippingQuote = lookupShippingRate(originRegion, summaryWeight ?? effectiveCostContext.weight_kg);
-  const previewSeaShippingQuote = lookupSeaShippingRate(originRegion, summaryWeight ?? effectiveCostContext.weight_kg);
+  const previewAirShippingQuote = lookupShippingRate(originRegion, effectiveCostContext.weight_kg);
+  const previewSeaShippingQuote = lookupSeaShippingRate(originRegion, effectiveCostContext.weight_kg);
+  const activeShippingPreviewQuote = shipping === "sea" ? previewSeaShippingQuote : previewAirShippingQuote;
+  const activeShippingPreviewLabel = formatShippingRateLabel(activeShippingPreviewQuote);
+  const airShippingEstimateLabel = formatShippingRateLabel(previewAirShippingQuote);
+  const seaShippingEstimateLabel = formatShippingRateLabel(previewSeaShippingQuote);
+  const airShippingEstimateFee = canShowShippingEstimate ? previewAirShippingQuote.shippingFee : 0;
+  const seaShippingEstimateFee = canShowShippingEstimate ? previewSeaShippingQuote.shippingFee : 0;
+  const airShippingEstimateDisplayLabel = canShowShippingEstimate ? airShippingEstimateLabel : "Upload document to calculate shipping cost";
+  const seaShippingEstimateDisplayLabel = canShowShippingEstimate ? seaShippingEstimateLabel : "Upload document to calculate shipping cost";
 
   const handleScrollToCost = () => {
     setTimeout(() => {
@@ -495,10 +809,32 @@ const Logistics = () => {
   const calculateQuote = async (mode: "air" | "sea") => {
     if (!effectiveCostContext) return;
 
+    if (!hasUploadedFiles) {
+      setQuote(null);
+      setQuoteError(null);
+      return;
+    }
+
+    if (strictDocumentMode && !hasExtractedGoodsQuantity) {
+      setQuote(null);
+      setQuoteError("Strict mode requires uploaded document quantity before cost calculation.");
+      return;
+    }
+    if (strictDocumentMode && unitPrice <= 0) {
+      setQuote(null);
+      setQuoteError("Enter unit price to calculate landed cost from uploaded document quantity.");
+      return;
+    }
+    if (strictDocumentMode && effectiveCostContext.weight_kg <= 0) {
+      setQuote(null);
+      setQuoteError("Uploaded document weight is required before shipping cost calculation.");
+      return;
+    }
+
     const productName = (effectiveCostContext.product_name || "").trim();
     const destinationCountry = (effectiveCostContext.destination_country || "").trim();
     if (!productName || !destinationCountry) {
-      setQuoteError("Please complete the required shipment details.");
+      setQuoteError(null);
       return;
     }
 
@@ -510,7 +846,7 @@ const Logistics = () => {
         destination_country: destinationCountry,
         origin_region: originRegion,
         transport_mode: mode,
-        declared_value: goodsValue,
+        declared_value: goodsDeclaredValue,
         weight_kg: effectiveCostContext.weight_kg,
         volumetric_weight_kg: effectiveCostContext.volumetric_weight_kg,
         currency,
@@ -526,23 +862,27 @@ const Logistics = () => {
   };
 
   useEffect(() => {
+    if (!hasUploadedFiles) {
+      setQuote(null);
+      setQuoteError(null);
+      return;
+    }
     if (!effectiveCostContext || effectiveCostContext.weight_kg <= 0) return;
     if (!(effectiveCostContext.product_name || "").trim()) return;
     if (!(effectiveCostContext.destination_country || "").trim()) return;
     void calculateQuote(shipping);
-  }, [costContext, docs, shipping, goodsValue, goodsValueSource, manualGoodsValue, currency, originRegion]);
+  }, [hasUploadedFiles, costContext, docs, shipping, goodsDeclaredValue, currency, originRegion, summaryWeight, summaryProduct, summaryDestinationCountry, summaryDestinationAddress]);
 
   useEffect(() => {
-    if (!hasDocumentGoodsValue && goodsValueSource === "document") {
-      setGoodsValueSource("manual");
+    if (!hasUploadedFiles && unitPrice !== 0) {
+      setUnitPrice(0);
     }
-    if (hasDocumentGoodsValue && goodsValueSource === "document" && documentGoodsValue != null) {
-      setManualGoodsValue((prev) => (prev === 0 ? documentGoodsValue : prev));
-    }
-  }, [hasDocumentGoodsValue, goodsValueSource, documentGoodsValue]);
+  }, [hasUploadedFiles, unitPrice]);
 
   const costRows: BreakdownRow[] = quote ? [
-    { label: "Goods Value", value: goodsValue, note: goodsValueSource === "document" ? "From uploaded document" : "Manual entry", waived: false },
+    { label: "Goods Quantity", value: goodsQuantity, note: "Extracted from uploaded document", waived: false, valueType: "number" },
+    { label: "Unit Price", value: unitPrice, note: "Price per item", waived: false },
+    { label: "Goods Cost", value: goodsDeclaredValue, note: "Quantity × Unit Price", waived: false },
     { label: "Import Duty", value: quote.customs_duty, note: null, waived: quote.customs_duty === 0 },
     { label: "VAT / GST (7%)", value: quote.import_tax, note: null, waived: false },
     {
@@ -558,23 +898,19 @@ const Logistics = () => {
     },
     { label: "Service Fee", value: quote.documentation_fee + quote.customs_broker_fee + quote.port_handling_fee, note: "Platform + handling", waived: false },
   ] : [
-    { label: "Goods Value", value: effectiveCostContext.declared_value || 0, note: null, waived: false },
+    { label: "Goods Quantity", value: goodsQuantity, note: "Extracted from uploaded document", waived: false, valueType: "number" },
+    { label: "Unit Price", value: unitPrice, note: "Price per item", waived: false },
+    { label: "Goods Cost", value: goodsDeclaredValue, note: "Quantity × Unit Price", waived: false },
     { label: "Import Duty", value: 0, note: "Select shipping to calculate", waived: false },
     { label: "VAT / GST (7%)", value: 0, note: "Select shipping to calculate", waived: false },
     {
       label: "Shipping Fee",
-      value: shipping === "air" ? previewAirShippingQuote.shippingFee : previewSeaShippingQuote.shippingFee,
-      note:
-        shipping === "air"
-          ? formatShippingRateLabel(previewAirShippingQuote)
-          : formatShippingRateLabel(previewSeaShippingQuote),
+      value: shipping === "air" ? airShippingEstimateFee : seaShippingEstimateFee,
+      note: canShowShippingEstimate ? activeShippingPreviewLabel : "Upload document to calculate shipping cost",
       waived: false,
     },
     { label: "Service Fee", value: 0, note: "Calculated after shipping selection", waived: false },
   ];
-
-  const uploadedCount = docs.filter((d) => d.status === "uploaded" || d.status === "carried").length;
-  const canShowShippingEstimate = uploadedCount > 0;
 
   const handleFileSelect = async (docId: string, file: File) => {
     const previewUrl = file.type.startsWith("image/") ? await toDataUrl(file) : undefined;
@@ -588,35 +924,30 @@ const Logistics = () => {
         transportMode: shipping,
         currency,
         originRegion,
-        destinationCountry: summaryDestination || undefined,
+        destinationCountry: summaryDestinationCountry || summaryDestinationAddress || undefined,
+        destinationAddress: summaryDestinationAddress || undefined,
         productName: summaryProduct || undefined,
         weightKg: summaryWeight ?? undefined,
-        declaredValue: goodsValue,
+        declaredValue: goodsDeclaredValue,
       });
 
       const extraction = pipeline.extraction;
+      const normalized = pipeline.normalized_quote_request;
       pipelineQuote = pipeline.quote;
+      const extractedFromDocument = normalizeExtractedDocumentData(extraction.data as ExtractedDocumentDataLike);
       extracted = {
-        product: extraction.data.product_name || undefined,
-        hsCode: extraction.data.hs_code || undefined,
-        destinationCountry: extraction.data.destination_country || undefined,
-        originRegion: extraction.data.origin_region || undefined,
-        weightKg: extraction.data.weight_kg ?? undefined,
-        goodsValue: extraction.data.declared_value ?? undefined,
-        incoterm: extraction.data.incoterm || undefined,
+        ...extractedFromDocument,
+        product: normalized.product_name || extractedFromDocument.product,
+        destinationCountry: normalized.destination_country || extractedFromDocument.destinationCountry,
+        originRegion: normalized.origin_region || extractedFromDocument.originRegion,
+        weightKg: normalized.weight_kg ?? extractedFromDocument.weightKg,
+        goodsValue: normalized.declared_value ?? extractedFromDocument.goodsValue,
       };
+      setCurrency(normalizeCurrency(normalized.currency));
     } catch {
       try {
         const extraction = await extractDocumentFields(file, docId);
-        extracted = {
-          product: extraction.data.product_name || undefined,
-          hsCode: extraction.data.hs_code || undefined,
-          destinationCountry: extraction.data.destination_country || undefined,
-          originRegion: extraction.data.origin_region || undefined,
-          weightKg: extraction.data.weight_kg ?? undefined,
-          goodsValue: extraction.data.declared_value ?? undefined,
-          incoterm: extraction.data.incoterm || undefined,
-        };
+        extracted = normalizeExtractedDocumentData(extraction.data as ExtractedDocumentDataLike);
       } catch {
         extracted = {};
       }
@@ -625,6 +956,7 @@ const Logistics = () => {
       product: extracted.product || prev.product,
       hsCode: extracted.hsCode || prev.hsCode,
       destinationCountry: extracted.destinationCountry || prev.destinationCountry,
+      destinationAddress: extracted.destinationAddress || prev.destinationAddress,
       originRegion: extracted.originRegion || prev.originRegion,
       weightKg: extracted.weightKg ?? prev.weightKg,
       goodsValue: extracted.goodsValue ?? prev.goodsValue,
@@ -634,8 +966,19 @@ const Logistics = () => {
       setOriginRegion(extracted.originRegion);
     }
     if (extracted.goodsValue != null && extracted.goodsValue > 0) {
-      setGoodsValueSource("document");
+      if (unitPrice <= 0 && costContext?.declared_value && extracted.goodsValue > 0) {
+        setUnitPrice(Number((costContext.declared_value / extracted.goodsValue).toFixed(2)));
+      }
     }
+    setProductLineItems((prev) => ({
+      ...prev,
+      [docId]: {
+        docId,
+        productName: extracted.product || docs.find((d) => d.id === docId)?.title || `Product ${docId}`,
+        quantity: extracted.goodsValue && extracted.goodsValue > 0 ? extracted.goodsValue : 0,
+        weightKg: extracted.weightKg && extracted.weightKg > 0 ? extracted.weightKg : 0,
+      },
+    }));
     if (pipelineQuote) {
       setQuote(pipelineQuote);
       setQuoteError(null);
@@ -685,6 +1028,11 @@ const Logistics = () => {
     if (previewDoc?.id === docId) {
       setPreviewDoc(null);
     }
+    setProductLineItems((prev) => {
+      const next = { ...prev };
+      delete next[docId];
+      return next;
+    });
   };
 
   const handleOpenPreview = (doc: ShipDoc) => {
@@ -720,18 +1068,24 @@ const Logistics = () => {
     setGeneratingSummary(true);
     setTimeout(() => {
       setGeneratingSummary(false);
+      persistHistoryEntry(buildHistoryEntry());
       generateAndDownloadPDF(docs, shipping, costRows, currency, {
         product: summaryProduct,
         hsCode: summaryHsCode,
-        destinationCountry: summaryDestination,
+        destinationCountry: summaryDestinationCountry,
+        destinationAddress: summaryDestinationAddress,
         weightKg: summaryWeight,
-        goodsValue,
+        goodsQuantity,
+        unitPrice,
+        goodsCost: goodsDeclaredValue,
         incoterm: summaryIncoterm,
-      });
+      }, shipmentId);
+      setShipmentId(createShipmentId());
     }, 800);
   };
 
   const handlePreviewSummary = () => {
+    persistHistoryEntry(buildHistoryEntry());
     generateAndDownloadPDF(
       docs,
       shipping,
@@ -740,18 +1094,152 @@ const Logistics = () => {
       {
         product: summaryProduct,
         hsCode: summaryHsCode,
-        destinationCountry: summaryDestination,
+        destinationCountry: summaryDestinationCountry,
+        destinationAddress: summaryDestinationAddress,
         weightKg: summaryWeight,
-        goodsValue,
+        goodsQuantity,
+        unitPrice,
+        goodsCost: goodsDeclaredValue,
         incoterm: summaryIncoterm,
       },
+      shipmentId,
       true,
     );
   };
 
-  const total = costRows.reduce((sum, r) => sum + r.value, 0);
-  const displayGoodsValue = goodsValue;
-  const displayTotal = quote ? convertFromBaseCurrency(quote.estimated_total_cost, currency) : convertFromBaseCurrency(total, currency);
+  const total = costRows.reduce((sum, r) => sum + ((r.valueType || "currency") === "currency" ? r.value : 0), 0);
+  const displayGoodsQuantity = goodsQuantity;
+  const displayGoodsCost = goodsDeclaredValue;
+  const displayTotal = convertFromBaseCurrency(total, currency);
+
+  const buildHistoryEntry = (): ReportHistoryEntry => ({
+    id: `${shipmentId}-${Date.now()}`,
+    createdAt: new Date().toISOString(),
+    shipmentId,
+    shipping,
+    currency,
+    originRegion,
+    unitPrice,
+    docs: docs.map((doc) => ({
+      id: doc.id,
+      title: doc.title,
+      subtitle: doc.subtitle,
+      status: doc.status,
+      optional: doc.optional,
+      fileName: doc.fileName,
+      previewUrl: doc.previewUrl,
+      mimeType: doc.mimeType,
+      size: doc.size,
+    })),
+    costRows,
+    summary: {
+      product: summaryProduct,
+      hsCode: summaryHsCode,
+      destinationCountry: summaryDestinationCountry,
+      destinationAddress: summaryDestinationAddress,
+      weightKg: summaryWeight,
+      goodsQuantity,
+      unitPrice,
+      goodsCost: goodsDeclaredValue,
+      incoterm: summaryIncoterm,
+    },
+  });
+
+  const persistHistoryEntry = (entry: ReportHistoryEntry) => {
+    setReportHistory((prev) => {
+      const withoutSameShipment = prev.filter((item) => item.shipmentId !== entry.shipmentId);
+      const next = [entry, ...withoutSameShipment].slice(0, REPORT_HISTORY_LIMIT);
+      try {
+        localStorage.setItem(REPORT_HISTORY_STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        // Ignore localStorage failures.
+      }
+      return next;
+    });
+  };
+
+  const restoreHistoryEntry = (entry: ReportHistoryEntry) => {
+    setShipmentId(entry.shipmentId);
+    setShipping(entry.shipping);
+    setCurrency(entry.currency);
+    setOriginRegion(entry.originRegion);
+    setUnitPrice(entry.unitPrice);
+    setQuote(null);
+    setQuoteError(null);
+    setInsight({
+      product: entry.summary.product,
+      hsCode: entry.summary.hsCode,
+      destinationCountry: entry.summary.destinationCountry,
+      destinationAddress: entry.summary.destinationAddress,
+      originRegion: entry.originRegion,
+      weightKg: entry.summary.weightKg,
+      goodsValue: entry.summary.goodsQuantity,
+      incoterm: entry.summary.incoterm,
+    });
+    setDocs(
+      ALL_DOC_DEFS.map((def) => {
+        const saved = entry.docs.find((doc) => doc.id === def.id);
+        if (!saved) {
+          return {
+            ...def,
+            status: "missing" as DocStatus,
+          };
+        }
+        return {
+          ...def,
+          optional: saved.optional,
+          status: saved.status,
+          fileName: saved.fileName,
+          previewUrl: saved.previewUrl,
+          mimeType: saved.mimeType,
+          size: saved.size,
+          fileUrl: undefined,
+        };
+      })
+    );
+    setReportHistoryOpen(false);
+  };
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(REPORT_HISTORY_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as ReportHistoryEntry[];
+      if (Array.isArray(parsed)) {
+        setReportHistory(parsed.slice(0, REPORT_HISTORY_LIMIT));
+      }
+    } catch {
+      // Ignore invalid storage values.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (uploadedCount === 0) return;
+    const docsSignature = docs
+      .map((doc) => `${doc.id}:${doc.status}:${doc.fileName || ""}:${doc.previewUrl ? 1 : 0}`)
+      .join("|");
+    const autosaveKey = [
+      shipmentId,
+      shipping,
+      currency,
+      originRegion,
+      unitPrice,
+      summaryProduct,
+      summaryDestinationCountry,
+      summaryDestinationAddress,
+      summaryHsCode,
+      summaryWeight,
+      summaryIncoterm,
+      goodsQuantity,
+      goodsDeclaredValue,
+      total,
+      docsSignature,
+    ].join("::");
+
+    if (lastAutoSaveKeyRef.current === autosaveKey) return;
+    lastAutoSaveKeyRef.current = autosaveKey;
+    persistHistoryEntry(buildHistoryEntry());
+  }, [uploadedCount, docs, shipmentId, shipping, currency, originRegion, unitPrice, summaryProduct, summaryDestinationCountry, summaryDestinationAddress, summaryHsCode, summaryWeight, summaryIncoterm, goodsQuantity, goodsDeclaredValue, total]);
 
   return (
     <div className="min-h-screen">
@@ -769,9 +1257,21 @@ const Logistics = () => {
             <p className="mt-1 text-[15px] text-muted-foreground">Upload documents, confirm landed cost, and book freight.</p>
           </div>
           <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setReportHistoryOpen(true)}
+              className="inline-flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-xs font-semibold text-foreground shadow-xs hover:border-primary hover:text-primary"
+              title="Open report history"
+            >
+              <History className="h-4 w-4" />
+              History
+              {reportHistory.length > 0 && (
+                <span className="rounded-full bg-secondary px-1.5 py-0.5 text-[10px] text-muted-foreground">{reportHistory.length}</span>
+              )}
+            </button>
             <div className="rounded-xl border border-border bg-card px-3.5 py-2 text-xs shadow-xs">
               <div className="text-muted-foreground">Shipment ID</div>
-              <div className="font-mono text-[13px] font-semibold text-foreground">SHP-MYS-00481</div>
+              <div className="font-mono text-[13px] font-semibold text-foreground">{shipmentId}</div>
             </div>
           </div>
         </div>
@@ -958,6 +1458,7 @@ const Logistics = () => {
                     setQuoteError("Choose Air or Sea shipping first, then calculate total cost.");
                     return;
                   }
+                  setQuote(null);
                   void calculateQuote(shipping);
                 }}
                 disabled={quoteLoading}
@@ -1009,12 +1510,16 @@ const Logistics = () => {
                     if (event.key === "Enter" || event.key === " ") {
                       event.preventDefault();
                       setShipping("air");
+                      setQuote(null);
+                      setQuoteError(null);
                       void calculateQuote("air");
                       handleScrollToCost();
                     }
                   }}
                   onClick={() => {
                     setShipping("air");
+                    setQuote(null);
+                    setQuoteError(null);
                     void calculateQuote("air");
                     handleScrollToCost();
                   }}
@@ -1044,19 +1549,18 @@ const Logistics = () => {
                     <div>
                       <div className="text-[11px] text-muted-foreground">Estimated cost</div>
                       <div className="text-2xl font-semibold tracking-tight text-foreground tabular-nums">
-                        {shipping === "air" && quote
-                          ? formatCurrency(convertFromBaseCurrency(quote.shipping_fee, currency), currency)
-                            : shipping === "air" && canShowShippingEstimate
-                            ? formatCurrency(convertFromBaseCurrency(previewAirShippingQuote.shippingFee, currency), currency)
-                          : "Upload document"}
+                        {formatCurrency(convertFromBaseCurrency(airShippingEstimateFee, currency), currency)}
                       </div>
+                      <span className="text-[11px] font-semibold text-primary">
+                        {airShippingEstimateDisplayLabel}
+                      </span>
                     </div>
                     <div className="inline-flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
                       <Shield className="h-3 w-3" /> Insured
                     </div>
                   </div>
                   <button
-                    onClick={(e) => { e.stopPropagation(); setShipping("air"); void calculateQuote("air"); handleScrollToCost(); }}
+                    onClick={(e) => { e.stopPropagation(); setShipping("air"); setQuote(null); setQuoteError(null); void calculateQuote("air"); handleScrollToCost(); }}
                     type="button"
                     className="relative mt-5 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-primary px-4 py-3 text-sm font-semibold text-primary-foreground shadow-glow transition-base group-hover:bg-primary/90"
                   >
@@ -1072,12 +1576,16 @@ const Logistics = () => {
                     if (event.key === "Enter" || event.key === " ") {
                       event.preventDefault();
                       setShipping("sea");
+                      setQuote(null);
+                      setQuoteError(null);
                       void calculateQuote("sea");
                       handleScrollToCost();
                     }
                   }}
                   onClick={() => {
                     setShipping("sea");
+                    setQuote(null);
+                    setQuoteError(null);
                     void calculateQuote("sea");
                     handleScrollToCost();
                   }}
@@ -1106,22 +1614,11 @@ const Logistics = () => {
                       <div className="text-[11px] text-muted-foreground">Estimated cost</div>
                       <div className="flex items-baseline gap-2">
                         <div className="text-2xl font-semibold tracking-tight text-foreground tabular-nums">
-                          {shipping === "sea" && quote
-                            ? formatCurrency(convertFromBaseCurrency(quote.shipping_fee, currency), currency)
-                            : shipping === "sea" && canShowShippingEstimate
-                            ? formatCurrency(convertFromBaseCurrency(previewSeaShippingQuote.shippingFee, currency), currency)
-                            : "Upload document"}
+                          {formatCurrency(convertFromBaseCurrency(seaShippingEstimateFee, currency), currency)}
                         </div>
-                        {shipping === "sea" && quote && quote.shipping_fee && (
-                          <span className="text-[11px] font-semibold text-success">
-                            {formatShippingRateLabel({
-                              originRegion: quote.origin_region,
-                              rateBand: quote.shipping_rate_band,
-                              rateWeightKg: quote.shipping_rate_weight_kg,
-                              shippingFee: quote.shipping_fee,
-                            })}
-                          </span>
-                        )}
+                        <span className="text-[11px] font-semibold text-success">
+                          {seaShippingEstimateDisplayLabel}
+                        </span>
                       </div>
                     </div>
                     <div className="inline-flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
@@ -1129,7 +1626,7 @@ const Logistics = () => {
                     </div>
                   </div>
                   <button
-                    onClick={(e) => { e.stopPropagation(); setShipping("sea"); void calculateQuote("sea"); handleScrollToCost(); }}
+                    onClick={(e) => { e.stopPropagation(); setShipping("sea"); setQuote(null); setQuoteError(null); void calculateQuote("sea"); handleScrollToCost(); }}
                     type="button"
                     className={`relative mt-5 inline-flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition-base ${
                       shipping === "sea"
@@ -1189,7 +1686,7 @@ const Logistics = () => {
                 </div>
 
                 <div className="mt-4 rounded-lg border border-border/50 bg-card/30 p-4">
-                  <div className="text-[12px] font-semibold text-foreground mb-3">Goods Value</div>
+                  <div className="text-[12px] font-semibold text-foreground mb-3">Goods Quantity & Unit Price</div>
                   <div className="space-y-3">
                     <div>
                       <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Origin region</label>
@@ -1203,37 +1700,67 @@ const Logistics = () => {
                       </select>
                     </div>
                     <div>
-                      <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Value source</label>
-                      <select
-                        value={goodsValueSource}
-                        onChange={(event) => setGoodsValueSource(event.target.value as "document" | "manual")}
-                        className="w-full rounded-xl border border-border bg-card px-3 py-2.5 text-sm text-foreground outline-none transition-base focus:border-primary"
-                      >
-                        {hasDocumentGoodsValue && <option value="document">Use uploaded document value</option>}
-                        <option value="manual">Other, enter manually</option>
-                      </select>
+                      <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Goods quantity (from uploaded document)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={displayGoodsQuantity}
+                        readOnly
+                        className="w-full rounded-xl border border-border bg-secondary px-3 py-2.5 text-sm text-foreground outline-none"
+                      />
                     </div>
-                    {goodsValueSource === "manual" && (
-                      <div>
-                        <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Custom amount</label>
-                        <input
-                          type="number"
-                          min="0"
-                          step="1"
-                          value={manualGoodsValue}
-                          onChange={(event) => setManualGoodsValue(Number(event.target.value || 0))}
-                          className="w-full rounded-xl border border-border bg-card px-3 py-2.5 text-sm text-foreground outline-none transition-base focus:border-primary"
-                          placeholder="Enter goods value"
-                        />
-                      </div>
-                    )}
-                  </div>
-                  <div className="mt-2 text-[11px] text-muted-foreground">
-                    {hasDocumentGoodsValue
-                      ? "Use the uploaded document value or switch to manual entry before calculating total cost."
-                      : "Uploaded document value not found. Please enter goods value manually."}
+                    <div>
+                      <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Unit price (price per good)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={unitPrice}
+                        onChange={(event) => setUnitPrice(Number(event.target.value || 0))}
+                        className="w-full rounded-xl border border-border bg-card px-3 py-2.5 text-sm text-foreground outline-none transition-base focus:border-primary"
+                        placeholder="Enter actual unit price"
+                      />
+                    </div>
+                    <div className="rounded-xl border border-border bg-card px-3 py-2.5">
+                      <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Computed goods cost</div>
+                      <div className="mt-1 text-sm font-semibold text-foreground">{formatCurrency(convertFromBaseCurrency(displayGoodsCost, currency), currency)}</div>
+                    </div>
                   </div>
                 </div>
+
+                {uploadedLineItems.length > 0 && (
+                  <div className="mt-4 rounded-lg border border-border/50 bg-card/30 p-4">
+                    <div className="text-[12px] font-semibold text-foreground mb-3">Products extracted from uploaded documents</div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full min-w-[520px] border-separate border-spacing-0">
+                        <thead>
+                          <tr>
+                            <th className="border-b border-border py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Product</th>
+                            <th className="border-b border-border py-2 text-right text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Quantity</th>
+                            <th className="border-b border-border py-2 text-right text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Weight (kg)</th>
+                            <th className="border-b border-border py-2 text-right text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Unit Price</th>
+                            <th className="border-b border-border py-2 text-right text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Line Cost</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {uploadedLineItems.map((item) => (
+                            <tr key={item.docId}>
+                              <td className="border-b border-border/60 py-2 text-[13px] text-foreground">{item.productName || "Uploaded Product"}</td>
+                              <td className="border-b border-border/60 py-2 text-right text-[13px] text-foreground tabular-nums">{formatGoodsValue(item.quantity || 0)}</td>
+                              <td className="border-b border-border/60 py-2 text-right text-[13px] text-foreground tabular-nums">{(item.weightKg || 0).toLocaleString("en-MY", { maximumFractionDigits: 2 })}</td>
+                              <td className="border-b border-border/60 py-2 text-right text-[13px] text-foreground tabular-nums">{formatCurrency(convertFromBaseCurrency(unitPrice, currency), currency)}</td>
+                              <td className="border-b border-border/60 py-2 text-right text-[13px] font-semibold text-foreground tabular-nums">{formatCurrency(convertFromBaseCurrency((item.quantity || 0) * unitPrice, currency), currency)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <div className="mt-3 text-[11px] text-muted-foreground">
+                      Shipping uses total uploaded weight: {(effectiveCostContext.weight_kg || 0).toLocaleString("en-MY", { maximumFractionDigits: 2 })} kg.
+                    </div>
+                  </div>
+                )}
 
                 <div className="mt-6 divide-y divide-border">
                   {costRows.map((row) => (
@@ -1247,7 +1774,7 @@ const Logistics = () => {
                       <span className={`text-[15px] font-medium tabular-nums ${
                         row.waived ? "text-success line-through decoration-success/40" : "text-foreground"
                       }`}>
-                        {row.label === "Goods Value"
+                        {(row.valueType || "currency") === "number"
                           ? formatGoodsValue(row.value)
                           : formatCurrency(convertFromBaseCurrency(row.value, currency), currency)}
                       </span>
@@ -1271,14 +1798,14 @@ const Logistics = () => {
                 <div className="mt-6 flex items-end justify-between rounded-2xl bg-foreground p-6 text-background">
                   <div>
                     <div className="text-[11px] font-semibold uppercase tracking-wider text-background/60">Total landed cost</div>
-                    <div className="mt-1 text-[12px] text-background/70">Shipping: {shipping === "sea" ? "Sea Freight" : "Air Freight"} • All taxes & fees included</div>
+                      <div className="mt-1 text-[12px] text-background/70">Shipping: {shipping === "sea" ? "Sea Freight" : "Air Freight"} • {activeShippingPreviewLabel} • Quantity × Unit Price included</div>
                   </div>
                   <div className="text-right">
                     <div className="text-4xl font-semibold tracking-tight tabular-nums lg:text-5xl">
-                      {quote ? formatCurrency(displayTotal, currency) : "—"}
+                      {formatCurrency(displayTotal, currency)}
                     </div>
                     <div className="mt-1 text-[11px] text-background/60">
-                      {quote ? `${getCurrencyDisplayLabel(currency)} selected` : "Total will appear after shipping is selected"}
+                      Includes quantity-based goods cost, shipping, taxes, and service fees
                     </div>
                   </div>
                 </div>
@@ -1346,14 +1873,17 @@ const Logistics = () => {
               <h3 className="text-sm font-semibold text-foreground">Shipment summary</h3>
               <div className="mt-4 space-y-3 text-[13px]">
                 {[
-                  ["Route", summaryDestination ? `🇲🇾 Malaysia → 🇨🇳 ${summaryDestination}` : ""],
+                  ["Route", summaryDestinationCountry ? `🇲🇾 Malaysia → 🇨🇳 ${summaryDestinationCountry}` : ""],
+                  ["Complete Address", summaryDestinationAddress],
                   ["Product",  summaryProduct],
                   ["HS Code",  summaryHsCode],
                   ["Weight",   summaryWeight != null ? `${summaryWeight} kg` : ""],
                   ["Origin Region", originRegion === "east" ? "East Malaysia" : "West Malaysia"],
                   ["Currency", currency],
-                  ["Goods Value", formatGoodsValue(displayGoodsValue)],
-                  ["Landed Cost", quote ? formatCurrency(displayTotal, currency) : "—"],
+                  ["Goods Quantity", hasExtractedGoodsQuantity ? formatGoodsValue(displayGoodsQuantity) : ""],
+                  ["Unit Price", formatCurrency(convertFromBaseCurrency(unitPrice, currency), currency)],
+                  ["Goods Cost", formatCurrency(convertFromBaseCurrency(displayGoodsCost, currency), currency)],
+                  ["Landed Cost", formatCurrency(displayTotal, currency)],
                   ["Incoterm", summaryIncoterm],
                 ].filter(([, v]) => Boolean(v)).map(([k, v]) => (
                   <div key={k} className="flex items-center justify-between">
@@ -1481,6 +2011,62 @@ const Logistics = () => {
                       <Eye className="h-3.5 w-3.5" /> Open File
                     </a>
                   )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {reportHistoryOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/70 p-4" onClick={() => setReportHistoryOpen(false)}>
+          <div className="max-h-[90vh] w-full max-w-3xl overflow-hidden rounded-2xl border border-border bg-card shadow-soft-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between border-b border-border px-4 py-3">
+              <div>
+                <div className="text-sm font-semibold text-foreground">Report History</div>
+                <div className="text-xs text-muted-foreground">Restore previous shipment report with documents and costs.</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setReportHistoryOpen(false)}
+                className="inline-flex items-center justify-center rounded-lg border border-border bg-card p-1.5 text-muted-foreground hover:text-foreground"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="max-h-[calc(90vh-64px)] overflow-auto p-4">
+              {reportHistory.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-border bg-card px-4 py-8 text-center text-sm text-muted-foreground">
+                  No report history yet. Preview or download a report to save it.
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {reportHistory.map((entry) => (
+                    <div key={entry.id} className="rounded-xl border border-border bg-card p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="text-sm font-semibold text-foreground">{entry.shipmentId}</div>
+                          <div className="mt-1 text-xs text-muted-foreground">
+                            {new Date(entry.createdAt).toLocaleString("en-MY")} · {entry.shipping === "sea" ? "Sea Freight" : "Air Freight"}
+                          </div>
+                          <div className="mt-1 text-xs text-muted-foreground">
+                            {entry.summary.product || "Unknown product"} · {entry.summary.destinationCountry || "Unknown destination"}
+                          </div>
+                          <div className="mt-1 text-xs text-muted-foreground">
+                            Docs: {entry.docs.filter((doc) => doc.status === "uploaded").length} · Unit price: {formatCurrency(convertFromBaseCurrency(entry.unitPrice, entry.currency), entry.currency)}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => restoreHistoryEntry(entry)}
+                          className="inline-flex items-center gap-1 rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground hover:bg-primary/90"
+                        >
+                          Restore
+                        </button>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>

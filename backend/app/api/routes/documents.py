@@ -55,6 +55,7 @@ async def extract_and_quote_document(
     currency: Annotated[str | None, Form()] = None,
     package_count: Annotated[int | None, Form()] = None,
     destination_country: Annotated[str | None, Form()] = None,
+    destination_address: Annotated[str | None, Form()] = None,
     product_name: Annotated[str | None, Form()] = None,
     origin_region: Annotated[str | None, Form()] = None,
     weight_kg: Annotated[float | None, Form()] = None,
@@ -78,7 +79,7 @@ async def extract_and_quote_document(
     extracted = extraction.data
 
     normalized_product = (product_name or extracted.product_name or "Uploaded Product").strip()
-    normalized_destination = (destination_country or extracted.destination_country or "China").strip()
+    normalized_destination = (destination_country or extracted.destination_country or destination_address or extracted.destination_address or "China").strip()
 
     try:
         normalized_origin = OriginRegion(origin_region) if origin_region else (extracted.origin_region or OriginRegion.west)

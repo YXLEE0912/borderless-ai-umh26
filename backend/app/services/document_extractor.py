@@ -115,23 +115,23 @@ class DocumentExtractor:
             hs_match = re.search(r"\b[0-9]{4}\.[0-9]{2}(?:\.[0-9]{2,4})?\b", raw_text)
 
         goods_value_match = re.search(
-            r"(?im)^\s*(?:goods\s*value|declared\s*value|invoice\s*value|total\s*value|quantity|qty)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)\s*$",
+            r"(?im)^\s*(?:goods\s*value|declared\s*value|invoice\s*value|invoice\s*amount|total\s*value|total\s*amount|item\s*value|merchandise\s*value|value|amount|quantity|qty)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)\s*$",
             raw_text,
         )
         if not goods_value_match:
             goods_value_match = re.search(
-                r"(?:goods\s*value|declared\s*value|invoice\s*value|total\s*value|quantity|qty)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)",
+                r"(?:goods\s*value|declared\s*value|invoice\s*value|invoice\s*amount|total\s*value|total\s*amount|item\s*value|merchandise\s*value|value|amount|quantity|qty)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)",
                 content,
                 flags=re.IGNORECASE,
             )
 
         weight_match = re.search(
-            r"(?im)^\s*(?:weight|gross\s*weight|net\s*weight)\s*[:=]?\s*([0-9]+(?:\.\d+)?)\s*(?:kg|kgs)\b",
+            r"(?im)^\s*(?:weight|gross\s*weight|net\s*weight|cargo\s*weight|shipment\s*weight|billable\s*weight|chargeable\s*weight|package\s*weight|item\s*weight|mass)\s*[:=]?\s*([0-9]+(?:\.\d+)?)\s*(?:kg|kgs|kilograms?)\b",
             raw_text,
         )
         if not weight_match:
             weight_match = re.search(
-                r"(?:weight|gross\s*weight|net\s*weight)\s*[:=]?\s*([0-9]+(?:\.\d+)?)\s*(?:kg|kgs)\b",
+                r"(?:weight|gross\s*weight|net\s*weight|cargo\s*weight|shipment\s*weight|billable\s*weight|chargeable\s*weight|package\s*weight|item\s*weight|mass)\s*[:=]?\s*([0-9]+(?:\.\d+)?)\s*(?:kg|kgs|kilograms?)\b",
                 content,
                 flags=re.IGNORECASE,
             )
@@ -139,23 +139,34 @@ class DocumentExtractor:
         incoterm_match = re.search(r"\b(EXW|FCA|FOB|CFR|CIF|CPT|CIP|DPU|DAP|DDP)\b", content, flags=re.IGNORECASE)
 
         destination_match = re.search(
-            r"(?im)^\s*(?:destination(?:\s*country)?|ship\s*to|consignee\s*country|to)\s*[:=-]\s*([A-Za-z][A-Za-z ]{1,60})\s*$",
+            r"(?im)^\s*(?:destination(?:\s*country)?|country\s*of\s*destination|ship\s*-?\s*to|shipper\s*to|consignee\s*country|delivery\s*country|recipient\s*country|receiver\s*country|to)\s*[:=-]\s*([A-Za-z][A-Za-z ]{1,60})\s*$",
             raw_text,
         )
         if not destination_match:
             destination_match = re.search(
-                r"(?:destination(?:\s*country)?|ship\s*to|consignee\s*country)\s*[:=-]\s*([A-Za-z][A-Za-z ]{1,60})",
+                r"(?:destination(?:\s*country)?|country\s*of\s*destination|ship\s*-?\s*to|shipper\s*to|consignee\s*country|delivery\s*country|recipient\s*country|receiver\s*country)\s*[:=-]\s*([A-Za-z][A-Za-z ]{1,60})",
+                content,
+                flags=re.IGNORECASE,
+            )
+
+        destination_address_match = re.search(
+            r"(?im)^\s*(?:complete\s*address|full\s*address|destination\s*address|delivery\s*address|ship\s*-?\s*to\s*address|ship\s*-?\s*to|consignee\s*address|shipping\s*address|delivery\s*location|recipient\s*address|receiver\s*address|consignee\s*details|address\s*line(?:\s*[1-3])?|address)\s*[:=-]\s*([^\n]{3,200})\s*$",
+            raw_text,
+        )
+        if not destination_address_match:
+            destination_address_match = re.search(
+                r"(?:complete\s*address|full\s*address|destination\s*address|delivery\s*address|ship\s*-?\s*to\s*address|ship\s*-?\s*to|consignee\s*address|shipping\s*address|delivery\s*location|recipient\s*address|receiver\s*address|consignee\s*details|address\s*line(?:\s*[1-3])?)\s*[:=-]\s*([^\n]{3,200})",
                 content,
                 flags=re.IGNORECASE,
             )
 
         product_match = re.search(
-            r"(?im)^\s*(?:product\s*name|product|item\s*description|goods\s*description|goods)\s*[:=]\s*([^\n]{2,120})\s*$",
+            r"(?im)^\s*(?:product\s*name|product|item\s*description|item\s*desc|goods\s*description|description|commodity|merchandise|cargo\s*description|goods|item)\s*[:=]\s*([^\n]{2,120})\s*$",
             raw_text,
         )
         if not product_match:
             product_match = re.search(
-                r"(?:product\s*name|product|item\s*description|goods\s*description|goods)\s*[:=]\s*([A-Za-z0-9 .,'\-()]{3,120})",
+                r"(?:product\s*name|product|item\s*description|item\s*desc|goods\s*description|description|commodity|merchandise|cargo\s*description|goods|item)\s*[:=]\s*([A-Za-z0-9 .,'\-()]{3,120})",
                 content,
                 flags=re.IGNORECASE,
             )
@@ -166,6 +177,7 @@ class DocumentExtractor:
             product_name=product_match.group(1).strip() if product_match else None,
             hs_code=hs_match.group(0) if hs_match else None,
             destination_country=destination_match.group(1).strip() if destination_match else None,
+            destination_address=destination_address_match.group(1).strip() if destination_address_match else None,
             origin_region=origin_region,
             weight_kg=float(weight_match.group(1)) if weight_match else None,
             declared_value=float(goods_value_match.group(1).replace(",", "")) if goods_value_match else None,
@@ -220,6 +232,7 @@ class DocumentExtractor:
             product_name=overlay.product_name or base.product_name,
             hs_code=overlay.hs_code or base.hs_code,
             destination_country=overlay.destination_country or base.destination_country,
+            destination_address=overlay.destination_address or base.destination_address,
             origin_region=overlay.origin_region or base.origin_region,
             weight_kg=overlay.weight_kg if overlay.weight_kg is not None else base.weight_kg,
             declared_value=overlay.declared_value if overlay.declared_value is not None else base.declared_value,
@@ -261,12 +274,20 @@ def parse_document_fields_json(content: str) -> DocumentExtractedData:
         text_value = str(value).strip()
         return text_value or None
 
+    def _txt_any(keys: list[str]) -> str | None:
+        for key in keys:
+            text_value = _txt(key)
+            if text_value:
+                return text_value
+        return None
+
     return DocumentExtractedData(
-        product_name=_txt("product_name"),
-        hs_code=_txt("hs_code"),
-        destination_country=_txt("destination_country"),
-        origin_region=_txt("origin_region"),
-        weight_kg=_num("weight_kg"),
-        declared_value=_num_any(["declared_value", "quantity", "qty"]),
-        incoterm=_txt("incoterm"),
+        product_name=_txt_any(["product_name", "product", "item", "item_description", "item description", "goods_description", "goods description", "description", "commodity", "merchandise", "cargo_description", "cargo description"]),
+        hs_code=_txt_any(["hs_code", "hs code", "tariff_code", "tariff code", "customs_code", "customs code"]),
+        destination_country=_txt_any(["destination_country", "destination country", "country_of_destination", "country of destination", "destination", "ship_to_country", "ship to country", "consignee_country", "consignee country", "delivery_country", "delivery country"]),
+        destination_address=_txt_any(["destination_address", "destination address", "complete_address", "complete address", "full_address", "full address", "delivery_address", "delivery address", "ship_to_address", "ship to address", "consignee_address", "consignee address", "shipping_address", "shipping address", "recipient_address", "recipient address", "receiver_address", "receiver address", "address", "address_line_1", "address line 1", "address_line_2", "address line 2", "address_line_3", "address line 3"]),
+        origin_region=_txt_any(["origin_region", "origin region", "origin"]),
+        weight_kg=_num_any(["weight_kg", "weight kg", "weight", "gross_weight", "gross weight", "net_weight", "net weight", "billable_weight", "billable weight", "chargeable_weight", "chargeable weight", "cargo_weight", "cargo weight"]),
+        declared_value=_num_any(["declared_value", "declared value", "invoice_value", "invoice value", "goods_value", "goods value", "total_value", "total value", "item_value", "item value", "amount", "quantity", "qty"]),
+        incoterm=_txt_any(["incoterm", "incoterms"]),
     )

@@ -145,6 +145,7 @@ export type DocumentExtractedData = {
   product_name?: string | null;
   hs_code?: string | null;
   destination_country?: string | null;
+  destination_address?: string | null;
   origin_region?: OriginRegion | null;
   weight_kg?: number | null;
   declared_value?: number | null;
@@ -281,6 +282,7 @@ export async function extractAndQuoteDocument(
     currency?: string;
     packageCount?: number;
     destinationCountry?: string;
+    destinationAddress?: string;
     productName?: string;
     originRegion?: OriginRegion;
     weightKg?: number;
@@ -295,6 +297,7 @@ export async function extractAndQuoteDocument(
   if (options?.currency) formData.append("currency", options.currency);
   if (options?.packageCount != null) formData.append("package_count", String(options.packageCount));
   if (options?.destinationCountry) formData.append("destination_country", options.destinationCountry);
+  if (options?.destinationAddress) formData.append("destination_address", options.destinationAddress);
   if (options?.productName) formData.append("product_name", options.productName);
   if (options?.originRegion) formData.append("origin_region", options.originRegion);
   if (options?.weightKg != null) formData.append("weight_kg", String(options.weightKg));

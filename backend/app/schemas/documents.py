@@ -64,6 +64,7 @@ class DocumentExtractedData(BaseModel):
     product_name: str | None = None
     hs_code: str | None = None
     destination_country: str | None = None
+    destination_address: str | None = None
     origin_region: OriginRegion | None = None
     weight_kg: float | None = None
     declared_value: float | None = None

@@ -10,7 +10,10 @@ class Settings(BaseSettings):
     app_name: str = "Borderless AI API"
     api_prefix: str = "/api/v1"
 
-    z_ai_api_key: str | None = None
+    z_ai_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("Z_AI_API_KEY", "A_AI_API_KEY", "AI_API_KEY"),
+    )
     z_ai_base_url: str = "https://api.ilmu.ai/v1"
     z_ai_model: str = "ilmu-glm-5.1"
     z_ai_timeout_seconds: float = 90.0
@@ -37,7 +40,12 @@ class Settings(BaseSettings):
     rules_cache_ttl_seconds: int = 60
 
     cors_origins: list[str] = Field(
-        default_factory=lambda: ["http://localhost:3000", "http://127.0.0.1:3000"]
+        default_factory=lambda: [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:8080",
+            "http://127.0.0.1:8080",
+        ]
     )
 
 

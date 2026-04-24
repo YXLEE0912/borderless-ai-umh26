@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 
-from app.schemas.cost import TransportMode
+from app.schemas.cost import CostQuoteRequest, CostQuoteResponse, OriginRegion, TransportMode
 
 
 class DocumentGenerationRequest(BaseModel):
@@ -32,6 +32,7 @@ class DocumentItem(BaseModel):
 class CostContext(BaseModel):
     product_name: str
     destination_country: str
+    origin_region: OriginRegion = OriginRegion.west
     transport_mode: TransportMode
     declared_value: float
     weight_kg: float
@@ -63,6 +64,7 @@ class DocumentExtractedData(BaseModel):
     product_name: str | None = None
     hs_code: str | None = None
     destination_country: str | None = None
+    origin_region: OriginRegion | None = None
     weight_kg: float | None = None
     declared_value: float | None = None
     incoterm: str | None = None
@@ -75,3 +77,9 @@ class DocumentExtractionResponse(BaseModel):
     extracted_text_preview: str | None = None
     data: DocumentExtractedData = Field(default_factory=DocumentExtractedData)
     notes: list[str] = Field(default_factory=list)
+
+
+class DocumentExtractionAndQuoteResponse(BaseModel):
+    extraction: DocumentExtractionResponse
+    normalized_quote_request: CostQuoteRequest
+    quote: CostQuoteResponse

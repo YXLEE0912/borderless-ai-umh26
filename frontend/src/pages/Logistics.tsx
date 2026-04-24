@@ -1,7 +1,8 @@
 import { useEffect, useState, useRef } from "react";
 import { useLocation } from "react-router-dom";
 import TopNav from "@/components/TopNav";
-import { extractDocumentFields, quoteCosts, type CostContext, type CostQuoteResponse } from "@/lib/api";
+import { extractAndQuoteDocument, extractDocumentFields, quoteCosts, type CostContext, type CostQuoteResponse } from "@/lib/api";
+import { formatShippingRateLabel, lookupSeaShippingRate, lookupShippingRate, type OriginRegion } from "@/lib/shippingRates";
 import {
   Upload, FileText, FileCheck2, FileSpreadsheet, CheckCircle2,
   Plane, Ship, ArrowRight, Sparkles, TrendingDown, Info,
@@ -19,6 +20,7 @@ type LogisticsState = {
   hsCode?: string;
   destinationCountry?: string;
   transportMode?: "air" | "sea" | "flight" | "ship";
+  originRegion?: OriginRegion;
 };
 
 type ShipDoc = {
@@ -33,6 +35,7 @@ type ShipDoc = {
   optional?: boolean;
   fileName?: string;
   previewUrl?: string;
+  fileUrl?: string;
   mimeType?: string;
 };
 
@@ -40,6 +43,7 @@ type ShipmentInsight = {
   product?: string;
   hsCode?: string;
   destinationCountry?: string;
+  originRegion?: OriginRegion;
   weightKg?: number;
   goodsValue?: number;
   incoterm?: string;
@@ -273,7 +277,7 @@ const generateAndDownloadPDF = (
   <hr/>
   <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-bottom:22px;">
     ${[
-      ["Route", summary.destinationCountry ? `🇲🇾 Malaysia → 🇸🇬 ${summary.destinationCountry}` : ""],
+      ["Route", summary.destinationCountry ? `🇲🇾 Malaysia → 🇨🇳 ${summary.destinationCountry}` : ""],
       ["Product", summary.product || ""],
       ["HS Code", summary.hsCode || ""],
       ["Shipping Code", shippingCode],
@@ -295,7 +299,7 @@ const generateAndDownloadPDF = (
   <hr/>
   <div style="display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap;">
     ${[
-      ["Route", summary.destinationCountry ? `🇲🇾 Malaysia → 🇸🇬 ${summary.destinationCountry}` : ""],
+      ["Route", summary.destinationCountry ? `🇲🇾 Malaysia → 🇨🇳 ${summary.destinationCountry}` : ""],
       ["Product", summary.product || ""],
       ["HS Code", summary.hsCode || ""],
       ["Incoterm", summary.incoterm || ""],
@@ -441,25 +445,36 @@ const Logistics = () => {
   const [shipping, setShipping] = useState<"air" | "sea">(
     routeState.transportMode === "sea" || costContext?.transport_mode === "sea" ? "sea" : "air"
   );
-  const [insight, setInsight] = useState<ShipmentInsight>({});
+  const [insight, setInsight] = useState<ShipmentInsight>({
+    product: costContext?.product_name || routeState.product || undefined,
+    hsCode: routeState.hsCode || undefined,
+    destinationCountry: costContext?.destination_country || routeState.destinationCountry || undefined,
+    originRegion: costContext?.origin_region || routeState.originRegion || undefined,
+    weightKg: costContext?.weight_kg,
+    goodsValue: costContext?.declared_value,
+  });
+  const [originRegion, setOriginRegion] = useState<OriginRegion>(costContext?.origin_region || routeState.originRegion || "west");
   const documentGoodsValue = insight.goodsValue && insight.goodsValue > 0 ? insight.goodsValue : null;
   const hasDocumentGoodsValue = documentGoodsValue != null;
   const [currency, setCurrency] = useState<CurrencyCode>(normalizeCurrency(costContext?.currency));
   const [goodsValueSource, setGoodsValueSource] = useState<"document" | "manual">(hasDocumentGoodsValue ? "document" : "manual");
   const [manualGoodsValue, setManualGoodsValue] = useState<number>(documentGoodsValue ?? 0);
   const [generatingSummary, setGeneratingSummary] = useState(false);
+  const [previewDoc, setPreviewDoc] = useState<ShipDoc | null>(null);
   const fileInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const costSectionRef = useRef<HTMLDivElement>(null);
+  const docsRef = useRef<ShipDoc[]>([]);
 
-  const summaryProduct = insight.product || "";
-  const summaryDestination = insight.destinationCountry || "";
+  const summaryProduct = insight.product || costContext?.product_name || routeState.product || "";
+  const summaryDestination = insight.destinationCountry || costContext?.destination_country || routeState.destinationCountry || "";
   const summaryHsCode = insight.hsCode || "";
-  const summaryWeight = insight.weightKg;
+  const summaryWeight = insight.weightKg ?? costContext?.weight_kg;
   const summaryIncoterm = insight.incoterm || (shipping === "sea" ? "CIF Port" : shipping === "air" ? "DAP" : "");
   const goodsValue = goodsValueSource === "document" && documentGoodsValue != null ? documentGoodsValue : manualGoodsValue;
   const effectiveCostContext: CostContext = costContext || {
     product_name: summaryProduct,
     destination_country: summaryDestination,
+    origin_region: originRegion,
     transport_mode: shipping,
     declared_value: goodsValue,
     weight_kg: summaryWeight ?? 1,
@@ -468,6 +483,8 @@ const Logistics = () => {
     package_count: 1,
     provided_documents: docs.filter((doc) => doc.status === "carried" || doc.status === "uploaded").map((doc) => doc.title),
   };
+  const previewAirShippingQuote = lookupShippingRate(originRegion, summaryWeight ?? effectiveCostContext.weight_kg);
+  const previewSeaShippingQuote = lookupSeaShippingRate(originRegion, summaryWeight ?? effectiveCostContext.weight_kg);
 
   const handleScrollToCost = () => {
     setTimeout(() => {
@@ -478,12 +495,20 @@ const Logistics = () => {
   const calculateQuote = async (mode: "air" | "sea") => {
     if (!effectiveCostContext) return;
 
+    const productName = (effectiveCostContext.product_name || "").trim();
+    const destinationCountry = (effectiveCostContext.destination_country || "").trim();
+    if (!productName || !destinationCountry) {
+      setQuoteError("Please complete the required shipment details.");
+      return;
+    }
+
     setQuoteLoading(true);
     setQuoteError(null);
     try {
       const payload = await quoteCosts({
-        product_name: effectiveCostContext.product_name,
-        destination_country: effectiveCostContext.destination_country,
+        product_name: productName,
+        destination_country: destinationCountry,
+        origin_region: originRegion,
         transport_mode: mode,
         declared_value: goodsValue,
         weight_kg: effectiveCostContext.weight_kg,
@@ -502,8 +527,10 @@ const Logistics = () => {
 
   useEffect(() => {
     if (!effectiveCostContext || effectiveCostContext.weight_kg <= 0) return;
+    if (!(effectiveCostContext.product_name || "").trim()) return;
+    if (!(effectiveCostContext.destination_country || "").trim()) return;
     void calculateQuote(shipping);
-  }, [costContext, docs, shipping, goodsValue, goodsValueSource, manualGoodsValue, currency]);
+  }, [costContext, docs, shipping, goodsValue, goodsValueSource, manualGoodsValue, currency, originRegion]);
 
   useEffect(() => {
     if (!hasDocumentGoodsValue && goodsValueSource === "document") {
@@ -521,7 +548,12 @@ const Logistics = () => {
     {
       label: "Shipping Fee",
       value: quote.shipping_fee,
-      note: quote.transport_mode === "sea" ? "Sea freight" : "Air freight",
+      note: formatShippingRateLabel({
+        originRegion: quote.origin_region,
+        rateBand: quote.shipping_rate_band,
+        rateWeightKg: quote.shipping_rate_weight_kg,
+        shippingFee: quote.shipping_fee,
+      }),
       waived: false,
     },
     { label: "Service Fee", value: quote.documentation_fee + quote.customs_broker_fee + quote.port_handling_fee, note: "Platform + handling", waived: false },
@@ -529,48 +561,103 @@ const Logistics = () => {
     { label: "Goods Value", value: effectiveCostContext.declared_value || 0, note: null, waived: false },
     { label: "Import Duty", value: 0, note: "Select shipping to calculate", waived: false },
     { label: "VAT / GST (7%)", value: 0, note: "Select shipping to calculate", waived: false },
-    { label: "Shipping Fee", value: 0, note: "Choose air or sea shipping", waived: false },
+    {
+      label: "Shipping Fee",
+      value: shipping === "air" ? previewAirShippingQuote.shippingFee : previewSeaShippingQuote.shippingFee,
+      note:
+        shipping === "air"
+          ? formatShippingRateLabel(previewAirShippingQuote)
+          : formatShippingRateLabel(previewSeaShippingQuote),
+      waived: false,
+    },
     { label: "Service Fee", value: 0, note: "Calculated after shipping selection", waived: false },
   ];
 
   const uploadedCount = docs.filter((d) => d.status === "uploaded" || d.status === "carried").length;
+  const canShowShippingEstimate = uploadedCount > 0;
 
   const handleFileSelect = async (docId: string, file: File) => {
     const previewUrl = file.type.startsWith("image/") ? await toDataUrl(file) : undefined;
+    const fileUrl = URL.createObjectURL(file);
     let extracted: ShipmentInsight = {};
+    let pipelineQuote: CostQuoteResponse | null = null;
     try {
-      const extraction = await extractDocumentFields(file, docId);
+      const selectedDoc = docs.find((d) => d.id === docId);
+      const pipeline = await extractAndQuoteDocument(file, {
+        documentLabel: selectedDoc?.title || docId,
+        transportMode: shipping,
+        currency,
+        originRegion,
+        destinationCountry: summaryDestination || undefined,
+        productName: summaryProduct || undefined,
+        weightKg: summaryWeight ?? undefined,
+        declaredValue: goodsValue,
+      });
+
+      const extraction = pipeline.extraction;
+      pipelineQuote = pipeline.quote;
       extracted = {
         product: extraction.data.product_name || undefined,
         hsCode: extraction.data.hs_code || undefined,
         destinationCountry: extraction.data.destination_country || undefined,
+        originRegion: extraction.data.origin_region || undefined,
         weightKg: extraction.data.weight_kg ?? undefined,
         goodsValue: extraction.data.declared_value ?? undefined,
         incoterm: extraction.data.incoterm || undefined,
       };
     } catch {
-      extracted = {};
+      try {
+        const extraction = await extractDocumentFields(file, docId);
+        extracted = {
+          product: extraction.data.product_name || undefined,
+          hsCode: extraction.data.hs_code || undefined,
+          destinationCountry: extraction.data.destination_country || undefined,
+          originRegion: extraction.data.origin_region || undefined,
+          weightKg: extraction.data.weight_kg ?? undefined,
+          goodsValue: extraction.data.declared_value ?? undefined,
+          incoterm: extraction.data.incoterm || undefined,
+        };
+      } catch {
+        extracted = {};
+      }
     }
     setInsight((prev) => ({
       product: extracted.product || prev.product,
       hsCode: extracted.hsCode || prev.hsCode,
       destinationCountry: extracted.destinationCountry || prev.destinationCountry,
+      originRegion: extracted.originRegion || prev.originRegion,
       weightKg: extracted.weightKg ?? prev.weightKg,
       goodsValue: extracted.goodsValue ?? prev.goodsValue,
       incoterm: extracted.incoterm || prev.incoterm,
     }));
+    if (extracted.originRegion) {
+      setOriginRegion(extracted.originRegion);
+    }
+    if (extracted.goodsValue != null && extracted.goodsValue > 0) {
+      setGoodsValueSource("document");
+    }
+    if (pipelineQuote) {
+      setQuote(pipelineQuote);
+      setQuoteError(null);
+    }
 
     setDocs((prev) =>
       prev.map((d) =>
         d.id === docId
-          ? {
-              ...d,
-              status: "uploading",
-              fileName: file.name,
-              size: `${(file.size / 1024).toFixed(0)} KB`,
-              previewUrl,
-              mimeType: file.type,
-            }
+          ? (() => {
+              if (d.fileUrl) {
+                URL.revokeObjectURL(d.fileUrl);
+              }
+              return {
+                ...d,
+                status: "uploading",
+                fileName: file.name,
+                size: `${(file.size / 1024).toFixed(0)} KB`,
+                previewUrl,
+                fileUrl,
+                mimeType: file.type,
+              };
+            })()
           : d
       )
     );
@@ -586,11 +673,40 @@ const Logistics = () => {
       prev.map((d) =>
         // Cannot remove carried docs — they came from the assistant
         d.id === docId && d.status !== "carried"
-          ? { ...d, status: "missing", fileName: undefined, size: undefined }
+          ? (() => {
+              if (d.fileUrl) {
+                URL.revokeObjectURL(d.fileUrl);
+              }
+              return { ...d, status: "missing", fileName: undefined, size: undefined, previewUrl: undefined, fileUrl: undefined, mimeType: undefined };
+            })()
           : d
       )
     );
+    if (previewDoc?.id === docId) {
+      setPreviewDoc(null);
+    }
   };
+
+  const handleOpenPreview = (doc: ShipDoc) => {
+    if (!doc.fileUrl && !doc.previewUrl) return;
+    setPreviewDoc(doc);
+  };
+
+  const handleClosePreview = () => setPreviewDoc(null);
+
+  useEffect(() => {
+    docsRef.current = docs;
+  }, [docs]);
+
+  useEffect(() => {
+    return () => {
+      docsRef.current.forEach((doc) => {
+        if (doc.fileUrl) {
+          URL.revokeObjectURL(doc.fileUrl);
+        }
+      });
+    };
+  }, []);
 
   const handleDrop = (docId: string, e: React.DragEvent) => {
     e.preventDefault();
@@ -775,9 +891,23 @@ const Logistics = () => {
                           <span className="truncate font-medium text-foreground max-w-[120px]">
                             {isCarried ? "From AI Assistant" : doc.fileName}
                           </span>
-                          <span className="font-semibold shrink-0 ml-2 text-success">
-                            {isCarried ? "Pre-filled" : "Verified"}
-                          </span>
+                          <div className="flex items-center gap-2">
+                            {!isCarried && (doc.fileUrl || doc.previewUrl) && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleOpenPreview(doc);
+                                }}
+                                className="inline-flex items-center gap-1 rounded-md border border-border bg-card px-2 py-0.5 text-[10px] font-semibold text-foreground hover:border-primary hover:text-primary"
+                              >
+                                <Eye className="h-3 w-3" /> Preview
+                              </button>
+                            )}
+                            <span className="font-semibold shrink-0 ml-2 text-success">
+                              {isCarried ? "Pre-filled" : "Verified"}
+                            </span>
+                          </div>
                         </div>
                       )}
 
@@ -905,9 +1035,9 @@ const Logistics = () => {
                       <div className="text-2xl font-semibold tracking-tight text-foreground tabular-nums">
                         {shipping === "air" && quote
                           ? formatCurrency(convertFromBaseCurrency(quote.shipping_fee, currency), currency)
-                          : shipping === "air"
-                          ? formatCurrency(convertFromBaseCurrency(480, currency), currency)
-                          : "Choose shipping"}
+                            : shipping === "air" && canShowShippingEstimate
+                            ? formatCurrency(convertFromBaseCurrency(previewAirShippingQuote.shippingFee, currency), currency)
+                          : "Upload document"}
                       </div>
                     </div>
                     <div className="inline-flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
@@ -967,13 +1097,18 @@ const Logistics = () => {
                         <div className="text-2xl font-semibold tracking-tight text-foreground tabular-nums">
                           {shipping === "sea" && quote
                             ? formatCurrency(convertFromBaseCurrency(quote.shipping_fee, currency), currency)
-                            : shipping === "sea"
-                            ? formatCurrency(convertFromBaseCurrency(180, currency), currency)
-                            : "Choose shipping"}
+                            : shipping === "sea" && canShowShippingEstimate
+                            ? formatCurrency(convertFromBaseCurrency(previewSeaShippingQuote.shippingFee, currency), currency)
+                            : "Upload document"}
                         </div>
                         {shipping === "sea" && quote && quote.shipping_fee && (
                           <span className="text-[11px] font-semibold text-success">
-                            Save {formatCurrency(convertFromBaseCurrency(Math.round(480 - quote.shipping_fee), currency), currency)}
+                            {formatShippingRateLabel({
+                              originRegion: quote.origin_region,
+                              rateBand: quote.shipping_rate_band,
+                              rateWeightKg: quote.shipping_rate_weight_kg,
+                              shippingFee: quote.shipping_fee,
+                            })}
                           </span>
                         )}
                       </div>
@@ -1045,6 +1180,17 @@ const Logistics = () => {
                 <div className="mt-4 rounded-lg border border-border/50 bg-card/30 p-4">
                   <div className="text-[12px] font-semibold text-foreground mb-3">Goods Value</div>
                   <div className="space-y-3">
+                    <div>
+                      <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Origin region</label>
+                      <select
+                        value={originRegion}
+                        onChange={(event) => setOriginRegion(event.target.value as OriginRegion)}
+                        className="w-full rounded-xl border border-border bg-card px-3 py-2.5 text-sm text-foreground outline-none transition-base focus:border-primary"
+                      >
+                        <option value="west">West Malaysia</option>
+                        <option value="east">East Malaysia (Sabah & Sarawak)</option>
+                      </select>
+                    </div>
                     <div>
                       <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Value source</label>
                       <select
@@ -1189,10 +1335,11 @@ const Logistics = () => {
               <h3 className="text-sm font-semibold text-foreground">Shipment summary</h3>
               <div className="mt-4 space-y-3 text-[13px]">
                 {[
-                  ["Route", summaryDestination ? `🇲🇾 Malaysia → 🇸🇬 ${summaryDestination}` : ""],
+                  ["Route", summaryDestination ? `🇲🇾 Malaysia → 🇨🇳 ${summaryDestination}` : ""],
                   ["Product",  summaryProduct],
                   ["HS Code",  summaryHsCode],
                   ["Weight",   summaryWeight != null ? `${summaryWeight} kg` : ""],
+                  ["Origin Region", originRegion === "east" ? "East Malaysia" : "West Malaysia"],
                   ["Currency", currency],
                   ["Goods Value", formatGoodsValue(displayGoodsValue)],
                   ["Landed Cost", quote ? formatCurrency(displayTotal, currency) : "—"],
@@ -1262,6 +1409,62 @@ const Logistics = () => {
           </aside>
         </div>
       </main>
+
+      {previewDoc && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/70 p-4" onClick={handleClosePreview}>
+          <div className="max-h-[90vh] w-full max-w-5xl overflow-hidden rounded-2xl border border-border bg-card shadow-soft-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between border-b border-border px-4 py-3">
+              <div>
+                <div className="text-sm font-semibold text-foreground">{previewDoc.title}</div>
+                <div className="text-xs text-muted-foreground">{previewDoc.fileName || "Uploaded document"}</div>
+              </div>
+              <div className="flex items-center gap-2">
+                {previewDoc.fileUrl && (
+                  <a
+                    href={previewDoc.fileUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-semibold text-foreground hover:border-primary hover:text-primary"
+                  >
+                    <Download className="h-3.5 w-3.5" /> Open
+                  </a>
+                )}
+                <button
+                  type="button"
+                  onClick={handleClosePreview}
+                  className="inline-flex items-center justify-center rounded-lg border border-border bg-card p-1.5 text-muted-foreground hover:text-foreground"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+
+            <div className="max-h-[calc(90vh-64px)] overflow-auto bg-secondary/20 p-4">
+              {previewDoc.mimeType?.startsWith("image/") && previewDoc.previewUrl ? (
+                <img src={previewDoc.previewUrl} alt={previewDoc.title} className="mx-auto max-h-[75vh] w-auto rounded-lg border border-border bg-card" />
+              ) : previewDoc.mimeType === "application/pdf" && previewDoc.fileUrl ? (
+                <iframe title={previewDoc.title} src={previewDoc.fileUrl} className="h-[75vh] w-full rounded-lg border border-border bg-card" />
+              ) : (
+                <div className="flex min-h-[220px] flex-col items-center justify-center rounded-lg border border-dashed border-border bg-card px-4 py-8 text-center">
+                  <FileText className="h-8 w-8 text-muted-foreground" />
+                  <p className="mt-3 text-sm font-semibold text-foreground">Preview is limited for this file type.</p>
+                  <p className="mt-1 text-xs text-muted-foreground">Open the file in a new tab to view it.</p>
+                  {previewDoc.fileUrl && (
+                    <a
+                      href={previewDoc.fileUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-4 inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground"
+                    >
+                      <Eye className="h-3.5 w-3.5" /> Open File
+                    </a>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

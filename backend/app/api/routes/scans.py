@@ -3,11 +3,12 @@ from time import perf_counter
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import APIRouter, Body, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Body, File, Form, HTTPException, Query, Request, UploadFile
 
 from app.schemas.scan import (
     ScanChatMessage,
     ScanCreateResponse,
+    ScanHistoryItem,
     ScanFollowUpRequest,
     ScanFollowUpResponse,
     ScanReadResponse,
@@ -15,10 +16,20 @@ from app.schemas.scan import (
 )
 from app.services.audit_repository import create_rule_execution_log
 from app.services.chat_repository import create_chat_message, list_chat_messages
-from app.services.scan_repository import create_scan_record, get_scan_record, update_scan_record
+from app.services.scan_repository import create_scan_record, get_scan_record, list_scan_records, update_scan_record
 from app.services.storage import upload_scan_asset
 
 router = APIRouter(prefix="/scans")
+
+
+@router.get("", response_model=list[ScanHistoryItem])
+async def list_scans(request: Request, limit: int = Query(25, ge=1, le=100)):
+    records = await list_scan_records(
+        request.app.state.supabase_client,
+        request.app.state.settings.supabase_scans_table,
+        limit=limit,
+    )
+    return [_build_history_item(record) for record in records]
 
 
 @router.post("", response_model=ScanCreateResponse)
@@ -238,3 +249,21 @@ def _compose_follow_up_prompt(*, existing_prompt: str, user_message: str) -> str
         parts.append(existing_prompt)
     parts.append(f"Additional user information: {user_message.strip()}")
     return "\n\n".join(parts)
+
+
+def _build_history_item(record: dict) -> ScanHistoryItem:
+    result = record.get("result") if isinstance(record.get("result"), dict) else {}
+    hs_codes = result.get("hs_code_candidates") if isinstance(result.get("hs_code_candidates"), list) else []
+    return ScanHistoryItem(
+        id=str(record.get("id") or ""),
+        created_at=record.get("created_at"),
+        updated_at=record.get("updated_at"),
+        prompt=str(record.get("prompt") or ""),
+        destination_country=record.get("destination_country"),
+        image_asset=record.get("image_asset"),
+        product_name=str(result.get("product_name") or ""),
+        hs_code=str(hs_codes[0]) if hs_codes else "",
+        status=result.get("status") or ScanStatus.review,
+        compliance_summary=str(result.get("compliance_summary") or ""),
+        rule_hits=result.get("rule_hits") if isinstance(result.get("rule_hits"), list) else [],
+    )

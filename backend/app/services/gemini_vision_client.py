@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 
 class GeminiVisionClient:
@@ -31,27 +34,36 @@ class GeminiVisionClient:
     ) -> dict:
         if not self.enabled:
             raise RuntimeError("Gemini API keys are not configured")
+        if not image_bytes:
+            raise RuntimeError("Gemini vision received empty image content")
 
         last_error: Exception | None = None
+        mime_candidates = _build_mime_candidates(image_content_type)
         for api_key in self.api_keys:
             for model_name in self.models:
-                try:
-                    return await self._analyze_with_key(
-                        api_key=api_key,
-                        model_name=model_name,
-                        prompt=prompt,
-                        image_bytes=image_bytes,
-                        image_content_type=image_content_type,
-                    )
-                except Exception as error:
-                    last_error = error
-                    if "not found" in str(error).lower() or "not supported" in str(error).lower():
-                        continue
-                    break
+                for mime_type in mime_candidates:
+                    try:
+                        return await self._analyze_with_key(
+                            api_key=api_key,
+                            model_name=model_name,
+                            prompt=prompt,
+                            image_bytes=image_bytes,
+                            image_content_type=mime_type,
+                        )
+                    except Exception as error:
+                        last_error = error
+                        lowered = str(error).lower()
+                        if "not found" in lowered or "not supported" in lowered:
+                            continue
+                        if "unable to process input image" in lowered and mime_type != mime_candidates[-1]:
+                            continue
+                        break
 
         detail = str(last_error).strip() if last_error else "unknown error"
         if detail:
             detail = detail[:300]
+        if last_error:
+            logger.warning("Gemini vision failed: %s", detail)
         raise RuntimeError(
             f"Gemini vision failed for all configured keys: {last_error.__class__.__name__ if last_error else 'unknown'}: {detail}"
         )
@@ -125,3 +137,22 @@ def _dedupe_models(values: list[str]) -> list[str]:
         seen.add(item)
         out.append(item)
     return out
+
+
+def _build_mime_candidates(image_content_type: str | None) -> list[str]:
+    normalized = (image_content_type or "").strip().lower()
+    if normalized == "image/jpg":
+        normalized = "image/jpeg"
+
+    allowed = {"image/png", "image/jpeg", "image/webp"}
+    candidates: list[str] = []
+
+    if normalized in allowed:
+        candidates.append(normalized)
+
+    # Retry with common alternatives because providers sometimes reject the declared MIME.
+    for fallback in ["image/jpeg", "image/png", "image/webp"]:
+        if fallback not in candidates:
+            candidates.append(fallback)
+
+    return candidates

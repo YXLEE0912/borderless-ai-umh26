@@ -38,6 +38,7 @@ class ZAIClient:
                     prompt=prompt,
                     destination_country=destination_country,
                     image_filename=image_filename,
+                    response_language=self._detect_response_language(prompt),
                 ),
             }
         ]
@@ -58,6 +59,7 @@ class ZAIClient:
                     "role": "system",
                     "content": (
                         "You are a Malaysia export scanner for SMEs. Return valid JSON only. "
+                        "Reply in the same language as the user's prompt when possible; if the language is unclear, use English. "
                         "CRITICAL: All array fields must be JSON arrays of strings, NEVER strings themselves. "
                         "For example: materials_detected should be [\"leather\", \"metal\"], NOT \"leather metal\". "
                         "Each array element should be a complete, meaningful item (e.g., \"FSC pine wood\"), not single characters. "
@@ -240,14 +242,36 @@ class ZAIClient:
         prompt: str,
         destination_country: str | None,
         image_filename: str | None,
+        response_language: str,
     ) -> str:
         return (
             f"Product prompt: {prompt}\n"
             f"Destination country: {destination_country or 'unknown'}\n"
             f"Image filename: {image_filename or 'unknown'}\n"
+            f"Response language: {response_language}\n"
+            "Important: write all human-readable fields in the response language above. "
+            "If the user wrote in another language, follow that language. "
             "Tasks: identify material, estimate HS candidates, check Malaysia prohibition layers, indicate permit and agency, "
             "and output sea logistics document checklist."
         )
+
+    def _detect_response_language(self, prompt: str) -> str:
+        text = (prompt or "").strip()
+        if not text:
+            return "English"
+
+        if any("\u0600" <= character <= "\u06ff" for character in text):
+            return "Arabic"
+        if any("\u4e00" <= character <= "\u9fff" for character in text):
+            return "Chinese"
+        if any(token in text.lower() for token in ["saya", "adalah", "barang", "permohonan", "eksport", "dari", "ke", "untuk"]):
+            return "Malay"
+        if any(token in text.lower() for token in ["bonjour", "merci", "exportation"]):
+            return "French"
+        if any(token in text.lower() for token in ["hola", "gracias", "exportación"]):
+            return "Spanish"
+
+        return "English"
 
     def _build_data_url(self, content: bytes, content_type: str) -> str:
         encoded = base64.b64encode(content).decode("ascii")

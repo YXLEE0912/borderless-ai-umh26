@@ -41,6 +41,8 @@ class ProductScanner:
     ) -> ScanResult:
         # Step 1: Analyze image with Gemini vision if provided
         gemini_vision_summary = None
+        vision_restriction_reason = None
+        gemini_failure_reason = None
         if image_bytes and self.gemini_vision_client.enabled:
             try:
                 vision_result = await self.gemini_vision_client.analyze_image(
@@ -51,7 +53,13 @@ class ProductScanner:
                 gemini_vision_summary = vision_result
             except Exception as error:
                 # Gemini vision failure is not blocking; we can still use ILMU with original prompt
-                pass
+                detail = str(error).strip()
+                gemini_failure_reason = (
+                    f"Gemini vision unavailable: {error.__class__.__name__}"
+                    + (f" ({detail[:180]})" if detail else "")
+                )
+
+            vision_restriction_reason = _detect_restricted_vision_signal(gemini_vision_summary)
 
         effective_destination_country = destination_country or _extract_destination_country_from_prompt(prompt)
 
@@ -63,7 +71,21 @@ class ProductScanner:
 
         # Step 3: Analyze with ILMU using enhanced prompt
         base_result: ScanResult
-        if self.settings.z_ai_api_key:
+        if vision_restriction_reason:
+            base_result = _fallback_result(
+                prompt=enhanced_prompt,
+                reason=vision_restriction_reason,
+            ).model_copy(
+                update={
+                    "status": ScanStatus.restricted,
+                    "compliance_summary": vision_restriction_reason,
+                    "required_documents": [],
+                    "required_permits": [],
+                    "required_agencies": ["Royal Malaysian Customs Department"],
+                    "rule_hits": _dedupe_string_list(list((_normalize_string_list(gemini_vision_summary.get("materials_detected") if isinstance(gemini_vision_summary, dict) else [])) + ["vision_weapon_block"])),
+                }
+            )
+        elif self.settings.z_ai_api_key:
             try:
                 raw_result = await self.zai_client.analyze(
                     prompt=enhanced_prompt,
@@ -79,12 +101,12 @@ class ProductScanner:
                 if response_text:
                     response_text = response_text[:240]
                 base_result = _fallback_result(
-                    prompt=enhanced_prompt,
+                    prompt=prompt,
                     reason=f"ILMU reasoning service unavailable (HTTP {error.response.status_code}).",
                 )
             except Exception as error:
                 base_result = _fallback_result(
-                    prompt=enhanced_prompt,
+                    prompt=prompt,
                     reason=f"ILMU reasoning service unavailable ({error.__class__.__name__}).",
                 )
         else:
@@ -97,6 +119,13 @@ class ProductScanner:
             destination_country=effective_destination_country,
             rules_bundle=rules_bundle,
         )
+
+        resolved_product_name = _resolve_product_name(
+            existing=result.product_name,
+            gemini_vision_summary=gemini_vision_summary,
+        )
+        if resolved_product_name and resolved_product_name != result.product_name:
+            result = result.model_copy(update={"product_name": resolved_product_name})
 
         follow_up_questions = _build_follow_up_questions(
             result=result,
@@ -116,10 +145,14 @@ class ProductScanner:
             "analysis": analysis,
         }
 
+        if gemini_failure_reason:
+            base_updates["extraction_notes"] = _dedupe_string_list(result.extraction_notes + [gemini_failure_reason])
+
         if follow_up_questions and result.status != ScanStatus.restricted:
             base_updates["follow_up_questions"] = follow_up_questions
+            existing_notes = list(base_updates.get("extraction_notes") or result.extraction_notes)
             base_updates["extraction_notes"] = _dedupe_string_list(
-                result.extraction_notes + ["Additional details are needed to improve classification confidence."]
+                existing_notes + ["Additional details are needed to improve classification confidence."]
             )
 
         return result.model_copy(update=base_updates)
@@ -177,6 +210,72 @@ def _build_enhanced_prompt(original_prompt: str, gemini_vision_summary: dict | N
     enhanced = f"{original_prompt}\n\n[Image Analysis from Gemini Vision]\n{vision_block}"
     
     return enhanced
+
+
+def _resolve_product_name(*, existing: str | None, gemini_vision_summary: dict | None) -> str:
+    current = (existing or "").strip()
+    lowered = current.lower()
+
+    looks_like_prompt_artifact = (
+        "[image analysis from gemini vision]" in lowered
+        or "product name (from image):" in lowered
+        or "\n" in current
+    )
+
+    if current and lowered not in {"unspecified", "unknown", "unknown product"} and not looks_like_prompt_artifact:
+        return current
+
+    if not isinstance(gemini_vision_summary, dict):
+        return current
+
+    gemini_name = str(gemini_vision_summary.get("product_name") or "").strip()
+    if gemini_name and gemini_name.lower() not in {"unspecified", "unknown", "unknown product"}:
+        return gemini_name
+
+    visual_summary = str(gemini_vision_summary.get("visual_summary") or "").strip()
+    if visual_summary:
+        # Keep product title concise for frontend cards.
+        first_line = visual_summary.splitlines()[0].strip()
+        return first_line[:80]
+
+    return current
+
+
+def _detect_restricted_vision_signal(gemini_vision_summary: dict | None) -> str | None:
+    if not isinstance(gemini_vision_summary, dict):
+        return None
+
+    combined = " ".join(
+        str(part)
+        for part in [
+            gemini_vision_summary.get("product_name"),
+            gemini_vision_summary.get("visual_summary"),
+            gemini_vision_summary.get("brand_detected"),
+            " ".join(_normalize_string_list(gemini_vision_summary.get("materials_detected"))),
+            " ".join(_normalize_string_list(gemini_vision_summary.get("packaging_text"))),
+        ]
+        if part
+    ).lower()
+
+    restricted_terms = [
+        "gun",
+        "firearm",
+        "rifle",
+        "pistol",
+        "revolver",
+        "ammunition",
+        "ammo",
+        "bullet",
+        "grenade",
+        "detonator",
+        "explosive",
+        "weapon",
+    ]
+
+    if any(term in combined for term in restricted_terms):
+        return "Gemini vision detected restricted weapon content in the uploaded image."
+
+    return None
 
 
 def _parse_model_result(raw_result: str) -> dict:

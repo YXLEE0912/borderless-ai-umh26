@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 
 
 def _table(client, table_name: str):
@@ -29,14 +30,22 @@ async def get_scan_record(client, table_name: str, scan_id: str) -> dict | None:
     if not data:
         return None
     record = dict(data[0])
-    if isinstance(record.get("result"), str):
-        try:
-            import json
-
-            record["result"] = json.loads(record["result"])
-        except Exception:
-            pass
+    record["result"] = _parse_result(record.get("result"))
     return record
+
+
+async def list_scan_records(client, table_name: str, limit: int = 25) -> list[dict]:
+    if client is None:
+        return []
+
+    response = _table(client, table_name).select("*").order("created_at", desc=True).limit(limit).execute()
+    rows = response.data or []
+    records: list[dict] = []
+    for row in rows:
+        record = dict(row)
+        record["result"] = _parse_result(record.get("result"))
+        records.append(record)
+    return records
 
 
 async def update_scan_record(client, table_name: str, scan_id: str, updates: dict) -> dict | None:
@@ -57,3 +66,14 @@ def _to_iso(value):
     if isinstance(value, datetime):
         return value.isoformat()
     return value
+
+
+def _parse_result(value):
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return {}
+    if isinstance(value, dict):
+        return value
+    return {}

@@ -1,13 +1,25 @@
-import { useRef, useState, useEffect } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import TopNav from "@/components/TopNav";
 import {
-  Mic, Sparkles, ScanLine, ArrowRight, RefreshCw,
+  Mic, Sparkles, ScanLine, ArrowRight, RefreshCw, ChevronLeft, ChevronRight,
   CheckCircle2, AlertTriangle, Image as ImageIcon, X, Loader2,
   Send,
   Info, Square
 } from "lucide-react";
-import { scanProduct, followUpScan, type BackendScanResult, type BackendScanAnalysis } from "@/lib/api";
+import {
+  scanProduct,
+  followUpScan,
+  listScans,
+  getScan,
+  listScanChat,
+  type BackendScanResult,
+  type BackendScanAnalysis,
+  type BackendScanHistoryItem,
+  type BackendScanReadResponse,
+  type BackendScanChatMessage,
+  type BackendScanStatus,
+} from "@/lib/api";
 
 type SpeechRecognitionResultLike = {
   isFinal: boolean;
@@ -165,6 +177,35 @@ const dedupeNormalized = (values: string[]): string[] => {
   return out;
 };
 
+const cleanItemName = (value: string | undefined | null): string => {
+  const raw = (value || "").trim();
+  if (!raw) return "";
+
+  const lowered = raw.toLowerCase();
+  if (lowered === "unspecified" || lowered === "unknown product") return "";
+
+  const markers = [
+    "additional user information:",
+    "[image analysis from gemini vision]",
+    "destination country:",
+    "product prompt:",
+  ];
+
+  let cutIndex = raw.length;
+  const loweredRaw = raw.toLowerCase();
+  for (const marker of markers) {
+    const index = loweredRaw.indexOf(marker);
+    if (index >= 0 && index < cutIndex) {
+      cutIndex = index;
+    }
+  }
+
+  const candidate = raw.slice(0, cutIndex).trim();
+  if (!candidate) return "";
+  if (/^to\s+[a-z]{2,}(\s+[a-z]{2,})?$/i.test(candidate)) return "";
+  return candidate;
+};
+
 const mapBackendResult = (result: BackendScanResult, scanId?: string, intent?: ScanIntent): ScanResult => {
   const status: ScanResult["status"] =
     result.status === "green" ? "green" :
@@ -201,7 +242,7 @@ const mapBackendResult = (result: BackendScanResult, scanId?: string, intent?: S
     scanId,
     intent,
     analysis,
-    product: result.product_name || "Unknown Product",
+    product: cleanItemName(result.product_name) || "Uploaded image",
     hsCode: result.hs_code_candidates[0] || "0000.00",
     hsCodeCandidates: result.hs_code_candidates,
     confidence:
@@ -225,6 +266,58 @@ const mapBackendResult = (result: BackendScanResult, scanId?: string, intent?: S
   };
 };
 
+const backendStatusToUiStatus = (status: BackendScanStatus): ScanResult["status"] => {
+  if (status === "green") return "green";
+  if (status === "restricted") return "red";
+  return "yellow";
+};
+
+const buildScanTranscript = (
+  record: BackendScanReadResponse,
+  chatMessages: BackendScanChatMessage[]
+): Message[] => {
+  const scanResult = mapBackendResult(record.result, record.id);
+  scanResult.status = backendStatusToUiStatus(record.result.status);
+
+  const transcript: Message[] = [
+    {
+      id: `${record.id}-prompt`,
+      role: "user",
+      type: "text",
+      content: record.prompt || "Saved scan",
+    },
+    ...(record.image_asset
+      ? [
+          {
+            id: `${record.id}-image`,
+            role: "user" as const,
+            type: "image" as const,
+            content: "Uploaded image",
+            imagePreview: record.image_asset,
+          },
+        ]
+      : []),
+    {
+      id: `${record.id}-result`,
+      role: "assistant",
+      type: "result",
+      content: "",
+      result: scanResult,
+    },
+  ];
+
+  for (const chatMessage of chatMessages) {
+    transcript.push({
+      id: chatMessage.id || `${record.id}-${chatMessage.role}-${chatMessage.created_at}`,
+      role: chatMessage.role,
+      type: "text",
+      content: chatMessage.message,
+    });
+  }
+
+  return transcript;
+};
+
 const STATUS_META: Record<Exclude<ScanResult["status"], "invalid">, { label: string; toneClass: string; icon: React.ElementType }> = {
   green: { label: "Allowed", toneClass: "bg-success-soft text-success border-success/20", icon: CheckCircle2 },
   yellow: { label: "Allowed With Restrictions", toneClass: "bg-warning-soft text-warning border-warning/30", icon: AlertTriangle },
@@ -235,6 +328,24 @@ const CONFIDENCE_META: Record<ScanResult["confidence"], { width: string; toneCla
   High: { width: "88%", toneClass: "bg-success" },
   Medium: { width: "64%", toneClass: "bg-warning" },
   Low: { width: "36%", toneClass: "bg-destructive" },
+};
+
+const HISTORY_STATUS_META: Record<BackendScanStatus, { label: string; className: string; icon: React.ElementType }> = {
+  green: { label: "Allowed", className: "bg-success-soft text-success border-success/20", icon: CheckCircle2 },
+  conditional: { label: "Allowed with restrictions", className: "bg-warning-soft text-warning border-warning/30", icon: AlertTriangle },
+  restricted: { label: "Not allowed", className: "bg-[hsl(var(--error-soft))] text-destructive border-destructive/20", icon: X },
+  review: { label: "Needs review", className: "bg-secondary text-foreground border-border", icon: Info },
+};
+
+const formatHistoryTime = (value: string) => {
+  try {
+    return new Intl.DateTimeFormat("en-MY", {
+      dateStyle: "medium",
+      timeStyle: "short",
+    }).format(new Date(value));
+  } catch {
+    return value;
+  }
 };
 
 const genId = () => Math.random().toString(36).slice(2);
@@ -254,6 +365,14 @@ export default function Scan() {
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
 
   const [messages, setMessages] = useState<Message[]>([WELCOME_MESSAGE]);
+  const [historyItems, setHistoryItems] = useState<BackendScanHistoryItem[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [activeHistoryId, setActiveHistoryId] = useState<string | null>(null);
+  const [historyTranscript, setHistoryTranscript] = useState<Message[]>([]);
+  const [historyViewLoading, setHistoryViewLoading] = useState(false);
+  const [historySession, setHistorySession] = useState<BackendScanReadResponse | null>(null);
+  const [historyPanelOpen, setHistoryPanelOpen] = useState(true);
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -263,9 +382,70 @@ export default function Scan() {
   const [isListening, setIsListening] = useState(false);
   const [speechSupported, setSpeechSupported] = useState(true);
 
+  const isViewingHistory = Boolean(activeHistoryId);
+  const visibleMessages = isViewingHistory ? historyTranscript : messages;
+  const activeSessionMeta = useMemo(() => {
+    if (!isViewingHistory) return null;
+    return historyItems.find((item) => item.id === activeHistoryId) || null;
+  }, [activeHistoryId, historyItems, isViewingHistory]);
+
+  const loadHistoryItems = async () => {
+    setHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      const records = await listScans(25);
+      setHistoryItems(records);
+    } catch (error) {
+      setHistoryError(error instanceof Error ? error.message : "Failed to load scan history.");
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  const openHistorySession = async (historyId: string) => {
+    setActiveHistoryId(historyId);
+    setHistoryViewLoading(true);
+    setHistoryError(null);
+    try {
+      const [record, chatMessages] = await Promise.all([
+        getScan(historyId),
+        listScanChat(historyId),
+      ]);
+      setHistorySession(record);
+      setHistoryTranscript(buildScanTranscript(record, chatMessages));
+    } catch (error) {
+      setHistorySession(null);
+      setHistoryTranscript([]);
+      setHistoryError(error instanceof Error ? error.message : "Failed to open saved session.");
+    } finally {
+      setHistoryViewLoading(false);
+    }
+  };
+
+  const returnToLiveSession = () => {
+    setActiveHistoryId(null);
+    setHistorySession(null);
+    setHistoryTranscript([]);
+    setHistoryError(null);
+  };
+
+  const startNewSession = () => {
+    returnToLiveSession();
+    setMessages([WELCOME_MESSAGE]);
+    setFile(null);
+    setPreview(null);
+    setQuery("");
+    setSelectedReply("");
+    setLastResult(null);
+  };
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, scanning]);
+  }, [visibleMessages, scanning, activeHistoryId]);
+
+  useEffect(() => {
+    void loadHistoryItems();
+  }, []);
 
   useEffect(() => {
     const recognitionCtor = (
@@ -308,6 +488,7 @@ export default function Scan() {
   }, []);
 
   const handleMicClick = () => {
+    if (isViewingHistory) return;
     if (!speechSupported || !recognitionRef.current) {
       setMessages((previous) => [
         ...previous,
@@ -344,35 +525,28 @@ export default function Scan() {
   };
 
   const sendMessage = async (overrideQuery?: string) => {
+    if (isViewingHistory) return;
     const typedQuery = (overrideQuery ?? query.trim()).trim();
     const replyContext = selectedReply.trim();
     const activeQuery = [replyContext, typedQuery].filter(Boolean).join("\n");
     if (!activeQuery && !file) return;
 
-    if (!activeQuery && file) {
-      setMessages(prev => [...prev, {
-        id: genId(), role: "assistant", type: "hint",
-        content: "Please add a short prompt so I can run an accurate scan. Example format: product, material, destination country.",
-        hints: [
-          { icon: Info, label: "Describe product and material", value: "This is a woven rattan handbag made from finished rattan." },
-          { icon: Info, label: "Add destination country", value: "Destination country: China" },
-        ],
-      }]);
-      return;
-    }
-
     const activeFile = file;
     const intent = detectIntent(activeQuery);
+    const imageCaption = typedQuery || replyContext || activeFile?.name || "Product image";
 
     const userMsg: Message = {
-      id: genId(), role: "user", type: "text",
-      content: typedQuery || replyContext || "Please analyse this product image.",
+      id: genId(), role: "user", type: activeFile ? "image" : "text",
+      content: activeFile ? imageCaption : (typedQuery || replyContext || "Please analyse this product image."),
       repliedTo: replyContext || undefined,
+      imagePreview: activeFile && preview ? preview : undefined,
     };
 
     setMessages(prev => [...prev, userMsg]);
     setQuery("");
     setSelectedReply("");
+    setFile(null);
+    setPreview(null);
 
     setScanning(true);
 
@@ -399,6 +573,7 @@ export default function Scan() {
       }
 
       setLastResult(nextResult);
+      void loadHistoryItems();
 
       if (nextResult.invalid) {
         setMessages(prev => [...prev, {
@@ -429,8 +604,6 @@ export default function Scan() {
       }]);
     } finally {
       setScanning(false);
-      setFile(null);
-      setPreview(null);
     }
   };
 
@@ -440,12 +613,7 @@ export default function Scan() {
   };
 
   const reset = () => {
-    setMessages([WELCOME_MESSAGE]);
-    setFile(null);
-    setPreview(null);
-    setQuery("");
-    setSelectedReply("");
-    setLastResult(null);
+    startNewSession();
   };
 
   const continueToPlan = (result: ScanResult) => {
@@ -458,7 +626,124 @@ export default function Scan() {
     <div className="min-h-screen flex flex-col">
       <TopNav />
 
-      <main className="flex-1 flex flex-col mx-auto w-full max-w-[760px] px-4 pb-0">
+      <main className={`flex-1 mx-auto w-full max-w-[1400px] px-4 pb-6 lg:px-6`}>
+        <div className={`grid gap-6 ${historyPanelOpen ? "lg:grid-cols-[300px_minmax(0,1fr)]" : "lg:grid-cols-[44px_minmax(0,1fr)]"}`}>
+          <aside className={`${historyPanelOpen ? "rounded-2xl border border-border bg-card shadow-soft-sm p-4" : "rounded-2xl border border-border/50 bg-transparent p-1 shadow-none"} lg:sticky lg:top-24 lg:h-[calc(100vh-7rem)] lg:self-start lg:overflow-hidden`}>
+            <div className={`mb-4 flex items-center ${historyPanelOpen ? "justify-between gap-3" : "justify-center"}`}>
+              <button
+                type="button"
+                onClick={() => setHistoryPanelOpen((value) => !value)}
+                className={`inline-flex h-9 items-center justify-center rounded-lg border border-border bg-background text-xs font-semibold text-foreground hover:border-primary hover:text-primary ${historyPanelOpen ? "px-3 gap-2" : "w-9"}`}
+                title={historyPanelOpen ? "Keep history hidden" : "Bring history back"}
+              >
+                {historyPanelOpen ? (
+                    <ChevronLeft className="h-4 w-4" />
+                ) : (
+                  <ChevronRight className="h-4 w-4" />
+                )}
+              </button>
+            </div>
+
+            {historyPanelOpen && (
+              <button
+                type="button"
+                onClick={startNewSession}
+                className={`mb-4 w-full rounded-2xl border px-4 py-3 text-left transition-base ${
+                  isViewingHistory
+                    ? "border-primary/40 bg-primary-soft/30"
+                    : "border-dashed border-border bg-secondary/20 hover:border-primary/30 hover:bg-primary-soft/20"
+                }`}
+              >
+                <div className="text-[11px] font-semibold text-foreground">+ Add</div>
+              </button>
+            )}
+
+            {historyError && (
+              <div className="mb-4 rounded-xl border border-destructive/20 bg-[hsl(var(--error-soft))] px-3 py-2 text-sm text-destructive">
+                {historyError}
+              </div>
+            )}
+
+            {historyPanelOpen && (
+              <div className="h-[calc(100%-10rem)] overflow-y-auto pr-1">
+                {historyLoading ? (
+                  <div className="space-y-3">
+                    {Array.from({ length: 4 }).map((_, index) => (
+                      <div key={index} className="h-16 animate-pulse rounded-2xl border border-border bg-secondary/30" />
+                    ))}
+                  </div>
+                ) : historyItems.length === 0 ? (
+                  <div className="rounded-2xl border border-dashed border-border bg-secondary/20 px-4 py-8 text-center text-sm text-muted-foreground">
+                    No saved scans yet.
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {historyItems.map((item) => {
+                      const status = HISTORY_STATUS_META[item.status] || HISTORY_STATUS_META.review;
+                      const StatusIcon = status.icon;
+                      const selected = item.id === activeHistoryId;
+
+                      return (
+                        <button
+                          key={item.id}
+                          type="button"
+                          onClick={() => void openHistorySession(item.id)}
+                          className={`w-full rounded-2xl border px-3 py-2 text-left transition-base ${
+                            selected
+                              ? "border-primary/40 bg-primary-soft/30 shadow-soft-sm"
+                              : "border-border bg-background hover:border-primary/30 hover:bg-primary-soft/20"
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="min-w-0">
+                              <div className="line-clamp-1 text-sm font-semibold text-foreground">
+                                {cleanItemName(item.product_name) || "Uploaded image"}
+                              </div>
+                              <div className="mt-0.5 text-[11px] text-muted-foreground">
+                                {item.destination_country || "--"}
+                              </div>
+                            </div>
+                            <span
+                              className={`inline-flex shrink-0 items-center justify-center rounded-full border p-1 ${status.className}`}
+                              title={status.label}
+                              aria-label={status.label}
+                            >
+                              <StatusIcon className="h-3 w-3" />
+                            </span>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+          </aside>
+
+          <section className="mx-auto flex min-w-0 w-full max-w-[760px] flex-col">
+            {isViewingHistory && activeSessionMeta && (
+              <div className="mb-4 rounded-2xl border border-primary/20 bg-primary-soft/30 px-4 py-3 shadow-xs">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="truncate text-sm font-semibold text-foreground">
+                    {cleanItemName(historySession?.result.product_name) || cleanItemName(activeSessionMeta.product_name) || "Uploaded image"}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={returnToLiveSession}
+                    className="inline-flex items-center justify-center rounded-lg border border-border bg-card px-3 py-2 text-xs font-semibold text-foreground hover:border-primary hover:text-primary"
+                  >
+                    Back
+                  </button>
+                </div>
+                {historyViewLoading && (
+                  <div className="mt-3 inline-flex items-center gap-2 text-xs text-muted-foreground">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                    Loading...
+                  </div>
+                )}
+              </div>
+            )}
+
         {/* Header */}
         <div className="py-6 text-center">
           <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1 shadow-xs">
@@ -471,7 +756,7 @@ export default function Scan() {
 
         {/* Chat messages */}
         <div className="flex-1 space-y-4 overflow-y-auto pb-4">
-          {messages.map((msg) => (
+          {visibleMessages.map((msg) => (
             <div key={msg.id} className={`flex gap-3 ${msg.role === "user" ? "justify-end" : "justify-start"} animate-fade-in-up`}>
               {msg.role === "assistant" && (
                 <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-primary shadow-glow mt-1">
@@ -544,7 +829,7 @@ export default function Scan() {
                       msg.result.status === "yellow" ? "bg-warning-soft/40" : "bg-[hsl(var(--error-soft))]"
                     }`}>
                       <div className="space-y-1.5">
-                        <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Scan Result</div>
+                        <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">AI Compliance Decision</div>
                         <div className="text-base font-semibold text-foreground">{msg.result.product}</div>
                         <div className="flex flex-wrap items-center gap-2">
                           {msg.result.analysis.destination_country && (
@@ -706,7 +991,7 @@ export default function Scan() {
         </div>
 
         {/* Input area */}
-        <div className="sticky bottom-0 pt-2 pb-4 bg-gradient-to-t from-background via-background to-transparent">
+        <div className="sticky bottom-8 pt-2 pb-3 bg-gradient-to-t from-background via-background to-transparent">
           {/* Image preview pill */}
           {preview && (
             <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1.5 shadow-xs">
@@ -794,6 +1079,8 @@ export default function Scan() {
               <RefreshCw className="h-3 w-3" /> Reset
             </button>
           </div>
+        </div>
+          </section>
         </div>
       </main>
     </div>

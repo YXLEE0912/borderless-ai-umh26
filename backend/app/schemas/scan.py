@@ -66,6 +66,20 @@ class ScanReadResponse(BaseModel):
     result: ScanResult
 
 
+class ScanHistoryItem(BaseModel):
+    id: str
+    created_at: datetime
+    updated_at: datetime
+    prompt: str
+    destination_country: str | None = None
+    image_asset: str | None = None
+    product_name: str = ""
+    hs_code: str = ""
+    status: ScanStatus = ScanStatus.review
+    compliance_summary: str = ""
+    rule_hits: list[str] = Field(default_factory=list)
+
+
 class ScanFollowUpRequest(BaseModel):
     message: str = Field(min_length=1, max_length=3000)
     destination_country: str | None = None

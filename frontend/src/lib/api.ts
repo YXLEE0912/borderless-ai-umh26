@@ -209,6 +209,39 @@ export type BackendScanCreateResponse = {
   result: BackendScanResult;
 };
 
+export type BackendScanHistoryItem = {
+  id: string;
+  created_at: string;
+  updated_at: string;
+  prompt: string;
+  destination_country: string | null;
+  image_asset: string | null;
+  product_name: string;
+  hs_code: string;
+  status: BackendScanStatus;
+  compliance_summary: string;
+  rule_hits: string[];
+};
+
+export type BackendScanReadResponse = {
+  id: string;
+  created_at: string;
+  updated_at: string;
+  prompt: string;
+  destination_country: string | null;
+  image_asset: string | null;
+  result: BackendScanResult;
+};
+
+export type BackendScanChatMessage = {
+  id?: string | null;
+  scan_id: string;
+  role: "user" | "assistant";
+  message: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+};
+
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     headers: {
@@ -383,6 +416,19 @@ export async function followUpScan(scanId: string, payload: ScanFollowUpRequest)
   }
 
   return response.json() as Promise<ScanFollowUpResponse>;
+}
+
+export async function listScans(limit = 25): Promise<BackendScanHistoryItem[]> {
+  const query = limit > 0 ? `?limit=${encodeURIComponent(String(limit))}` : "";
+  return requestJson<BackendScanHistoryItem[]>(`/scans${query}`);
+}
+
+export async function getScan(scanId: string): Promise<BackendScanReadResponse> {
+  return requestJson<BackendScanReadResponse>(`/scans/${encodeURIComponent(scanId)}`);
+}
+
+export async function listScanChat(scanId: string): Promise<BackendScanChatMessage[]> {
+  return requestJson<BackendScanChatMessage[]>(`/scans/${encodeURIComponent(scanId)}/chat`);
 }
 
 export { API_BASE_URL };

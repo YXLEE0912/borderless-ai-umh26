@@ -41,3 +41,10 @@ Desktop.ini
 
 # Supabase and local artifacts
 backend/.supabase/
+
+node_modules/
+frontend/node_modules/
+dist/
+build/
+.vite/
+.env

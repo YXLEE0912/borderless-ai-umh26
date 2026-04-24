@@ -114,13 +114,35 @@ class DocumentExtractor:
         if not hs_match:
             hs_match = re.search(r"\b[0-9]{4}\.[0-9]{2}(?:\.[0-9]{2,4})?\b", raw_text)
 
+        quantity_match = re.search(
+            r"(?im)^\s*(?:quantity|qty|total\s*qty|item\s*qty|pcs|pieces|units|cartons|boxes)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)\s*(?:pcs|pieces|units|cartons|boxes)?\s*$",
+            raw_text,
+        )
+        if not quantity_match:
+            quantity_match = re.search(
+                r"(?:quantity|qty|total\s*qty|item\s*qty|pcs|pieces|units|cartons|boxes)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)",
+                content,
+                flags=re.IGNORECASE,
+            )
+
+        unit_price_match = re.search(
+            r"(?im)^\s*(?:unit\s*price|price\s*per\s*(?:item|good|unit)|per\s*unit|item\s*price|unit\s*cost|rate)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)\s*$",
+            raw_text,
+        )
+        if not unit_price_match:
+            unit_price_match = re.search(
+                r"(?:unit\s*price|price\s*per\s*(?:item|good|unit)|per\s*unit|item\s*price|unit\s*cost|rate)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)",
+                content,
+                flags=re.IGNORECASE,
+            )
+
         goods_value_match = re.search(
-            r"(?im)^\s*(?:goods\s*value|declared\s*value|invoice\s*value|invoice\s*amount|total\s*value|total\s*amount|item\s*value|merchandise\s*value|value|amount|quantity|qty)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)\s*$",
+            r"(?im)^\s*(?:goods\s*value|declared\s*value|invoice\s*value|invoice\s*amount|total\s*value|total\s*amount|item\s*value|merchandise\s*value|value|amount)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)\s*$",
             raw_text,
         )
         if not goods_value_match:
             goods_value_match = re.search(
-                r"(?:goods\s*value|declared\s*value|invoice\s*value|invoice\s*amount|total\s*value|total\s*amount|item\s*value|merchandise\s*value|value|amount|quantity|qty)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)",
+                r"(?:goods\s*value|declared\s*value|invoice\s*value|invoice\s*amount|total\s*value|total\s*amount|item\s*value|merchandise\s*value|value|amount)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)",
                 content,
                 flags=re.IGNORECASE,
             )
@@ -179,8 +201,10 @@ class DocumentExtractor:
             destination_country=destination_match.group(1).strip() if destination_match else None,
             destination_address=destination_address_match.group(1).strip() if destination_address_match else None,
             origin_region=origin_region,
+            quantity=float(quantity_match.group(1).replace(",", "")) if quantity_match else None,
             weight_kg=float(weight_match.group(1)) if weight_match else None,
             declared_value=float(goods_value_match.group(1).replace(",", "")) if goods_value_match else None,
+            unit_price=float(unit_price_match.group(1).replace(",", "")) if unit_price_match else None,
             incoterm=incoterm_match.group(1).upper() if incoterm_match else None,
         )
 
@@ -234,8 +258,10 @@ class DocumentExtractor:
             destination_country=overlay.destination_country or base.destination_country,
             destination_address=overlay.destination_address or base.destination_address,
             origin_region=overlay.origin_region or base.origin_region,
+            quantity=overlay.quantity if overlay.quantity is not None else base.quantity,
             weight_kg=overlay.weight_kg if overlay.weight_kg is not None else base.weight_kg,
             declared_value=overlay.declared_value if overlay.declared_value is not None else base.declared_value,
+            unit_price=overlay.unit_price if overlay.unit_price is not None else base.unit_price,
             incoterm=overlay.incoterm or base.incoterm,
         )
 
@@ -287,7 +313,9 @@ def parse_document_fields_json(content: str) -> DocumentExtractedData:
         destination_country=_txt_any(["destination_country", "destination country", "country_of_destination", "country of destination", "destination", "ship_to_country", "ship to country", "consignee_country", "consignee country", "delivery_country", "delivery country"]),
         destination_address=_txt_any(["destination_address", "destination address", "complete_address", "complete address", "full_address", "full address", "delivery_address", "delivery address", "ship_to_address", "ship to address", "consignee_address", "consignee address", "shipping_address", "shipping address", "recipient_address", "recipient address", "receiver_address", "receiver address", "address", "address_line_1", "address line 1", "address_line_2", "address line 2", "address_line_3", "address line 3"]),
         origin_region=_txt_any(["origin_region", "origin region", "origin"]),
+        quantity=_num_any(["quantity", "qty", "total_qty", "total qty", "item_qty", "item qty", "pcs", "pieces", "units", "cartons", "boxes"]),
         weight_kg=_num_any(["weight_kg", "weight kg", "weight", "gross_weight", "gross weight", "net_weight", "net weight", "billable_weight", "billable weight", "chargeable_weight", "chargeable weight", "cargo_weight", "cargo weight"]),
         declared_value=_num_any(["declared_value", "declared value", "invoice_value", "invoice value", "goods_value", "goods value", "total_value", "total value", "item_value", "item value", "amount", "quantity", "qty"]),
+        unit_price=_num_any(["unit_price", "unit price", "price_per_unit", "price per unit", "price_per_item", "price per item", "item_price", "item price", "rate", "cost per unit"]),
         incoterm=_txt_any(["incoterm", "incoterms"]),
     )

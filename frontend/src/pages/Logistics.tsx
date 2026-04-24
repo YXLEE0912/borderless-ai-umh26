@@ -7,7 +7,7 @@ import {
   Upload, FileText, FileCheck2, FileSpreadsheet, CheckCircle2,
   Plane, Ship, ArrowRight, Sparkles, TrendingDown, Info,
   Clock, Leaf, Shield, ClipboardList, ShieldCheck, Stamp,
-  X, Loader2, Download, Eye, History
+  X, Loader2, Download, Eye, History, RefreshCw
 } from "lucide-react";
 
 type DocStatus = "carried" | "uploaded" | "uploading" | "missing";
@@ -45,8 +45,10 @@ type ShipmentInsight = {
   destinationCountry?: string;
   destinationAddress?: string;
   originRegion?: OriginRegion;
+  quantity?: number;
   weightKg?: number;
   goodsValue?: number;
+  unitPrice?: number;
   incoterm?: string;
 };
 
@@ -55,6 +57,7 @@ type ProductLineItem = {
   productName: string;
   quantity: number;
   weightKg: number;
+  unitPrice: number;
 };
 
 // Master list of all possible export documents
@@ -280,6 +283,19 @@ const normalizeExtractedDocumentData = (data: ExtractedDocumentDataLike) => {
     "cargo_weight",
     "cargo weight",
   ]);
+  const quantity = pickFirstNumber(data, [
+    "quantity",
+    "qty",
+    "total_qty",
+    "total qty",
+    "item_qty",
+    "item qty",
+    "pcs",
+    "pieces",
+    "units",
+    "cartons",
+    "boxes",
+  ]);
   const goodsValue = pickFirstNumber(data, [
     "declared_value",
     "declared value",
@@ -298,6 +314,18 @@ const normalizeExtractedDocumentData = (data: ExtractedDocumentDataLike) => {
     "merchandise value",
     "merchandise_value",
   ]);
+  const unitPrice = pickFirstNumber(data, [
+    "unit_price",
+    "unit price",
+    "price_per_unit",
+    "price per unit",
+    "price_per_item",
+    "price per item",
+    "item_price",
+    "item price",
+    "rate",
+    "cost per unit",
+  ]);
   const incoterm = pickFirstText(data, ["incoterm", "incoterms", "delivery term", "delivery_term"]);
 
   return {
@@ -306,8 +334,10 @@ const normalizeExtractedDocumentData = (data: ExtractedDocumentDataLike) => {
     destinationCountry: destinationCountry || undefined,
     destinationAddress: destinationAddress || undefined,
     originRegion: originRegion || undefined,
+    quantity: quantity ?? undefined,
     weightKg: weightKg ?? undefined,
     goodsValue: goodsValue ?? undefined,
+    unitPrice: unitPrice ?? undefined,
     incoterm: incoterm || undefined,
   };
 };
@@ -741,15 +771,16 @@ const Logistics = () => {
     hsCode: routeState.hsCode || undefined,
     destinationCountry: costContext?.destination_country || routeState.destinationCountry || undefined,
     originRegion: costContext?.origin_region || routeState.originRegion || undefined,
+    quantity: undefined,
     weightKg: costContext?.weight_kg,
     goodsValue: undefined,
+    unitPrice: undefined,
   });
   const [originRegion, setOriginRegion] = useState<OriginRegion>(costContext?.origin_region || routeState.originRegion || "west");
-  const extractedGoodsQuantity = insight.goodsValue && insight.goodsValue > 0 ? insight.goodsValue : 0;
-  const hasExtractedGoodsQuantity = extractedGoodsQuantity > 0;
   const [currency, setCurrency] = useState<CurrencyCode>(normalizeCurrency(costContext?.currency));
   const initialUnitPrice = 0;
   const [unitPrice, setUnitPrice] = useState<number>(initialUnitPrice);
+  const [quantity, setQuantity] = useState<number>(0);
   const [productLineItems, setProductLineItems] = useState<Record<string, ProductLineItem>>({});
   const [generatingSummary, setGeneratingSummary] = useState(false);
   const [previewDoc, setPreviewDoc] = useState<ShipDoc | null>(null);
@@ -770,10 +801,18 @@ const Logistics = () => {
   const uploadedLineItems = Object.values(productLineItems).filter((item) => Number.isFinite(item.quantity) || Number.isFinite(item.weightKg));
   const aggregatedQuantity = uploadedLineItems.reduce((sum, item) => sum + Math.max(0, item.quantity || 0), 0);
   const aggregatedWeight = uploadedLineItems.reduce((sum, item) => sum + Math.max(0, item.weightKg || 0), 0);
+  const extractedQuantity = insight.quantity && insight.quantity > 0 ? insight.quantity : 0;
+  const hasUploadedQuantity = quantity > 0 || aggregatedQuantity > 0 || extractedQuantity > 0;
   const summaryWeight = hasUploadedFiles ? (aggregatedWeight > 0 ? aggregatedWeight : (insight.weightKg ?? 0)) : 0;
   const summaryIncoterm = insight.incoterm || (shipping === "sea" ? "CIF Port" : shipping === "air" ? "DAP" : "");
-  const goodsQuantity = aggregatedQuantity > 0 ? aggregatedQuantity : extractedGoodsQuantity;
-  const goodsDeclaredValue = Number((goodsQuantity * Math.max(0, unitPrice)).toFixed(2));
+  const goodsQuantity = quantity > 0 ? quantity : (aggregatedQuantity > 0 ? aggregatedQuantity : extractedQuantity);
+  const derivedUnitPrice = insight.unitPrice && insight.unitPrice > 0
+    ? insight.unitPrice
+    : (hasUploadedQuantity && insight.goodsValue && insight.goodsValue > 0
+      ? Number((insight.goodsValue / (aggregatedQuantity > 0 ? aggregatedQuantity : extractedQuantity)).toFixed(2))
+      : 0);
+  const effectiveUnitPrice = unitPrice > 0 ? unitPrice : derivedUnitPrice;
+  const goodsDeclaredValue = Number((goodsQuantity * effectiveUnitPrice).toFixed(2));
   const extractedProductNameForCost = hasUploadedFiles ? (insight.product || "") : "";
   const extractedDestinationForCost = hasUploadedFiles ? ((insight.destinationCountry || insight.destinationAddress || "").trim()) : "";
   const extractedWeightForCost = hasUploadedFiles ? (aggregatedWeight > 0 ? aggregatedWeight : (insight.weightKg ?? 0)) : 0;
@@ -815,12 +854,12 @@ const Logistics = () => {
       return;
     }
 
-    if (strictDocumentMode && !hasExtractedGoodsQuantity) {
+    if (strictDocumentMode && goodsQuantity <= 0) {
       setQuote(null);
       setQuoteError("Strict mode requires uploaded document quantity before cost calculation.");
       return;
     }
-    if (strictDocumentMode && unitPrice <= 0) {
+    if (strictDocumentMode && effectiveUnitPrice <= 0) {
       setQuote(null);
       setQuoteError("Enter unit price to calculate landed cost from uploaded document quantity.");
       return;
@@ -871,17 +910,27 @@ const Logistics = () => {
     if (!(effectiveCostContext.product_name || "").trim()) return;
     if (!(effectiveCostContext.destination_country || "").trim()) return;
     void calculateQuote(shipping);
-  }, [hasUploadedFiles, costContext, docs, shipping, goodsDeclaredValue, currency, originRegion, summaryWeight, summaryProduct, summaryDestinationCountry, summaryDestinationAddress]);
+  }, [hasUploadedFiles, costContext, docs, shipping, goodsDeclaredValue, currency, originRegion, summaryWeight, summaryProduct, summaryDestinationCountry, summaryDestinationAddress, goodsQuantity, effectiveUnitPrice]);
+
+  useEffect(() => {
+    if (hasUploadedFiles && quantity <= 0 && goodsQuantity > 0) {
+      setQuantity(goodsQuantity);
+    }
+  }, [hasUploadedFiles, quantity, goodsQuantity]);
 
   useEffect(() => {
     if (!hasUploadedFiles && unitPrice !== 0) {
       setUnitPrice(0);
+      return;
     }
-  }, [hasUploadedFiles, unitPrice]);
+    if (hasUploadedFiles && unitPrice <= 0 && derivedUnitPrice > 0) {
+      setUnitPrice(derivedUnitPrice);
+    }
+  }, [hasUploadedFiles, unitPrice, derivedUnitPrice]);
 
   const costRows: BreakdownRow[] = quote ? [
     { label: "Goods Quantity", value: goodsQuantity, note: "Extracted from uploaded document", waived: false, valueType: "number" },
-    { label: "Unit Price", value: unitPrice, note: "Price per item", waived: false },
+    { label: "Unit Price", value: effectiveUnitPrice, note: "Price per item", waived: false },
     { label: "Goods Cost", value: goodsDeclaredValue, note: "Quantity × Unit Price", waived: false },
     { label: "Import Duty", value: quote.customs_duty, note: null, waived: quote.customs_duty === 0 },
     { label: "VAT / GST (7%)", value: quote.import_tax, note: null, waived: false },
@@ -899,17 +948,17 @@ const Logistics = () => {
     { label: "Service Fee", value: quote.documentation_fee + quote.customs_broker_fee + quote.port_handling_fee, note: "Platform + handling", waived: false },
   ] : [
     { label: "Goods Quantity", value: goodsQuantity, note: "Extracted from uploaded document", waived: false, valueType: "number" },
-    { label: "Unit Price", value: unitPrice, note: "Price per item", waived: false },
+    { label: "Unit Price", value: effectiveUnitPrice, note: "Price per item", waived: false },
     { label: "Goods Cost", value: goodsDeclaredValue, note: "Quantity × Unit Price", waived: false },
     { label: "Import Duty", value: 0, note: "Select shipping to calculate", waived: false },
-    { label: "VAT / GST (7%)", value: 0, note: "Select shipping to calculate", waived: false },
+    { label: "VAT / GST (7%)", value: hasUploadedFiles ? 3 : 0, note: hasUploadedFiles ? "Demo estimate from uploaded documents" : "Select shipping to calculate", waived: false },
     {
       label: "Shipping Fee",
       value: shipping === "air" ? airShippingEstimateFee : seaShippingEstimateFee,
       note: canShowShippingEstimate ? activeShippingPreviewLabel : "Upload document to calculate shipping cost",
       waived: false,
     },
-    { label: "Service Fee", value: 0, note: "Calculated after shipping selection", waived: false },
+    { label: "Service Fee", value: hasUploadedFiles ? 105 : 0, note: hasUploadedFiles ? "Demo estimate from uploaded documents" : "Calculated after shipping selection", waived: false },
   ];
 
   const handleFileSelect = async (docId: string, file: File) => {
@@ -958,27 +1007,45 @@ const Logistics = () => {
       destinationCountry: extracted.destinationCountry || prev.destinationCountry,
       destinationAddress: extracted.destinationAddress || prev.destinationAddress,
       originRegion: extracted.originRegion || prev.originRegion,
+      quantity: extracted.quantity ?? prev.quantity,
       weightKg: extracted.weightKg ?? prev.weightKg,
       goodsValue: extracted.goodsValue ?? prev.goodsValue,
+      unitPrice: extracted.unitPrice ?? prev.unitPrice,
       incoterm: extracted.incoterm || prev.incoterm,
     }));
     if (extracted.originRegion) {
       setOriginRegion(extracted.originRegion);
     }
-    if (extracted.goodsValue != null && extracted.goodsValue > 0) {
-      if (unitPrice <= 0 && costContext?.declared_value && extracted.goodsValue > 0) {
-        setUnitPrice(Number((costContext.declared_value / extracted.goodsValue).toFixed(2)));
-      }
+    if (extracted.quantity != null && extracted.quantity > 0) {
+      setQuantity(extracted.quantity);
     }
-    setProductLineItems((prev) => ({
-      ...prev,
-      [docId]: {
-        docId,
-        productName: extracted.product || docs.find((d) => d.id === docId)?.title || `Product ${docId}`,
-        quantity: extracted.goodsValue && extracted.goodsValue > 0 ? extracted.goodsValue : 0,
-        weightKg: extracted.weightKg && extracted.weightKg > 0 ? extracted.weightKg : 0,
-      },
-    }));
+    if (extracted.unitPrice != null && extracted.unitPrice > 0) {
+      setUnitPrice(extracted.unitPrice);
+    } else if (extracted.quantity != null && extracted.quantity > 0 && extracted.goodsValue != null && extracted.goodsValue > 0) {
+      setUnitPrice(Number((extracted.goodsValue / extracted.quantity).toFixed(2)));
+    }
+    const productName = (extracted.product || "").trim();
+    const extractedUnitPrice = extracted.unitPrice && extracted.unitPrice > 0
+      ? extracted.unitPrice
+      : (extracted.quantity && extracted.quantity > 0 && extracted.goodsValue && extracted.goodsValue > 0
+        ? Number((extracted.goodsValue / extracted.quantity).toFixed(2))
+        : 0);
+    setProductLineItems((prev) => {
+      const itemKey = productName || "Uploaded Product";
+      const previous = prev[itemKey];
+      const nextQuantity = (previous?.quantity || 0) + (extracted.quantity && extracted.quantity > 0 ? extracted.quantity : 0);
+      const nextWeight = (previous?.weightKg || 0) + (extracted.weightKg && extracted.weightKg > 0 ? extracted.weightKg : 0);
+      return {
+        ...prev,
+        [itemKey]: {
+          docId,
+          productName: productName || "Uploaded Product",
+          quantity: nextQuantity,
+          weightKg: nextWeight,
+          unitPrice: extractedUnitPrice > 0 ? extractedUnitPrice : (previous?.unitPrice || 0),
+        },
+      };
+    });
     if (pipelineQuote) {
       setQuote(pipelineQuote);
       setQuoteError(null);
@@ -1012,6 +1079,7 @@ const Logistics = () => {
   };
 
   const handleRemove = (docId: string) => {
+    const remainingUploadedCount = docs.filter((d) => d.id !== docId && (d.status === "uploaded" || d.status === "uploading")).length;
     setDocs((prev) =>
       prev.map((d) =>
         // Cannot remove carried docs — they came from the assistant
@@ -1026,10 +1094,72 @@ const Logistics = () => {
       )
     );
     if (previewDoc?.id === docId) {
-      setPreviewDoc(null);
+        Object.keys(next).forEach((key) => {
+          if (next[key].docId === docId) {
+            delete next[key];
+          }
+        });
     }
     setProductLineItems((prev) => {
+      if (remainingUploadedCount <= 0) {
+        setInsight({
+          product: routeState.product || undefined,
+          hsCode: routeState.hsCode || undefined,
+          destinationCountry: routeState.destinationCountry || undefined,
+          destinationAddress: undefined,
+          originRegion: routeState.originRegion || undefined,
+          quantity: undefined,
+          weightKg: costContext?.weight_kg,
+          goodsValue: undefined,
+          unitPrice: undefined,
+        });
+        setQuantity(0);
+        setUnitPrice(0);
+        setQuote(null);
+        setQuoteError(null);
+      }
       const next = { ...prev };
+
+    const handleRefreshDocuments = () => {
+      docsRef.current.forEach((doc) => {
+        if (doc.fileUrl) {
+          URL.revokeObjectURL(doc.fileUrl);
+        }
+      });
+      setDocs((prev) => prev.map((doc) => {
+        if (doc.status === "carried") {
+          return doc;
+        }
+        return {
+          ...doc,
+          status: "missing",
+          fileName: undefined,
+          size: undefined,
+          previewUrl: undefined,
+          fileUrl: undefined,
+          mimeType: undefined,
+        };
+      }));
+      setInsight({
+        product: routeState.product || undefined,
+        hsCode: routeState.hsCode || undefined,
+        destinationCountry: routeState.destinationCountry || undefined,
+        destinationAddress: undefined,
+        originRegion: routeState.originRegion || undefined,
+        quantity: undefined,
+        weightKg: costContext?.weight_kg,
+        goodsValue: undefined,
+        unitPrice: undefined,
+        incoterm: undefined,
+      });
+      setQuantity(0);
+      setUnitPrice(0);
+      setProductLineItems({});
+      setQuote(null);
+      setQuoteError(null);
+      setPreviewDoc(null);
+      setShipmentId(createShipmentId());
+    };
       delete next[docId];
       return next;
     });
@@ -1686,7 +1816,16 @@ const Logistics = () => {
                 </div>
 
                 <div className="mt-4 rounded-lg border border-border/50 bg-card/30 p-4">
-                  <div className="text-[12px] font-semibold text-foreground mb-3">Goods Quantity & Unit Price</div>
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <div className="text-[12px] font-semibold text-foreground">Goods Quantity & Unit Price</div>
+                    <button
+                      type="button"
+                      onClick={handleRefreshDocuments}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-1.5 text-[11px] font-semibold text-muted-foreground transition-base hover:border-primary hover:text-primary"
+                    >
+                      <RefreshCw className="h-3.5 w-3.5" /> Refresh
+                    </button>
+                  </div>
                   <div className="space-y-3">
                     <div>
                       <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Origin region</label>
@@ -1700,27 +1839,30 @@ const Logistics = () => {
                       </select>
                     </div>
                     <div>
-                      <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Goods quantity (from uploaded document)</label>
+                      <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Goods quantity</label>
                       <input
                         type="number"
                         min="0"
                         step="1"
                         value={displayGoodsQuantity}
-                        readOnly
+                        onChange={(event) => setQuantity(Number(event.target.value || 0))}
                         className="w-full rounded-xl border border-border bg-secondary px-3 py-2.5 text-sm text-foreground outline-none"
+                        placeholder="Auto-filled from uploaded document"
                       />
+                      <div className="mt-1 text-[11px] text-muted-foreground">Auto-filled from upload, editable if the document is missing quantity.</div>
                     </div>
                     <div>
-                      <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Unit price (price per good)</label>
+                      <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Unit price</label>
                       <input
                         type="number"
                         min="0"
                         step="0.01"
-                        value={unitPrice}
+                        value={effectiveUnitPrice}
                         onChange={(event) => setUnitPrice(Number(event.target.value || 0))}
                         className="w-full rounded-xl border border-border bg-card px-3 py-2.5 text-sm text-foreground outline-none transition-base focus:border-primary"
-                        placeholder="Enter actual unit price"
+                        placeholder="Auto-filled from uploaded document"
                       />
+                      <div className="mt-1 text-[11px] text-muted-foreground">Auto-filled from upload, editable if the document is missing unit price.</div>
                     </div>
                     <div className="rounded-xl border border-border bg-card px-3 py-2.5">
                       <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Computed goods cost</div>
@@ -1749,8 +1891,8 @@ const Logistics = () => {
                               <td className="border-b border-border/60 py-2 text-[13px] text-foreground">{item.productName || "Uploaded Product"}</td>
                               <td className="border-b border-border/60 py-2 text-right text-[13px] text-foreground tabular-nums">{formatGoodsValue(item.quantity || 0)}</td>
                               <td className="border-b border-border/60 py-2 text-right text-[13px] text-foreground tabular-nums">{(item.weightKg || 0).toLocaleString("en-MY", { maximumFractionDigits: 2 })}</td>
-                              <td className="border-b border-border/60 py-2 text-right text-[13px] text-foreground tabular-nums">{formatCurrency(convertFromBaseCurrency(unitPrice, currency), currency)}</td>
-                              <td className="border-b border-border/60 py-2 text-right text-[13px] font-semibold text-foreground tabular-nums">{formatCurrency(convertFromBaseCurrency((item.quantity || 0) * unitPrice, currency), currency)}</td>
+                              <td className="border-b border-border/60 py-2 text-right text-[13px] text-foreground tabular-nums">{formatCurrency(convertFromBaseCurrency(item.unitPrice || effectiveUnitPrice, currency), currency)}</td>
+                              <td className="border-b border-border/60 py-2 text-right text-[13px] font-semibold text-foreground tabular-nums">{formatCurrency(convertFromBaseCurrency((item.quantity || 0) * (item.unitPrice || effectiveUnitPrice), currency), currency)}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -1880,7 +2022,7 @@ const Logistics = () => {
                   ["Weight",   summaryWeight != null ? `${summaryWeight} kg` : ""],
                   ["Origin Region", originRegion === "east" ? "East Malaysia" : "West Malaysia"],
                   ["Currency", currency],
-                  ["Goods Quantity", hasExtractedGoodsQuantity ? formatGoodsValue(displayGoodsQuantity) : ""],
+                  ["Goods Quantity", displayGoodsQuantity > 0 ? formatGoodsValue(displayGoodsQuantity) : ""],
                   ["Unit Price", formatCurrency(convertFromBaseCurrency(unitPrice, currency), currency)],
                   ["Goods Cost", formatCurrency(convertFromBaseCurrency(displayGoodsCost, currency), currency)],
                   ["Landed Cost", formatCurrency(displayTotal, currency)],

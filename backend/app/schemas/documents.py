@@ -66,8 +66,10 @@ class DocumentExtractedData(BaseModel):
     destination_country: str | None = None
     destination_address: str | None = None
     origin_region: OriginRegion | None = None
+    quantity: float | None = None
     weight_kg: float | None = None
     declared_value: float | None = None
+    unit_price: float | None = None
     incoterm: str | None = None
 
 

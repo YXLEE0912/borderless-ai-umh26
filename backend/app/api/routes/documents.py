@@ -35,6 +35,9 @@ async def extract_document_fields(
     extractor = DocumentExtractor(
         zai_client=request.app.state.scanner.zai_client,
         has_zai_key=bool(settings.z_ai_api_key),
+        google_cloud_api_key=settings.google_cloud_api_key,
+        openai_api_key=settings.openai_api_key,
+        openai_model=settings.openai_model,
     )
     response = await extractor.extract(
         file_name=file.filename or (document_label or "uploaded-document"),
@@ -67,6 +70,9 @@ async def extract_and_quote_document(
     extractor = DocumentExtractor(
         zai_client=request.app.state.scanner.zai_client,
         has_zai_key=bool(settings.z_ai_api_key),
+        google_cloud_api_key=settings.google_cloud_api_key,
+        openai_api_key=settings.openai_api_key,
+        openai_model=settings.openai_model,
     )
     extraction = await extractor.extract(
         file_name=file.filename or (document_label or "uploaded-document"),
@@ -78,8 +84,13 @@ async def extract_and_quote_document(
 
     extracted = extraction.data
 
-    normalized_product = (product_name or extracted.product_name or "Uploaded Product").strip()
-    normalized_destination = (destination_country or extracted.destination_country or destination_address or extracted.destination_address or "China").strip()
+    normalized_product = (product_name or extracted.product_name or "").strip()
+    normalized_destination = (destination_country or extracted.destination_country or destination_address or extracted.destination_address or "").strip()
+
+    if not normalized_product:
+        raise HTTPException(status_code=422, detail="Missing product_name in uploaded document extraction.")
+    if not normalized_destination:
+        raise HTTPException(status_code=422, detail="Missing destination_country/destination_address in uploaded document extraction.")
 
     try:
         normalized_origin = OriginRegion(origin_region) if origin_region else (extracted.origin_region or OriginRegion.west)
@@ -91,15 +102,15 @@ async def extract_and_quote_document(
     except ValueError as error:
         raise HTTPException(status_code=422, detail="transport_mode must be one of: air, sea, flight, ship.") from error
 
-    normalized_weight = weight_kg if weight_kg is not None else (extracted.weight_kg if extracted.weight_kg is not None else 0.5)
-    if normalized_weight <= 0:
-        normalized_weight = 0.5
+    normalized_weight = weight_kg if weight_kg is not None else extracted.weight_kg
+    if normalized_weight is None or normalized_weight <= 0:
+        raise HTTPException(status_code=422, detail="Missing weight_kg in uploaded document extraction.")
 
-    normalized_declared_value = (
-        declared_value if declared_value is not None else (extracted.declared_value if extracted.declared_value is not None else 0.0)
-    )
-    if normalized_declared_value < 0:
-        normalized_declared_value = 0.0
+    normalized_declared_value = declared_value if declared_value is not None else extracted.declared_value
+    if (normalized_declared_value is None or normalized_declared_value <= 0) and extracted.quantity and extracted.quantity > 0 and extracted.unit_price and extracted.unit_price > 0:
+        normalized_declared_value = round(extracted.quantity * extracted.unit_price, 2)
+    if normalized_declared_value is None or normalized_declared_value <= 0:
+        raise HTTPException(status_code=422, detail="Missing declared_value (or quantity x unit_price) in uploaded document extraction.")
 
     normalized_currency = (currency or "MYR").strip().upper() or "MYR"
     normalized_package_count = package_count if package_count and package_count > 0 else 1

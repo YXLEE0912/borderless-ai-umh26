@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import base64
 import io
 import json
 import re
 
+import httpx
 from docx import Document as DocxDocument
 from openpyxl import load_workbook
 from pypdf import PdfReader
@@ -12,33 +14,142 @@ from app.schemas.documents import DocumentExtractedData, DocumentExtractionRespo
 from app.services.zai_client import ZAIClient
 
 
+def _coerce_positive_float(value: float | None) -> float | None:
+    return value if value is not None and value > 0 else None
+
+
+def normalize_document_data(data: DocumentExtractedData, notes: list[str] | None = None) -> DocumentExtractedData:
+    quantity = data.quantity if data.quantity is not None and data.quantity > 0 else None
+    weight_kg = data.weight_kg if data.weight_kg is not None and data.weight_kg > 0 else None
+    declared_value = data.declared_value if data.declared_value is not None and data.declared_value > 0 else None
+    unit_price = data.unit_price if data.unit_price is not None and data.unit_price > 0 else None
+
+    if declared_value is not None and quantity is not None and unit_price is not None:
+        expected_declared_value = round(quantity * unit_price, 2)
+        if abs(expected_declared_value - declared_value) > 0.01:
+            if notes is not None:
+                notes.append("Detected price mismatch and recalculated total price from quantity x unit_price.")
+            declared_value = expected_declared_value
+    elif declared_value is None and quantity is not None and unit_price is not None:
+        declared_value = round(quantity * unit_price, 2)
+    elif unit_price is None and quantity is not None and declared_value is not None:
+        unit_price = round(declared_value / quantity, 2)
+
+    return DocumentExtractedData(
+        product_name=data.product_name,
+        hs_code=data.hs_code,
+        destination_country=data.destination_country,
+        destination_address=data.destination_address,
+        origin_region=data.origin_region,
+        quantity=quantity,
+        weight_kg=weight_kg,
+        declared_value=declared_value,
+        unit_price=unit_price,
+        incoterm=data.incoterm,
+    )
+
+
+def _normalize_label_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
+def _looks_like_weight_label(value: str) -> bool:
+    normalized = _normalize_label_text(value)
+    return normalized in {
+        "weight",
+        "grossweight",
+        "netweight",
+        "chargeableweight",
+        "billableweight",
+        "itemweight",
+        "packageweight",
+        "shipmentweight",
+        "cargoweight",
+        "grosswt",
+        "netwt",
+        "chargeablewt",
+        "billablewt",
+        "packagewt",
+        "weightkg",
+        "grossweightkg",
+        "netweightkg",
+    }
+
+
+def _looks_like_quantity_label(value: str) -> bool:
+    normalized = _normalize_label_text(value)
+    return normalized in {
+        "quantity",
+        "qty",
+        "totalqty",
+        "itemqty",
+        "piece",
+        "pieces",
+        "unit",
+        "units",
+        "carton",
+        "cartons",
+        "box",
+        "boxes",
+        "pack",
+        "packs",
+        "package",
+        "packages",
+        "pcs",
+        "nos",
+        "no",
+        "count",
+        "totalcount",
+        "shippingunits",
+    }
+
+
 class DocumentExtractor:
-    def __init__(self, zai_client: ZAIClient, has_zai_key: bool):
+    def __init__(
+        self,
+        zai_client: ZAIClient,
+        has_zai_key: bool,
+        google_cloud_api_key: str | None = None,
+        openai_api_key: str | None = None,
+        openai_model: str = "gpt-4o-mini",
+    ):
         self.zai_client = zai_client
         self.has_zai_key = has_zai_key
+        self.google_cloud_api_key = google_cloud_api_key
+        self.openai_api_key = openai_api_key
+        self.openai_model = openai_model
 
     async def extract(self, file_name: str, mime_type: str | None, content: bytes) -> DocumentExtractionResponse:
         notes: list[str] = []
         text = self._extract_text(file_name=file_name, mime_type=mime_type, content=content)
 
         is_image = bool(mime_type and mime_type.startswith("image/"))
-        if is_image and self.has_zai_key:
+        if is_image and self.google_cloud_api_key:
             try:
-                ocr_text = await self.zai_client.extract_document_text(
+                ocr_text = await self._extract_text_with_google_vision(
                     image_bytes=content,
                     image_content_type=mime_type,
-                    file_name=file_name,
                 )
                 if ocr_text:
                     text = ocr_text
-                    notes.append("OCR text extracted from image via Z.ai.")
+                    notes.append("OCR text extracted from image via Google Vision.")
             except Exception as error:
-                notes.append(f"Z.ai OCR fallback used: {error.__class__.__name__}.")
+                notes.append(f"Google Vision OCR fallback used: {error.__class__.__name__}.")
 
         regex_data = self._extract_with_regex(text)
+        regex_data = normalize_document_data(regex_data, notes=notes)
 
         used_zai = False
         result = regex_data
+
+        if self.openai_api_key:
+            try:
+                openai_raw = await self._extract_with_openai(text_context=text, file_name=file_name)
+                openai_data = parse_document_fields_json(openai_raw)
+                result = normalize_document_data(self._merge_data(regex_data, openai_data), notes=notes)
+                notes.append("Document fields extracted with OpenAI.")
+            except Exception as error:
+                notes.append(f"OpenAI extraction fallback used: {error.__class__.__name__}.")
 
         if self.has_zai_key:
             try:
@@ -49,7 +160,7 @@ class DocumentExtractor:
                     file_name=file_name,
                 )
                 zai_data = parse_document_fields_json(zai_raw)
-                result = self._merge_data(regex_data, zai_data)
+                result = normalize_document_data(self._merge_data(regex_data, zai_data), notes=notes)
                 used_zai = True
                 notes.append("Document fields extracted with Z.ai.")
             except Exception as error:
@@ -103,6 +214,78 @@ class DocumentExtractor:
 
         return ""
 
+    async def _extract_text_with_google_vision(self, image_bytes: bytes, image_content_type: str | None) -> str:
+        encoded_image = base64.b64encode(image_bytes).decode("ascii")
+        payload = {
+            "requests": [
+                {
+                    "image": {"content": encoded_image},
+                    "features": [{"type": "TEXT_DETECTION", "maxResults": 1}],
+                }
+            ]
+        }
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                "https://vision.googleapis.com/v1/images:annotate",
+                params={"key": self.google_cloud_api_key},
+                json=payload,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+        responses = data.get("responses") or []
+        if not responses:
+            return ""
+
+        first = responses[0] or {}
+        text = ""
+        full_text = first.get("fullTextAnnotation") or {}
+        if isinstance(full_text, dict):
+            text = str(full_text.get("text") or "").strip()
+
+        if not text:
+            annotations = first.get("textAnnotations") or []
+            if annotations and isinstance(annotations, list):
+                first_annotation = annotations[0] or {}
+                text = str(first_annotation.get("description") or "").strip()
+
+        return text
+
+    async def _extract_with_openai(self, text_context: str | None, file_name: str | None) -> str:
+        system_prompt = (
+            "You extract shipping and customs fields from business documents. Return valid JSON only with keys: "
+            "item, product_name, hs_code, destination_country, destination_address, origin_region, quantity, weight_kg, unit_price, total_price, incoterm. "
+            "item and product_name are aliases for the product description. origin_region must be one of: west, east, or null. "
+            "If quantity/qty appears, map it to quantity. If a unit price is visible, map it to unit_price. "
+            "If only one price is visible, map it to total_price. Use null when missing. No markdown. "
+            "Always keep total_price equal to unit_price x quantity when both are present."
+        )
+
+        user_prompt = (
+            f"file_name={file_name or 'unknown'}\n"
+            f"text_context={(text_context or '')[:12000]}\n"
+            "Extract the required fields from this document content."
+        )
+
+        payload = {
+            "model": self.openai_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.0,
+            "response_format": {"type": "json_object"},
+        }
+
+        headers = {"Authorization": f"Bearer {self.openai_api_key}"}
+        async with httpx.AsyncClient(base_url="https://api.openai.com/v1", timeout=60.0, headers=headers) as client:
+            response = await client.post("/chat/completions", json=payload)
+            response.raise_for_status()
+            data = response.json()
+
+        return str(data["choices"][0]["message"]["content"] or "").strip()
+
     def _extract_with_regex(self, text: str) -> DocumentExtractedData:
         raw_text = text or ""
         content = raw_text.replace("\n", " ")
@@ -115,47 +298,83 @@ class DocumentExtractor:
             hs_match = re.search(r"\b[0-9]{4}\.[0-9]{2}(?:\.[0-9]{2,4})?\b", raw_text)
 
         quantity_match = re.search(
-            r"(?im)^\s*(?:quantity|qty|total\s*qty|item\s*qty|pcs|pieces|units|cartons|boxes)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)\s*(?:pcs|pieces|units|cartons|boxes)?\s*$",
+            r"(?im)^\s*(?:quantity|qty|total\s*qty|total\s*quantity|item\s*qty|item\s*quantity|pcs|pieces|units|unit|cartons|boxes|packages|package|packs|pack|count|nos?)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)\s*(?:pcs|pieces|units|unit|cartons|boxes|packages|package|packs|pack|count|nos?)?\s*$",
             raw_text,
         )
         if not quantity_match:
             quantity_match = re.search(
-                r"(?:quantity|qty|total\s*qty|item\s*qty|pcs|pieces|units|cartons|boxes)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)",
+                r"(?:quantity|qty|total\s*qty|total\s*quantity|item\s*qty|item\s*quantity|pcs|pieces|units|unit|cartons|boxes|packages|package|packs|pack|count|nos?)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)",
                 content,
                 flags=re.IGNORECASE,
             )
 
+        if not quantity_match:
+            quantity_match = re.search(
+                r"(?im)^\s*([0-9][0-9,]*(?:\.\d+)?)\s*(?:pcs|pieces|units|unit|cartons|boxes|packages|package|packs|pack|count|nos?)\s*$",
+                raw_text,
+            )
+
         unit_price_match = re.search(
-            r"(?im)^\s*(?:unit\s*price|price\s*per\s*(?:item|good|unit)|per\s*unit|item\s*price|unit\s*cost|rate)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)\s*$",
+            r"(?im)^\s*(?:unit\s*price|price\s*per\s*(?:item|good|unit)|per\s*unit|item\s*price|unit\s*cost|rate|price)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)\s*$",
             raw_text,
         )
         if not unit_price_match:
             unit_price_match = re.search(
-                r"(?:unit\s*price|price\s*per\s*(?:item|good|unit)|per\s*unit|item\s*price|unit\s*cost|rate)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)",
+                r"(?:unit\s*price|price\s*per\s*(?:item|good|unit)|per\s*unit|item\s*price|unit\s*cost|rate|price)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)",
                 content,
                 flags=re.IGNORECASE,
             )
 
         goods_value_match = re.search(
-            r"(?im)^\s*(?:goods\s*value|declared\s*value|invoice\s*value|invoice\s*amount|total\s*value|total\s*amount|item\s*value|merchandise\s*value|value|amount)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)\s*$",
+            r"(?im)^\s*(?:goods\s*value|declared\s*value|invoice\s*value|invoice\s*amount|total\s*value|total\s*amount|item\s*value|merchandise\s*value|value|amount|total\s*price)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)\s*$",
             raw_text,
         )
         if not goods_value_match:
             goods_value_match = re.search(
-                r"(?:goods\s*value|declared\s*value|invoice\s*value|invoice\s*amount|total\s*value|total\s*amount|item\s*value|merchandise\s*value|value|amount)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)",
+                r"(?:goods\s*value|declared\s*value|invoice\s*value|invoice\s*amount|total\s*value|total\s*amount|item\s*value|merchandise\s*value|value|amount|total\s*price)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)",
                 content,
                 flags=re.IGNORECASE,
             )
 
-        weight_match = re.search(
-            r"(?im)^\s*(?:weight|gross\s*weight|net\s*weight|cargo\s*weight|shipment\s*weight|billable\s*weight|chargeable\s*weight|package\s*weight|item\s*weight|mass)\s*[:=]?\s*([0-9]+(?:\.\d+)?)\s*(?:kg|kgs|kilograms?)\b",
+        net_weight_match = re.search(
+            r"(?im)^\s*(?:net\s*weight|netweight|net\s*wt|net\s*mass|netmass)\s*[:=]?\s*([0-9]+(?:\.\d+)?)\s*(?:kg|kgs|kilograms?)?\b",
             raw_text,
         )
-        if not weight_match:
-            weight_match = re.search(
-                r"(?:weight|gross\s*weight|net\s*weight|cargo\s*weight|shipment\s*weight|billable\s*weight|chargeable\s*weight|package\s*weight|item\s*weight|mass)\s*[:=]?\s*([0-9]+(?:\.\d+)?)\s*(?:kg|kgs|kilograms?)\b",
+        if not net_weight_match:
+            net_weight_match = re.search(
+                r"(?:net\s*weight|netweight|net\s*wt|net\s*mass|netmass)\s*[:=]?\s*([0-9]+(?:\.\d+)?)\s*(?:kg|kgs|kilograms?)?",
                 content,
                 flags=re.IGNORECASE,
+            )
+
+        gross_weight_match = re.search(
+            r"(?im)^\s*(?:gross\s*weight|grossweight|gross\s*wt|gross\s*mass|grossmass)\s*[:=]?\s*([0-9]+(?:\.\d+)?)\s*(?:kg|kgs|kilograms?)?\b",
+            raw_text,
+        )
+        if not gross_weight_match:
+            gross_weight_match = re.search(
+                r"(?:gross\s*weight|grossweight|gross\s*wt|gross\s*mass|grossmass)\s*[:=]?\s*([0-9]+(?:\.\d+)?)\s*(?:kg|kgs|kilograms?)?",
+                content,
+                flags=re.IGNORECASE,
+            )
+
+        weight_match = net_weight_match or gross_weight_match
+        if not weight_match:
+            weight_match = re.search(
+                r"(?im)^\s*(?:weight|cargo\s*weight|shipment\s*weight|billable\s*weight|chargeable\s*weight|package\s*weight|item\s*weight|mass|gross\s*wt|net\s*wt|chargeable\s*wt|billable\s*wt|package\s*wt|grossweight|netweight|chargeableweight|billableweight)\s*[:=]?\s*([0-9]+(?:\.\d+)?)\s*(?:kg|kgs|kilograms?)?\b",
+                raw_text,
+            )
+        if not weight_match:
+            weight_match = re.search(
+                r"(?:weight|cargo\s*weight|shipment\s*weight|billable\s*weight|chargeable\s*weight|package\s*weight|item\s*weight|mass|gross\s*wt|net\s*wt|chargeable\s*wt|billable\s*wt|package\s*wt|grossweight|netweight|chargeableweight|billableweight)\s*[:=]?\s*([0-9]+(?:\.\d+)?)\s*(?:kg|kgs|kilograms?)?",
+                content,
+                flags=re.IGNORECASE,
+            )
+
+        if not weight_match:
+            weight_match = re.search(
+                r"(?im)^\s*([0-9]+(?:\.\d+)?)\s*(?:kg|kgs|kilograms?)\s*(?:gross\s*weight|net\s*weight|cargo\s*weight|shipment\s*weight|billable\s*weight|chargeable\s*weight|package\s*weight|item\s*weight|weight|gross\s*wt|net\s*wt)\s*$",
+                raw_text,
             )
 
         incoterm_match = re.search(r"\b(EXW|FCA|FOB|CFR|CIF|CPT|CIP|DPU|DAP|DDP)\b", content, flags=re.IGNORECASE)
@@ -279,18 +498,34 @@ def parse_document_fields_json(content: str) -> DocumentExtractedData:
     if not isinstance(data, dict):
         raise ValueError("Expected JSON object for document extraction")
 
-    def _num(key: str) -> float | None:
-        value = data.get(key)
-        if value is None or value == "":
+    def _to_float(value: object) -> float | None:
+        if value is None:
             return None
-        return float(value)
+        if isinstance(value, (int, float)):
+            parsed = float(value)
+            return parsed if parsed == parsed else None
+        if isinstance(value, str):
+            text_value = value.strip()
+            if not text_value:
+                return None
+            cleaned = re.sub(r"[^0-9.+\-]", "", text_value.replace(",", ""))
+            if not cleaned:
+                return None
+            try:
+                return float(cleaned)
+            except ValueError:
+                return None
+        return None
 
-    def _num_any(keys: list[str]) -> float | None:
+    def _num(key: str) -> float | None:
+        return _to_float(data.get(key))
+
+    def _num_any(keys: list[str], source: dict | None = None) -> float | None:
+        bag = source if isinstance(source, dict) else data
         for key in keys:
-            value = data.get(key)
-            if value is None or value == "":
-                continue
-            return float(value)
+            value = _to_float(bag.get(key))
+            if value is not None:
+                return value
         return None
 
     def _txt(key: str) -> str | None:
@@ -307,15 +542,110 @@ def parse_document_fields_json(content: str) -> DocumentExtractedData:
                 return text_value
         return None
 
+    def _line_item_dicts() -> list[dict]:
+        candidates = [
+            data.get("line_items"),
+            data.get("lineItems"),
+            data.get("items"),
+            data.get("products"),
+            data.get("goods"),
+        ]
+        rows: list[dict] = []
+        for candidate in candidates:
+            if isinstance(candidate, list):
+                for row in candidate:
+                    if isinstance(row, dict):
+                        rows.append(row)
+        return rows
+
+    line_items = _line_item_dicts()
+
+    line_item_quantity_total = 0.0
+    has_line_item_quantity = False
+    line_item_weight_total = 0.0
+    has_line_item_weight = False
+    line_item_declared_value_total = 0.0
+    has_line_item_declared_value = False
+    line_item_unit_price: float | None = None
+
+    for row in line_items:
+        quantity = _num_any([
+            "quantity", "qty", "total_qty", "total quantity", "item_qty", "pieces", "units", "pcs", "count"
+        ], source=row)
+        weight = _num_any([
+            "net_weight", "net weight", "weight_kg", "weight kg", "weight", "gross_weight", "gross weight"
+        ], source=row)
+        unit_price = _num_any([
+            "unit_price", "unit price", "price_per_unit", "price per unit", "item_price", "price", "rate"
+        ], source=row)
+        total_price = _num_any([
+            "total_price", "total price", "line_total", "line total", "amount", "value", "declared_value", "invoice_value"
+        ], source=row)
+
+        if quantity is not None and quantity > 0:
+            has_line_item_quantity = True
+            line_item_quantity_total += quantity
+        if weight is not None and weight > 0:
+            has_line_item_weight = True
+            line_item_weight_total += weight
+        if total_price is not None and total_price > 0:
+            has_line_item_declared_value = True
+            line_item_declared_value_total += total_price
+        if line_item_unit_price is None and unit_price is not None and unit_price > 0:
+            line_item_unit_price = unit_price
+
+        if (
+            total_price is None
+            and quantity is not None
+            and quantity > 0
+            and unit_price is not None
+            and unit_price > 0
+        ):
+            has_line_item_declared_value = True
+            line_item_declared_value_total += round(quantity * unit_price, 2)
+
+    quantity_value = _num_any([
+        "quantity", "qty", "total_qty", "total qty", "total_quantity", "total quantity", "item_qty", "item qty", "pcs", "pieces", "units", "cartons", "boxes"
+    ])
+    if (quantity_value is None or quantity_value <= 0) and has_line_item_quantity:
+        quantity_value = round(line_item_quantity_total, 4)
+
+    weight_value = _num_any([
+        "net_weight", "net weight", "gross_weight", "gross weight", "weight_kg", "weight kg", "weight", "billable_weight", "billable weight", "chargeable_weight", "chargeable weight", "cargo_weight", "cargo weight", "net_weight_kg", "gross_weight_kg"
+    ])
+    if (weight_value is None or weight_value <= 0) and has_line_item_weight:
+        weight_value = round(line_item_weight_total, 4)
+
+    declared_value = _num_any([
+        "declared_value", "declared value", "total_price", "total price", "price", "invoice_value", "invoice value", "goods_value", "goods value", "total_value", "total value", "item_value", "item value", "amount", "line_total", "line total"
+    ])
+    if (declared_value is None or declared_value <= 0) and has_line_item_declared_value:
+        declared_value = round(line_item_declared_value_total, 2)
+
+    unit_price_value = _num_any([
+        "unit_price", "unit price", "price_per_unit", "price per unit", "price_per_item", "price per item", "item_price", "item price", "rate", "cost per unit"
+    ])
+    if (unit_price_value is None or unit_price_value <= 0) and line_item_unit_price is not None:
+        unit_price_value = line_item_unit_price
+
+    if (
+        (unit_price_value is None or unit_price_value <= 0)
+        and quantity_value is not None
+        and quantity_value > 0
+        and declared_value is not None
+        and declared_value > 0
+    ):
+        unit_price_value = round(declared_value / quantity_value, 2)
+
     return DocumentExtractedData(
         product_name=_txt_any(["product_name", "product", "item", "item_description", "item description", "goods_description", "goods description", "description", "commodity", "merchandise", "cargo_description", "cargo description"]),
         hs_code=_txt_any(["hs_code", "hs code", "tariff_code", "tariff code", "customs_code", "customs code"]),
         destination_country=_txt_any(["destination_country", "destination country", "country_of_destination", "country of destination", "destination", "ship_to_country", "ship to country", "consignee_country", "consignee country", "delivery_country", "delivery country"]),
         destination_address=_txt_any(["destination_address", "destination address", "complete_address", "complete address", "full_address", "full address", "delivery_address", "delivery address", "ship_to_address", "ship to address", "consignee_address", "consignee address", "shipping_address", "shipping address", "recipient_address", "recipient address", "receiver_address", "receiver address", "address", "address_line_1", "address line 1", "address_line_2", "address line 2", "address_line_3", "address line 3"]),
         origin_region=_txt_any(["origin_region", "origin region", "origin"]),
-        quantity=_num_any(["quantity", "qty", "total_qty", "total qty", "item_qty", "item qty", "pcs", "pieces", "units", "cartons", "boxes"]),
-        weight_kg=_num_any(["weight_kg", "weight kg", "weight", "gross_weight", "gross weight", "net_weight", "net weight", "billable_weight", "billable weight", "chargeable_weight", "chargeable weight", "cargo_weight", "cargo weight"]),
-        declared_value=_num_any(["declared_value", "declared value", "invoice_value", "invoice value", "goods_value", "goods value", "total_value", "total value", "item_value", "item value", "amount", "quantity", "qty"]),
-        unit_price=_num_any(["unit_price", "unit price", "price_per_unit", "price per unit", "price_per_item", "price per item", "item_price", "item price", "rate", "cost per unit"]),
+        quantity=quantity_value,
+        weight_kg=weight_value,
+        declared_value=declared_value,
+        unit_price=unit_price_value,
         incoterm=_txt_any(["incoterm", "incoterms"]),
     )

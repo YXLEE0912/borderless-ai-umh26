@@ -149,10 +149,11 @@ class ZAIClient:
 
         system_prompt = (
             "You extract shipping and customs fields from business documents. Return valid JSON only with keys: "
-            "product_name, hs_code, destination_country, destination_address, origin_region, quantity, weight_kg, declared_value, unit_price, incoterm. "
-            "origin_region must be one of: west, east, or null. "
+            "item, product_name, hs_code, destination_country, destination_address, origin_region, quantity, weight_kg, unit_price, total_price, incoterm. "
+            "item and product_name are aliases for the product description. origin_region must be one of: west, east, or null. "
             "If quantity/qty appears, map it to quantity. If a unit price is visible, map it to unit_price. "
-            "Use null when missing. No markdown."
+            "If only one price is visible, map it to total_price. Use null when missing. No markdown. "
+            "Always keep total_price equal to unit_price x quantity when both are present."
         )
 
         text_prompt = (

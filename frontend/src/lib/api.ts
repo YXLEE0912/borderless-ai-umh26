@@ -147,8 +147,10 @@ export type DocumentExtractedData = {
   destination_country?: string | null;
   destination_address?: string | null;
   origin_region?: OriginRegion | null;
+  quantity?: number | null;
   weight_kg?: number | null;
   declared_value?: number | null;
+  unit_price?: number | null;
   incoterm?: string | null;
 };
 

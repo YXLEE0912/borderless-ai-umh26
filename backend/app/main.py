@@ -1,6 +1,8 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Response
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.agent_runtime import configure_runtime_state
@@ -19,6 +21,7 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title=settings.app_name, lifespan=lifespan)
+    favicon_path = Path(__file__).resolve().parents[2] / "frontend" / "public" / "favicon.ico"
 
     configure_runtime_state(app, settings)
 
@@ -42,6 +45,8 @@ def create_app() -> FastAPI:
 
     @app.get("/favicon.ico", include_in_schema=False)
     async def favicon() -> Response:
+        if favicon_path.exists():
+            return FileResponse(favicon_path)
         return Response(status_code=204)
 
     return app

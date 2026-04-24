@@ -83,8 +83,8 @@ Audit behavior: each `POST /api/v1/scans` call writes a row to `rule_execution_l
 3. Install dependencies from `requirements.txt`.
 4. Run the FastAPI app with Uvicorn.
 
-Agent 3 uses `UMH_3_API_KEY` when you want to keep the cost module keyed the same way as the other agents.
-Agent 1 can read `A_AI_API_KEY`, `AI_API_KEY`, or `Z_AI_API_KEY` for backward compatibility.
+Agent 3 reads `UMH_3_API_KEY` for the shared Z.ai-backed cost and document flow.
+If you prefer the older names, the Z.ai-backed services also accept `Z_AI_API_KEY`, `A_AI_API_KEY`, or `AI_API_KEY`.
 
 ### Install
 

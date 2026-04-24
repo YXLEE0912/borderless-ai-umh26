@@ -12,7 +12,7 @@ class Settings(BaseSettings):
 
     z_ai_api_key: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("Z_AI_API_KEY", "A_AI_API_KEY", "AI_API_KEY"),
+        validation_alias=AliasChoices("UMH_3_API_KEY", "Z_AI_API_KEY", "A_AI_API_KEY", "AI_API_KEY"),
     )
     z_ai_base_url: str = "https://api.ilmu.ai/v1"
     z_ai_model: str = "ilmu-glm-5.1"
@@ -23,7 +23,10 @@ class Settings(BaseSettings):
     gemini_api_key_backup: str | None = None
     gemini_vision_model: str = "gemini-2.5-flash"
 
-    umh_3_api_key: str | None = None
+    umh_3_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("UMH_3_API_KEY"),
+    )
 
 
     supabase_url: str | None = None

@@ -704,18 +704,15 @@ const STEP_FLOW: Record<number, { intro: Message; onComplete: Message }> = {
   },
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// MAIN COMPONENT
-// ─────────────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AI HELPERS  (ilmu-GLM + Gemini Vision — keys from .env)
+// AI HELPERS — module level (no hooks needed)
 // ─────────────────────────────────────────────────────────────────────────────
-const GLM_KEY  = "sk-fd9182ed29f4722fd9c3fc8b852a43e39c01234247156a93";
-const GLM_URL  = "https://api.ilmu.ai/v1/chat/completions";
-const GLM_MDL  = "ilmu-glm-5.1";
-const GEM_KEY  = "AIzaSyDXnhf8TrJzUq1rkC2c5_XKuUpvDMZXU-8";
-const GEM_URL  = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEM_KEY}`;
+const GLM_KEY = "sk-fd9182ed29f4722fd9c3fc8b852a43e39c01234247156a93";
+const GLM_URL = "https://api.ilmu.ai/v1/chat/completions";
+const GLM_MDL = "ilmu-glm-5.1";
+const GEM_KEY = "AIzaSyDXnhf8TrJzUq1rkC2c5_XKuUpvDMZXU-8";
+const GEM_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEM_KEY}`;
 
 async function glmJSON(system: string, user: string, history: {role:string;content:string}[] = []): Promise<Record<string,unknown>> {
   const r = await fetch(GLM_URL, {
@@ -730,7 +727,7 @@ async function glmJSON(system: string, user: string, history: {role:string;conte
       ],
     }),
   });
-  if (!r.ok) throw new Error(`GLM ${r.status}: ${await r.text()}`);
+  if (!r.ok) throw new Error(`AI ${r.status}`);
   const d = await r.json();
   const raw: string = d.choices?.[0]?.message?.content ?? "{}";
   try { return JSON.parse(raw.replace(/```json|```/g, "").trim()); }
@@ -746,7 +743,7 @@ async function glmText(system: string, user: string, history: {role:string;conte
       messages: [{ role: "system", content: system }, ...history, { role: "user", content: user }],
     }),
   });
-  if (!r.ok) throw new Error(`GLM ${r.status}`);
+  if (!r.ok) throw new Error(`AI ${r.status}`);
   const d = await r.json();
   return (d.choices?.[0]?.message?.content as string) ?? "";
 }
@@ -763,14 +760,14 @@ async function geminiVision(b64: string, mime: string, prompt: string): Promise<
       generationConfig: { maxOutputTokens: 2000, temperature: 0.1 },
     }),
   });
-  if (!r.ok) throw new Error(`Gemini ${r.status}: ${await r.text()}`);
+  if (!r.ok) throw new Error(`Vision ${r.status}`);
   const d = await r.json();
   const raw: string = d.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
   try { return JSON.parse(raw.replace(/```json|```/g, "").trim()); }
   catch { return { parse_error: true, raw }; }
 }
 
-function toB64(file: File): Promise<string> {
+function fileToB64(file: File): Promise<string> {
   return new Promise((res, rej) => {
     const fr = new FileReader();
     fr.onload  = () => res((fr.result as string).split(",")[1]);
@@ -778,9 +775,928 @@ function toB64(file: File): Promise<string> {
     fr.readAsDataURL(file);
   });
 }
-const mimeOf = (f: File) => f.type || (f.name.endsWith(".pdf") ? "application/pdf" : "image/jpeg");
 
-// ── Simple PDF builder ────────────────────────────────────────────────────────
+const fileMime = (f: File): string => f.type || (f.name.endsWith(".pdf") ? "application/pdf" : "image/jpeg");
+
+// Helper: check if a field value is meaningful (not empty, not a dash placeholder)
+const hasMeaning = (v: unknown): boolean =>
+  v != null &&
+  typeof v === "string" &&
+  v.trim().length > 1 &&
+  v.trim() !== "—" &&
+  v.trim() !== "-" &&
+  v.trim() !== "N/A" &&
+  v.trim() !== "null" &&
+  v.trim() !== "undefined";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PDF BUILDER — proper A4 documents matching official Malaysian templates
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Low-level PDF operator builder (uses only Helvetica — no external fonts needed) */
+class PDFDoc {
+  private ops: string[] = [];
+  readonly W = 595; readonly H = 842;
+  readonly LM = 34; readonly RM = 561; readonly PW = 527;
+  private _y = 0;
+
+  get y() { return this._y; }
+  set y(v: number) { this._y = v; }
+
+  rect(x: number, y: number, w: number, h: number, fill?: string, stroke = true): this {
+    if (fill) {
+      const [r,g,b] = fill.split(" "); this.ops.push(`${r} ${g} ${b} rg`);
+    }
+    const sw = stroke ? 1 : 0;
+    this.ops.push(`${x.toFixed(1)} ${(y-h).toFixed(1)} ${w.toFixed(1)} ${h.toFixed(1)} re`);
+    if (fill && stroke) this.ops.push("B");
+    else if (fill)      this.ops.push("f");
+    else                this.ops.push("S");
+    if (fill) this.ops.push("0 0 0 rg");
+    void sw;
+    return this;
+  }
+
+  hline(x1: number, x2: number, y: number, w = 0.4): this {
+    this.ops.push(`${w} w ${x1.toFixed(1)} ${y.toFixed(1)} m ${x2.toFixed(1)} ${y.toFixed(1)} l S 0.4 w`);
+    return this;
+  }
+  vline(x: number, y1: number, y2: number, w = 0.4): this {
+    this.ops.push(`${w} w ${x.toFixed(1)} ${y1.toFixed(1)} m ${x.toFixed(1)} ${y2.toFixed(1)} l S 0.4 w`);
+    return this;
+  }
+
+  text(s: string, x: number, y: number, sz = 6.5, bold = false, align: "L"|"C"|"R" = "L", color = PDFDoc.BLACK): this {
+    const safe = s.replace(/\\/g,"\\\\").replace(/\(/g,"\\(").replace(/\)/g,"\\)").substring(0,120);
+    const font = bold ? "F2" : "F1";
+    const [r,g,b] = color.split(" ");
+    this.ops.push(`BT /${font} ${sz} Tf ${r} ${g} ${b} rg`);
+    if (align === "C")      this.ops.push(`${(x).toFixed(1)} ${y.toFixed(1)} Td (${safe}) Tj`);
+    else if (align === "R") this.ops.push(`${x.toFixed(1)} ${y.toFixed(1)} Td (${safe}) Tj`);
+    else                    this.ops.push(`${x.toFixed(1)} ${y.toFixed(1)} Td (${safe}) Tj`);
+    this.ops.push("0 0 0 rg ET");
+    return this;
+  }
+
+  fieldLine(x: number, y: number, w: number): this { return this.hline(x, x+w, y-1.5, 0.3); }
+
+  cellLabel(lines: string[], x: number, yTop: number, sz = 5.5, bold = false, color = PDFDoc.BLACK): this {
+    lines.forEach((ln, i) => { if (ln) this.text(ln, x+2, yTop - 5 - i*7, sz, bold, "L", color); });
+    return this;
+  }
+
+  checkbox(x: number, y: number): this {
+    this.ops.push(`${x.toFixed(1)} ${(y-5).toFixed(1)} 5 5 re S`);
+    return this;
+  }
+
+  build(filename: string): void {
+    const stream = this.ops.join("\n");
+    const resources = "<</Font<</F1 5 0 R/F2 6 0 R>>>>";
+    const pdf = [
+      "%PDF-1.4",
+      "1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj",
+      "2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj",
+      `3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 ${this.W} ${this.H}]/Contents 4 0 R/Resources ${resources}>>endobj`,
+      `4 0 obj<</Length ${stream.length}>>\nstream\n${stream}\nendstream\nendobj`,
+      "5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj",
+      "6 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica-Bold>>endobj",
+      "xref\n0 7\n0000000000 65535 f\n",
+      "trailer<</Size 7/Root 1 0 R>>\nstartxref\n9\n%%EOF",
+    ].join("\n");
+    const a = Object.assign(document.createElement("a"), {
+      href: URL.createObjectURL(new Blob([pdf], { type: "application/pdf" })),
+      download: filename,
+    });
+    a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+  }
+
+  static BLUE  = "0.15 0.30 0.55";
+  static LGRAY = "0.93 0.93 0.93";
+  static MGRAY = "0.83 0.83 0.83";
+  static LBLUE = "0.88 0.92 0.96";
+  static WHITE = "1 1 1";
+  static BLACK = "0 0 0";
+}
+
+/** Generate a properly formatted K2 (Kastam No.2) export declaration PDF */
+function generateK2PDF(data: Record<string,unknown>): void {
+  const d = new PDFDoc();
+  const { LM, RM, PW, W, H } = d;
+  const mm = (v: number) => v * 2.835;
+  const s = (v: unknown) => String(v ?? "");
+
+  const form = (data.k2_form_data || {}) as Record<string,unknown>;
+  const exp  = (form.exporter   || {}) as Record<string,string>;
+  const con  = (form.consignee  || {}) as Record<string,string>;
+  const trp  = (form.transport  || {}) as Record<string,string>;
+  const gds  = (form.goods      || {}) as Record<string,unknown>;
+  const val  = (form.valuation  || {}) as Record<string,number>;
+  const duty = (form.duty       || {}) as Record<string,number>;
+  const sig  = (form.signatory  || {}) as Record<string,string>;
+
+  let y = H - mm(8);
+
+  d.rect(LM, y, PW, mm(18), PDFDoc.BLUE);
+  d.text("JABATAN KASTAM DIRAJA MALAYSIA / ROYAL MALAYSIAN CUSTOMS DEPARTMENT",
+    W/2, y - mm(5), 7.5, true, "C", PDFDoc.WHITE);
+  d.text("PERAKUAN BARANG YANG DIEKSPORT / DECLARATION OF GOODS TO BE EXPORTED",
+    W/2, y - mm(10), 6.5, false, "C", PDFDoc.WHITE);
+  d.text("Kastam No.2 / Customs No.2", W/2, y - mm(14.5), 8, true, "C", PDFDoc.WHITE);
+  y -= mm(18);
+
+  d.text("Tandakan (/) / Mark (/) at relevant column:", LM, y - mm(4), 6);
+  d.checkbox(LM + mm(95), y - mm(1)); d.text("Eksport / Export", LM + mm(99), y - mm(4), 6);
+  d.checkbox(LM + mm(128), y - mm(1)); d.text("Tempatan / Local", LM + mm(132), y - mm(4), 6);
+  y -= mm(10);
+
+  const LW = PW * 0.54;
+  const RW = PW * 0.46;
+  const BOX_H = mm(30);
+
+  const boxLeft = (num: string, ms: string, en: string, yTop: number, extraL: ()=>void, extraR: ()=>void) => {
+    d.rect(LM, yTop, LW, BOX_H);
+    d.rect(LM + LW, yTop, RW, BOX_H, PDFDoc.LGRAY);
+    d.text(`${num}. ${ms}`, LM + 2, yTop - mm(4), 6, true);
+    d.text(en, LM + 2, yTop - mm(7.5), 5.5);
+    d.hline(LM + 2, LM + LW - 2, yTop - mm(8), 0.3);
+    extraL();
+    extraR();
+    return yTop - BOX_H;
+  };
+
+  y = boxLeft("1",
+    "Konsainor/Pengeksport (Nama dan Alamat)",
+    "Consignor / Exporter (Name and Address)", y,
+    () => {
+      d.text(s(exp.name), LM + 2, y + BOX_H - mm(12), 6.5);
+      d.text(s(exp.address), LM + 2, y + BOX_H - mm(17), 5.5);
+      d.text(`BRN: ${s(exp.brn)}`, LM + 2, y + BOX_H - mm(22), 5.5);
+      d.text("i) Kod Pengeksport / Exporter Code:", LM + 2, y + BOX_H - mm(27), 5, true);
+    },
+    () => {
+      d.text("UNTUK KEGUNAAN RASMI / FOR OFFICIAL USE", LM+LW+2, y+BOX_H-mm(4), 5.5, true);
+      d.text("Tarikh & Waktu Terima / Date & Time of Receipt:", LM+LW+2, y+BOX_H-mm(10), 5);
+      d.fieldLine(LM+LW+2, y+BOX_H-mm(10), RW-4);
+      d.text("No. Pendaftaran / Registration No.:", LM+LW+2, y+BOX_H-mm(17), 5);
+      d.fieldLine(LM+LW+2, y+BOX_H-mm(17), RW-4);
+      d.text("Stesen / Station:", LM+LW+2, y+BOX_H-mm(24), 5);
+    }
+  );
+
+  y = boxLeft("2",
+    "Konsaini/Pengimport (Nama dan Alamat)",
+    "Consignee / Importer (Name and Address)", y,
+    () => {
+      d.text(s(con.name), LM+2, y+BOX_H-mm(12), 6.5);
+      d.text(s(con.address || con.country_code), LM+2, y+BOX_H-mm(17), 5.5);
+      d.text("No. Pendaftaran Cukai Jualan / Sales Tax Reg. No.*:", LM+2, y+BOX_H-mm(27), 5, true);
+    },
+    () => {
+      d.text("5. Penerimaan Duti/Cukai dibenarkan oleh:", LM+LW+2, y+BOX_H-mm(4), 5.5, true);
+      d.text("Receipt of Duty authorized by:", LM+LW+2, y+BOX_H-mm(8), 5);
+      d.fieldLine(LM+LW+2, y+BOX_H-mm(15), RW-4);
+      d.text("Tarikh/Date", LM+LW+2, y+BOX_H-mm(18), 5);
+      d.fieldLine(LM+LW+2, y+BOX_H-mm(24), RW/2-2);
+      d.text("Pegawai Kastam / Proper Officer", LM+LW+RW/2, y+BOX_H-mm(24), 5);
+    }
+  );
+
+  y = boxLeft("3",
+    "Nama & Alamat Ejen Yang Diberikuasa",
+    "Name and Address of Authorized Agent", y,
+    () => {
+      d.text("i) Kod Ejen / Agent Code:", LM+2, y+BOX_H-mm(15), 5, true);
+      d.fieldLine(LM+mm(30), y+BOX_H-mm(15), LW-mm(32));
+      d.text("ii) No. Cukai Perkhidmatan / Service Tax Reg. No.*:", LM+2, y+BOX_H-mm(22), 5, true);
+      d.fieldLine(LM+mm(55), y+BOX_H-mm(22), LW-mm(57));
+    },
+    () => {
+      d.text("8. STA  □ Ya/Yes  □ Tidak/No", LM+LW+2, y+BOX_H-mm(4), 5.5, true);
+      d.text("9. No. Permit Eksport / Export Permit No.:", LM+LW+2, y+BOX_H-mm(11), 5, true);
+      d.fieldLine(LM+LW+2, y+BOX_H-mm(11), RW-4);
+      d.text("10. No. K.P.W.X.:", LM+LW+2, y+BOX_H-mm(18), 5, true);
+      d.fieldLine(LM+LW+mm(22), y+BOX_H-mm(18), RW-mm(24));
+    }
+  );
+
+  const R4H = mm(22);
+  d.rect(LM, y, PW, R4H);
+  d.text("11. Negara Asal / Country of Origin:", LM+2, y-mm(4), 5.5, true);
+  d.text(s(trp.country_of_destination_code) || "MY", LM+mm(52), y-mm(4), 6.5);
+  d.text("12. Negara Destinasi / Country of Final Destination:", LM+mm(90), y-mm(4), 5.5, true);
+  d.text(s(con.country_code), LM+mm(140), y-mm(4), 6.5);
+  d.text("4. Mod Pengangkutan / Mode of Transport:", LM+2, y-mm(11), 5.5, true);
+  const modes = ["1.Laut/Sea","2.Keretapi/Rail","3.Jalan/Road","4.Udara/Air","5.Lain-lain"];
+  modes.forEach((m, i) => {
+    const selected = (i===0 && trp.mode_code==="1") || (i===3 && trp.mode_code==="4");
+    d.checkbox(LM+mm(58)+i*mm(26), y-mm(8));
+    if (selected) d.text("✓", LM+mm(58.5)+i*mm(26), y-mm(10), 7);
+    d.text(m, LM+mm(62)+i*mm(26), y-mm(11), 5.5);
+  });
+  y -= R4H;
+
+  const R5H = mm(20);
+  d.rect(LM, y, PW, R5H);
+  const r5cols = [
+    [mm(30), "5. Tarikh Eksport", s(form.export_date)],
+    [mm(42), "6. Nama Kapal/Penerbangan", s(trp.vessel_flight_name)],
+    [mm(36), "7. Pelabuhan Eksport/Port of Export", s(trp.port_of_loading_code)],
+    [mm(30), "8. Pelabuhan Bongkar/Port of Discharge", s(trp.port_of_discharge_code)],
+    [mm(28), "9. Melalui/Via (Transhipment)", ""],
+    [PW - mm(30+42+36+30+28), "20. Kadar Pertukaran/Exchange Rate  RM", s(val.exchange_rate)],
+  ] as [number, string, string][];
+  let rx = LM;
+  r5cols.forEach(([cw, lbl, val2]) => {
+    d.vline(rx, y, y - R5H);
+    d.text(lbl, rx+2, y-mm(4), 4.8, true);
+    d.text(val2, rx+2, y-mm(10), 6);
+    rx += cw;
+  });
+  y -= R5H;
+
+  const R6H = mm(18);
+  d.rect(LM, y, PW, R6H);
+  const r6cols = [
+    [mm(28), "13. Mata Wang/Currency", s(val.invoice_currency || "MYR")],
+    [mm(34), "14. Amaun/Amount (received/to be received)", `RM ${s(val.invoice_amount)}`],
+    [mm(26), "22. Insurans/Insurance  RM", s(val.insurance_myr)],
+    [mm(26), "24. Tambang/Freight  RM", s(val.freight_myr)],
+    [mm(26), "25. Berat Kasar/Gross Wt. (kg)", s(gds.gross_weight_kg)],
+    [mm(22), "26. Ukuran/Measurement (m³)", ""],
+    [PW-mm(28+34+26+26+26+22), "27. Nilai FOB/FOB Value  RM", s(val.fob_value_myr)],
+  ] as [number, string, string][];
+  rx = LM;
+  r6cols.forEach(([cw, lbl, val2]) => {
+    d.vline(rx, y, y - R6H);
+    d.text(lbl, rx+2, y-mm(4), 4.5, true);
+    d.text(val2, rx+2, y-mm(11), 6);
+    rx += cw;
+  });
+  y -= R6H;
+
+  const TH = mm(16);
+  const gcols = [
+    [mm(16), "28. Tanda &\nNo. Kontena"],
+    [mm(8),  "29.\nBil"],
+    [mm(22), "30. Bil & Jenis\nBungkusan"],
+    [mm(55), "31. Perihal Barang\nDescription of Goods"],
+    [mm(16), "32. Kod HS\n(AHTN)"],
+    [mm(9),  "33.\nUnit"],
+    [mm(14), "34. No.\nInvois"],
+    [mm(13), "35.\nKuantiti"],
+    [mm(16), "Nilai Unit\nFOB (RM)"],
+    [mm(16), "38. Jumlah\nNilai (RM)"],
+    [PW-mm(16+8+22+55+16+9+14+13+16+16+38), "39-42.\nDuti/Tax %"],
+    [mm(38), "Amaun Duti &\nCukai (RM)"],
+  ] as [number, string][];
+  let hx = LM;
+  gcols.forEach(([cw, hdr]) => {
+    d.rect(hx, y, cw, TH, PDFDoc.LBLUE);
+    hdr.split("\n").forEach((ln, li) => d.text(ln, hx+cw/2, y-mm(4)-li*mm(5.5), 4.8, true, "C"));
+    hx += cw;
+  });
+  y -= TH;
+
+  const ROWS = 7;
+  const DR = mm(11);
+  for (let r = 0; r < ROWS; r++) {
+    hx = LM;
+    gcols.forEach(([cw]) => {
+      d.rect(hx, y, cw, DR, r % 2 === 0 ? PDFDoc.LGRAY : undefined);
+      hx += cw;
+    });
+    if (r === 0) {
+      const vals = [
+        "", "1", `${s(gds.number_of_packages)} ${s(gds.package_type_code)}`,
+        s(gds.commodity_description), s(gds.hs_code), s(gds.unit_of_quantity),
+        "", s(gds.quantity), s(val.fob_value_myr),
+        s(val.fob_value_myr), s(duty.export_duty_myr), s(duty.total_duty_myr),
+      ];
+      let vx = LM;
+      vals.forEach((v2, vi) => {
+        d.text(v2, vx+2, y-DR+mm(3.5), 5.5);
+        vx += gcols[vi][0];
+      });
+    }
+    y -= DR;
+  }
+
+  d.rect(LM, y, PW, mm(11), PDFDoc.MGRAY);
+  d.text("JUMLAH / TOTAL:", LM+2, y-mm(4), 6, true);
+  d.text(`RM ${s(val.fob_value_myr)}`, LM+mm(195), y-mm(4), 6, true);
+  d.text(`Duti / Duty: RM ${s(duty.total_duty_myr)}`, LM+mm(230), y-mm(4), 6, true);
+  hx = LM; gcols.forEach(([cw]) => { d.vline(hx, y, y-mm(11)); hx += cw; });
+  y -= mm(11);
+
+  const SIG_H = mm(38);
+  const SW = PW * 0.52;
+  d.rect(LM, y, SW, SIG_H);
+  d.rect(LM+SW, y, PW-SW, SIG_H, PDFDoc.LGRAY);
+
+  d.text("51. Nama / Name:", LM+2, y-mm(4), 5.5, true);
+  d.text(s(sig.name), LM+mm(22), y-mm(4), 6.5);
+  d.text("52. No. Kad Pengenalan / IC or Passport No.:", LM+2, y-mm(11), 5.5, true);
+  d.text(s(sig.nric_passport), LM+mm(55), y-mm(11), 6);
+  d.text("53. Jawatan / Designation:", LM+2, y-mm(18), 5.5, true);
+  d.text(s(sig.designation), LM+mm(32), y-mm(18), 6);
+  d.text("54. Saya memperakui perakuan ini benar / I certify this declaration is true:", LM+2, y-mm(25), 5.5, true);
+  d.fieldLine(LM+2, y-mm(32), SW/2-4);
+  d.text("Tarikh / Date", LM+2, y-mm(35), 5);
+  d.fieldLine(LM+SW/2, y-mm(32), SW/2-2);
+  d.text("Tandatangan / Signature", LM+SW/2+2, y-mm(35), 5);
+
+  d.text("Jumlah Duti/Cukai Kena Dibayar / Total Duty Payable  RM:", LM+SW+2, y-mm(7), 5.5, true);
+  d.fieldLine(LM+SW+2, y-mm(7), PW-SW-4);
+  d.text(`RM ${s(duty.total_duty_myr)}`, LM+SW+mm(70), y-mm(7), 7, true);
+  d.text("Caj Lain / Other Charges  RM:", LM+SW+2, y-mm(15), 5.5, true);
+  d.fieldLine(LM+SW+2, y-mm(15), PW-SW-4);
+  d.text("Jumlah Amaun Kena Dibayar / Total Amount Payable  RM:", LM+SW+2, y-mm(23), 5.5, true);
+  d.fieldLine(LM+SW+2, y-mm(23), PW-SW-4);
+  d.text("Tarikh / Date:", LM+SW+2, y-mm(32), 5);
+  d.fieldLine(LM+SW+mm(16), y-mm(32), (PW-SW)/2-mm(18));
+  d.text("Pegawai Kastam / Proper Officer:", LM+SW+(PW-SW)/2, y-mm(32), 5);
+  y -= SIG_H;
+
+  d.text("Nota: Perakuan ini dikehendaki di bawah Akta Kastam 1967 dan Akta Cukai Jualan 2018  |  Note: Required under Customs Act 1967 and Sales Tax Act 2018   *Jika berkenaan / If applicable",
+    LM, y-mm(4), 4.8);
+
+  d.build(`K2_Declaration_${s(data.k2_reference) || "DRAFT"}.pdf`);
+}
+
+/** Generate a Commercial Invoice PDF */
+function generateInvoicePDF(data: Record<string,unknown>): void {
+  const d = new PDFDoc();
+  const { LM, RM, PW, W, H } = d;
+  const mm = (v: number) => v * 2.835;
+  const s = (v: unknown) => String(v ?? "");
+  const exp  = (data.exporter  || {}) as Record<string,string>;
+  const con  = (data.consignee || {}) as Record<string,string>;
+  const goods = (data.goods    || []) as Array<Record<string,unknown>>;
+  let y = H - mm(8);
+
+  d.rect(LM, y, PW, mm(18), PDFDoc.BLUE);
+  d.text("COMMERCIAL INVOICE  /  INVOIS KOMERSIL", W/2, y-mm(7), 12, true, "C", PDFDoc.WHITE);
+  d.text("MALAYSIA EXPORT DOCUMENT", W/2, y-mm(12.5), 6.5, false, "C", PDFDoc.WHITE);
+  y -= mm(18);
+
+  const LW = PW*0.52; const RW = PW-LW; const R1H = mm(50);
+
+  d.rect(LM, y, LW, R1H);
+  d.text("EXPORTER / PENGEKSPORT", LM+2, y-mm(4.5), 6, true);
+  d.hline(LM+2, LM+LW-2, y-mm(5.5), 0.4);
+  const expFields = [
+    ["Name / Nama:", s(exp.name)],
+    ["Address / Alamat:", s(exp.address)],
+    ["", s(exp.address).length > 50 ? "" : ""],
+    ["Tel:", s(exp.tel)],
+    ["Email:", s(exp.email)],
+    ["BRN:", s(exp.brn)],
+    ["Bank:", s(exp.bank)],
+  ];
+  expFields.forEach(([lbl, val2], i) => {
+    d.text(lbl, LM+2, y-mm(11)-i*mm(5.5), 5.5, true);
+    if (val2) d.text(val2, LM+mm(22), y-mm(11)-i*mm(5.5), 6);
+    d.fieldLine(LM+mm(22), y-mm(11)-i*mm(5.5), LW-mm(24));
+  });
+
+  d.rect(LM+LW, y, RW, R1H, PDFDoc.LGRAY);
+  const metaFields = [
+    ["Invoice No. / No. Invois:", s(data.invoice_number)],
+    ["Date / Tarikh:", s(data.invoice_date)],
+    ["Customer P.O. No.:", ""],
+    ["Payment Terms:", s(data.payment_terms)],
+    ["Country of Origin:", "Malaysia"],
+    ["Sales Tax Reg. No.*:", ""],
+    ["Exporter Code:", ""],
+  ];
+  metaFields.forEach(([lbl, val2], i) => {
+    d.text(lbl, LM+LW+2, y-mm(11)-i*mm(5.5), 5.5, true);
+    if (val2) d.text(val2, LM+LW+mm(36), y-mm(11)-i*mm(5.5), 6);
+    d.fieldLine(LM+LW+2, y-mm(11)-i*mm(5.5), RW-4);
+  });
+  y -= R1H;
+
+  d.rect(LM, y, LW, R1H);
+  d.text("CONSIGNEE / PENERIMA", LM+2, y-mm(4.5), 6, true);
+  d.hline(LM+2, LM+LW-2, y-mm(5.5), 0.4);
+  const conFields = [
+    ["Name / Nama:", s(con.name)],
+    ["Address / Alamat:", s(con.address)],
+    ["", ""],
+    ["Country:", s(con.country)],
+    ["Tax / VAT ID:", s(con.tax_id)],
+    ["Tel:", s(con.tel)],
+    ["Contact Person:", s(con.contact_person)],
+  ];
+  conFields.forEach(([lbl, val2], i) => {
+    d.text(lbl, LM+2, y-mm(11)-i*mm(5.5), 5.5, true);
+    if (val2) d.text(val2, LM+mm(22), y-mm(11)-i*mm(5.5), 6);
+    d.fieldLine(LM+mm(22), y-mm(11)-i*mm(5.5), LW-mm(24));
+  });
+
+  d.rect(LM+LW, y, RW, R1H, PDFDoc.LGRAY);
+  const shipFields = [
+    ["Incoterm:", s(data.incoterm)],
+    ["Final Destination:", s(con.country)],
+    ["Port of Loading:", s(data.port_of_loading)],
+    ["Port of Discharge:", s(data.port_of_discharge)],
+    ["Vessel / Flight:", s(data.vessel_or_flight)],
+    ["B/L or AWB No.:", "TBC — Carrier to assign"],
+    ["Shipment Date:", ""],
+  ];
+  shipFields.forEach(([lbl, val2], i) => {
+    d.text(lbl, LM+LW+2, y-mm(11)-i*mm(5.5), 5.5, true);
+    if (val2) d.text(val2, LM+LW+mm(30), y-mm(11)-i*mm(5.5), 5.5);
+    d.fieldLine(LM+LW+2, y-mm(11)-i*mm(5.5), RW-4);
+  });
+  y -= R1H;
+
+  const TH = mm(16);
+  const gcols = [
+    [mm(12), "QTY", "KUANTITI"],
+    [mm(10), "UNIT", "UNIT"],
+    [mm(64), "DESCRIPTION OF GOODS", "PERIHAL BARANG"],
+    [mm(22), "HS CODE", "(AHTN 2022)"],
+    [mm(24), "UNIT PRICE", "HARGA UNIT (RM)"],
+    [PW-mm(12+10+64+22+24+28), "TOTAL", "JUMLAH (RM)"],
+    [mm(28), "REMARKS", "CATATAN"],
+  ] as [number, string, string][];
+
+  let hx = LM;
+  gcols.forEach(([cw, en, ms]) => {
+    d.rect(hx, y, cw, TH, PDFDoc.BLUE);
+    d.text(en, hx+cw/2, y-mm(5), 5.5, true, "C", PDFDoc.WHITE);
+    d.text(ms, hx+cw/2, y-mm(10), 5, false, "C", PDFDoc.WHITE);
+    hx += cw;
+  });
+  y -= TH;
+
+  const maxRows = 9;
+  for (let r = 0; r < maxRows; r++) {
+    const g = goods[r];
+    const bg = r % 2 === 0 ? PDFDoc.LGRAY : undefined;
+    hx = LM;
+    gcols.forEach(([cw]) => { d.rect(hx, y, cw, mm(11), bg); hx += cw; });
+    if (g) {
+      const vals = [s(g.quantity), s(g.unit), s(g.description), s(g.hs_code),
+                    s(g.unit_price), s(g.total), ""];
+      let vx = LM;
+      vals.forEach((v2, vi) => { d.text(v2, vx+2, y-mm(11)+mm(3.5), 5.5); vx += gcols[vi][0]; });
+    }
+    y -= mm(11);
+  }
+
+  const noteW = PW - mm(28) - mm(28);
+  [["SUBTOTAL  (RM)", s(data.subtotal)],
+   ["FREIGHT / TAMBANG MUATAN  (RM)", s(data.freight)],
+   ["INSURANCE / INSURANS  (RM)", s(data.insurance)],
+   ["HANDLING  (RM)", ""]].forEach(([lbl, val2]) => {
+    d.rect(LM, y, noteW, mm(11), PDFDoc.LGRAY);
+    d.text(lbl, LM+2, y-mm(4), 5.5, true);
+    d.rect(LM+noteW, y, mm(28)+mm(28), mm(11));
+    if (val2) d.text(val2, LM+noteW+2, y-mm(4), 6);
+    y -= mm(11);
+  });
+  d.rect(LM, y, PW, mm(13), PDFDoc.BLUE);
+  d.text("TOTAL AMOUNT  /  JUMLAH KESELURUHAN  (MYR)", LM+2, y-mm(5), 7, true, "L", PDFDoc.WHITE);
+  const total = (data.total_cif || data.total_fob || data.subtotal) as number;
+  d.text(`RM ${s(total)}`, RM-2, y-mm(5), 8, true, "R", PDFDoc.WHITE);
+  y -= mm(13);
+
+  d.rect(LM, y, PW, mm(36));
+  d.text('"WE HEREBY CERTIFY THIS INVOICE TO BE TRUE AND CORRECT."', W/2, y-mm(7), 7, true, "C");
+  d.text('"KAMI DENGAN INI MENGESAHKAN INVOIS INI ADALAH BENAR DAN BETUL."', W/2, y-mm(12), 6, false, "C");
+  d.fieldLine(LM+2, y-mm(23), PW/2-4);
+  d.text("Authorised Signature / Tandatangan Dibenarkan", LM+2, y-mm(26), 6, true);
+  d.text("Name:", LM+PW/2, y-mm(18), 5.5, true);
+  d.fieldLine(LM+PW/2+mm(12), y-mm(18), PW/2-mm(14));
+  d.text("Designation / Jawatan:", LM+PW/2, y-mm(24), 5.5, true);
+  d.fieldLine(LM+PW/2+mm(28), y-mm(24), PW/2-mm(30));
+  d.text("Date / Tarikh:", LM+PW/2, y-mm(30), 5.5, true);
+  d.fieldLine(LM+PW/2+mm(20), y-mm(30), PW/2-mm(22));
+  y -= mm(36);
+  d.text("THESE COMMODITIES WERE EXPORTED FROM MALAYSIA IN ACCORDANCE WITH EXPORT REGULATIONS. DIVERSION CONTRARY TO MALAYSIAN LAW PROHIBITED.", LM, y-mm(4), 5);
+
+  d.build(`Commercial_Invoice_${s(data.invoice_number) || "DRAFT"}.pdf`);
+}
+
+/** Generate a Bill of Lading PDF */
+function generateBOLPDF(data: Record<string,unknown>): void {
+  const d = new PDFDoc();
+  const { LM, RM, PW, W, H } = d;
+  const mm = (v: number) => v * 2.835;
+  const s = (v: unknown) => String(v ?? "");
+  const shipper  = (data.shipper      || data.exporter || {}) as Record<string,string>;
+  const con      = (data.consignee    || {}) as Record<string,string>;
+  const notify   = (data.notify_party || {}) as Record<string,string>;
+  const ctrs     = (data.container_details || []) as Array<Record<string,unknown>>;
+  let y = H - mm(8);
+
+  d.rect(LM, y, PW, mm(18), PDFDoc.BLUE);
+  d.text("BILL OF LADING  /  SURAT CARAAN", W/2, y-mm(7), 13, true, "C", PDFDoc.WHITE);
+  d.text("MALAYSIA EXPORT DOCUMENT  |  ORIGINAL  □   SEA WAYBILL  □   SURRENDER  □", W/2, y-mm(13), 6.5, false, "C", PDFDoc.WHITE);
+  y -= mm(18);
+
+  const LW = PW*0.52; const RW = PW-LW; const RH = mm(48);
+
+  d.rect(LM, y, LW, RH);
+  d.text("SHIPPER / PENGHANTAR (EXPORTER)", LM+2, y-mm(4.5), 6, true);
+  d.hline(LM+2, LM+LW-2, y-mm(5.5), 0.4);
+  const shipFields = [
+    ["Name / Nama:", s(shipper.name)],
+    ["Address / Alamat:", s(shipper.address)],
+    ["", ""],
+    ["BRN:", s(shipper.brn)],
+    ["Tel:", s(shipper.tel || "")],
+    ["SID#:", ""],
+  ];
+  shipFields.forEach(([lbl, val2], i) => {
+    d.text(lbl, LM+2, y-mm(11)-i*mm(5.8), 5.5, true);
+    if (val2) d.text(val2, LM+mm(22), y-mm(11)-i*mm(5.8), 6);
+    d.fieldLine(LM+mm(22), y-mm(11)-i*mm(5.8), LW-mm(24));
+  });
+
+  d.rect(LM+LW, y, RW, RH, PDFDoc.LGRAY);
+  const blFields = [
+    ["Bill of Lading No. / No. Surat Caraan:", s(data.bl_number)],
+    ["Date / Tarikh:", s(data.bl_date)],
+    ["B/L Type:  □ Original  □ Surrender  □ Waybill", ""],
+    ["SCAC Code:", ""],
+    ["PRO No.:", ""],
+    ["Trailer No. / No. Treler:", ""],
+    ["Seal No. / No. Segel:", ""],
+  ];
+  blFields.forEach(([lbl, val2], i) => {
+    d.text(lbl, LM+LW+2, y-mm(11)-i*mm(5.8), 5.5, true);
+    if (val2) d.text(val2, LM+LW+mm(40), y-mm(11)-i*mm(5.8), 6);
+    d.fieldLine(LM+LW+2, y-mm(11)-i*mm(5.8), RW-4);
+  });
+  y -= RH;
+
+  const RH2 = mm(42);
+  d.rect(LM, y, LW, RH2);
+  d.text("CONSIGNEE / PENERIMA", LM+2, y-mm(4.5), 6, true);
+  d.hline(LM+2, LM+LW-2, y-mm(5.5), 0.4);
+  const conFields2 = [
+    ["Name / Nama:", s(con.name)],
+    ["Address / Alamat:", s(con.address)],
+    ["", ""],
+    ["Country:", s(con.country_code || con.country)],
+    ["CID#:", ""],
+  ];
+  conFields2.forEach(([lbl, val2], i) => {
+    d.text(lbl, LM+2, y-mm(11)-i*mm(6), 5.5, true);
+    if (val2) d.text(val2, LM+mm(22), y-mm(11)-i*mm(6), 6);
+    d.fieldLine(LM+mm(22), y-mm(11)-i*mm(6), LW-mm(24));
+  });
+
+  d.rect(LM+LW, y, RW, RH2, PDFDoc.LGRAY);
+  d.text("NOTIFY PARTY / PIHAK DIMAKLUMKAN", LM+LW+2, y-mm(4.5), 6, true);
+  d.hline(LM+LW+2, LM+LW+RW-2, y-mm(5.5), 0.4);
+  const nFields = [
+    ["Name:", s(notify.name)],
+    ["Address:", s(notify.address)],
+    ["", ""],
+    ["Third Party Freight Bill To:", ""],
+  ];
+  nFields.forEach(([lbl, val2], i) => {
+    d.text(lbl, LM+LW+2, y-mm(11)-i*mm(6), 5.5, true);
+    if (val2) d.text(val2, LM+LW+mm(20), y-mm(11)-i*mm(6), 6);
+    d.fieldLine(LM+LW+mm(20), y-mm(11)-i*mm(6), RW-mm(22));
+  });
+  y -= RH2;
+
+  const R3H = mm(20);
+  d.rect(LM, y, PW, R3H);
+  const r3c = [
+    [mm(38), "Carrier / Pengangkut:", s(data.carrier_name || "")],
+    [mm(34), "Vessel / Flight / Kapal:", s(data.vessel_or_flight)],
+    [mm(28), "Voyage / Flight No.:", s(data.voyage_or_flight_number)],
+    [mm(34), "Port of Loading:", s(data.port_of_loading)],
+    [mm(34), "Port of Discharge:", s(data.port_of_discharge)],
+    [PW-mm(38+34+28+34+34), "Export Date:", s(data.bl_date)],
+  ] as [number, string, string][];
+  let rx = LM;
+  r3c.forEach(([cw, lbl, val2]) => {
+    d.vline(rx, y, y - R3H);
+    d.text(lbl, rx+2, y-mm(4), 5, true);
+    d.text(val2, rx+2, y-mm(11), 6);
+    rx += cw;
+  });
+  y -= R3H;
+
+  d.rect(LM, y, PW, mm(13), PDFDoc.LGRAY);
+  d.text("FREIGHT CHARGE TERMS / SYARAT TAMBANG:", LM+2, y-mm(4.5), 6, true);
+  const ft = s(data.freight_terms).toLowerCase();
+  const selected = (opt: string) => ft.includes(opt) ? "☑" : "□";
+  d.text(`${selected("prepaid")} Prepaid     ${selected("collect")} Collect     ${selected("3rd")} 3rd Party`,
+    LM+mm(70), y-mm(4.5), 6);
+  d.text("Special Instructions / Arahan Khas:", LM+2, y-mm(10), 5.5, true);
+  d.fieldLine(LM+mm(45), y-mm(10), PW-mm(47));
+  y -= mm(13);
+
+  const TH = mm(18);
+  const gcols2 = [
+    [mm(10), "QTY\nHU"], [mm(10), "TYPE\nHU"],
+    [mm(10), "QTY\nPKG"], [mm(10), "TYPE\nPKG"],
+    [mm(18), "WEIGHT\nBERAT (kg)"], [mm(8), "H.M.\n(X)"],
+    [mm(70), "COMMODITY DESCRIPTION  /  PERIHAL BARANG"],
+    [mm(20), "HS CODE\n(AHTN)"], [mm(16), "NMFC\nNo."],
+    [PW-mm(10*4+18+8+70+20+16), "CLASS\nKELAS"],
+  ] as [number, string][];
+  let hx2 = LM;
+  gcols2.forEach(([cw, hdr]) => {
+    d.rect(hx2, y, cw, TH, PDFDoc.BLUE);
+    hdr.split("\n").forEach((ln, li) => d.text(ln, hx2+cw/2, y-mm(5)-li*mm(5.5), 5, true, "C", PDFDoc.WHITE));
+    hx2 += cw;
+  });
+  y -= TH;
+
+  const DR2 = mm(11);
+  for (let r = 0; r < 7; r++) {
+    const ctr = ctrs[r];
+    const bg = r % 2 === 0 ? PDFDoc.LGRAY : undefined;
+    hx2 = LM;
+    gcols2.forEach(([cw]) => { d.rect(hx2, y, cw, DR2, bg); hx2 += cw; });
+    if (ctr) {
+      const vals = [s(ctr.packages), s(ctr.type || "CTN"), "", "", s(ctr.gross_weight_kg), "",
+                    s(ctr.description), "", s(ctr.container_no), ""];
+      let vx = LM;
+      vals.forEach((v2, vi) => { d.text(v2, vx+2, y-DR2+mm(3.5), 5.5); vx += gcols2[vi][0]; });
+    }
+    y -= DR2;
+  }
+
+  d.rect(LM, y, PW, mm(12), PDFDoc.MGRAY);
+  d.text("GRAND TOTAL / JUMLAH KESELURUHAN:", LM+2, y-mm(4.5), 6, true);
+  d.text(`Total Pkgs: ${s(data.total_packages)}  |  Gross Wt: ${s(data.total_gross_weight_kg)} kg  |  Volume: ${s(data.total_cbm)} m³`,
+    LM+mm(75), y-mm(4.5), 6);
+  y -= mm(12);
+
+  d.rect(LM, y, PW/2, mm(13), PDFDoc.LGRAY);
+  d.text("C.O.D. Amount  RM:", LM+2, y-mm(4.5), 5.5, true);
+  d.fieldLine(LM+mm(26), y-mm(4.5), PW/2-mm(28));
+  d.text("Fee Terms:  □ Collect  □ Prepaid", LM+2, y-mm(10), 5.5);
+  d.rect(LM+PW/2, y, PW/2, mm(13), PDFDoc.LGRAY);
+  d.text("Declared Value / Nilai Diisytiharkan  RM:", LM+PW/2+2, y-mm(4.5), 5.5, true);
+  d.fieldLine(LM+PW/2+mm(50), y-mm(4.5), PW/2-mm(52));
+  y -= mm(13);
+
+  const SH = mm(44);
+  const SW = PW/2;
+  d.rect(LM, y, SW, SH);
+  d.text("SHIPPER CERTIFICATION / PERAKUAN PENGHANTAR", LM+2, y-mm(4.5), 6, true);
+  d.hline(LM+2, LM+SW-2, y-mm(5.5), 0.4);
+  ["This is to certify that the above named materials are properly classified,",
+   "described, packaged, marked and labeled, and are in proper condition",
+   "for transportation according to applicable D.O.T. regulations."].forEach((ln, i) =>
+    d.text(ln, LM+2, y-mm(11)-i*mm(5.5), 5.5));
+  d.fieldLine(LM+2, y-mm(30), SW-4);
+  d.text("Shipper Signature / Tandatangan Penghantar", LM+2, y-mm(33), 5.5, true);
+  d.text("Date:", LM+2, y-mm(40), 5.5); d.fieldLine(LM+mm(12), y-mm(40), mm(30));
+  d.text("Trailer Loaded:  □ By Shipper  □ By Driver", LM+SW/2, y-mm(36), 5.5);
+  d.text("Freight Counted:  □ By Shipper  □ By Driver", LM+SW/2, y-mm(41), 5.5);
+
+  d.rect(LM+SW, y, SW, SH);
+  d.text("CARRIER CERTIFICATION / PERAKUAN PENGANGKUT", LM+SW+2, y-mm(4.5), 6, true);
+  d.hline(LM+SW+2, LM+SW+SW-2, y-mm(5.5), 0.4);
+  ["Carrier acknowledges receipt of packages and required placards.",
+   "Carrier certifies emergency response information was made available",
+   "and/or carrier has the DOT emergency response guidebook in the vehicle.",
+   "Property described above is received in good order, except as noted."].forEach((ln, i) =>
+    d.text(ln, LM+SW+2, y-mm(11)-i*mm(5.5), 5.5));
+  d.fieldLine(LM+SW+2, y-mm(30), SW-4);
+  d.text("Carrier Signature / Tandatangan Pengangkut", LM+SW+2, y-mm(33), 5.5, true);
+  d.text("Pickup Date:", LM+SW+2, y-mm(40), 5.5); d.fieldLine(LM+SW+mm(24), y-mm(40), SW-mm(26));
+  y -= SH;
+
+  d.text("RECEIVED, subject to individually determined rates or contracts agreed upon in writing between carrier and shipper, and to all applicable state and federal regulations.", LM, y-mm(4), 5);
+  d.text("NOTE: Liability Limitation for loss or damage in this shipment may be applicable. See applicable laws.", LM, y-mm(9), 5);
+
+  d.build(`Bill_of_Lading_${s(data.bl_number) || "DRAFT"}.pdf`);
+}
+
+/** Generate a Packing List PDF */
+function generatePackingListPDF(data: Record<string,unknown>): void {
+  const d = new PDFDoc();
+  const { LM, RM, PW, W, H } = d;
+  const mm = (v: number) => v * 2.835;
+  const s  = (v: unknown) => String(v ?? "");
+  const exp  = (data.exporter  || {}) as Record<string,string>;
+  const con  = (data.consignee || {}) as Record<string,string>;
+  const pkgs = (data.packages  || []) as Array<Record<string,unknown>>;
+  let y = H - mm(8);
+
+  d.rect(LM, y, PW, mm(18), PDFDoc.BLUE);
+  d.text("PACKING LIST  /  SENARAI PEMBUNGKUSAN", W/2, y-mm(7), 12, true, "C", PDFDoc.WHITE);
+  d.text("MALAYSIA EXPORT DOCUMENT", W/2, y-mm(13), 6.5, false, "C", PDFDoc.WHITE);
+  y -= mm(18);
+
+  const LW = PW*0.52; const RW = PW-LW; const RH = mm(46);
+  d.rect(LM, y, LW, RH);
+  d.text("EXPORTER / PENGEKSPORT", LM+2, y-mm(4.5), 6, true);
+  d.hline(LM+2, LM+LW-2, y-mm(5.5), 0.4);
+  [["Name / Nama:", s(exp.name)], ["Address / Alamat:", s(exp.address)], ["", ""], ["BRN:", s(exp.brn)], ["Tel:", s(exp.tel || "")]].forEach(([lbl, val], i) => {
+    d.text(lbl, LM+2, y-mm(11)-i*mm(5.5), 5.5, true);
+    if (val) d.text(val, LM+mm(20), y-mm(11)-i*mm(5.5), 6);
+    d.fieldLine(LM+mm(20), y-mm(11)-i*mm(5.5), LW-mm(22));
+  });
+  d.rect(LM+LW, y, RW, RH, PDFDoc.LGRAY);
+  [["Packing List No.:", s(data.packing_list_number)], ["Date / Tarikh:", s(data.date)],
+   ["Invoice Reference:", s(data.invoice_reference)], ["Vessel / Flight:", s(data.vessel_or_flight)],
+   ["Port of Loading:", s(data.port_of_loading)], ["Port of Discharge:", s(data.port_of_discharge)]
+  ].forEach(([lbl, val], i) => {
+    d.text(lbl, LM+LW+2, y-mm(11)-i*mm(5.5), 5.5, true);
+    if (val) d.text(val, LM+LW+mm(30), y-mm(11)-i*mm(5.5), 6);
+    d.fieldLine(LM+LW+2, y-mm(11)-i*mm(5.5), RW-4);
+  });
+  y -= RH;
+
+  const RH2 = mm(38);
+  d.rect(LM, y, LW, RH2);
+  d.text("CONSIGNEE / PENERIMA", LM+2, y-mm(4.5), 6, true);
+  d.hline(LM+2, LM+LW-2, y-mm(5.5), 0.4);
+  [["Name / Nama:", s(con.name)], ["Address / Alamat:", s(con.address)], ["", ""], ["Country:", s(con.country || con.country_code || "")]].forEach(([lbl, val], i) => {
+    d.text(lbl, LM+2, y-mm(11)-i*mm(5.5), 5.5, true);
+    if (val) d.text(val, LM+mm(20), y-mm(11)-i*mm(5.5), 6);
+    d.fieldLine(LM+mm(20), y-mm(11)-i*mm(5.5), LW-mm(22));
+  });
+  d.rect(LM+LW, y, RW, RH2, PDFDoc.LGRAY);
+  d.text("Shipping Marks / Tanda Penghantaran:", LM+LW+2, y-mm(4.5), 5.5, true);
+  d.text(s(data.shipping_marks), LM+LW+2, y-mm(11), 6);
+  d.text("Container No. / No. Kontena:", LM+LW+2, y-mm(22), 5.5, true);
+  d.fieldLine(LM+LW+2, y-mm(22), RW-4);
+  d.text(s(data.container_number), LM+LW+2, y-mm(28), 6);
+  y -= RH2;
+
+  const TH = mm(18);
+  const gcols: [number, string, string][] = [
+    [mm(10), "PKG\nNO.", "NO."],
+    [mm(12), "TYPE\nJENIS", "JENIS"],
+    [mm(60), "DESCRIPTION OF GOODS\nPERIHAL BARANG", "PERIHAL"],
+    [mm(22), "GROSS WT.\nBERAT KASAR (kg)", "KG"],
+    [mm(22), "NET WT.\nBERAT BERSIH (kg)", "KG"],
+    [mm(20), "VOLUME\nISIPADU (m³)", "M3"],
+    [PW-mm(10+12+60+22+22+20), "QTY\nINSIDE\nKUANTITI", "QTY"],
+  ];
+  let hx = LM;
+  gcols.forEach(([cw, en]) => {
+    d.rect(hx, y, cw, TH, PDFDoc.BLUE);
+    en.split("\n").forEach((ln, li) => d.text(ln, hx+cw/2, y-mm(4.5)-li*mm(5), 5.5, true, "C", PDFDoc.WHITE));
+    hx += cw;
+  });
+  y -= TH;
+
+  const DR = mm(12);
+  for (let r = 0; r < 10; r++) {
+    const p = pkgs[r];
+    const bg = r % 2 === 0 ? PDFDoc.LGRAY : undefined;
+    hx = LM;
+    gcols.forEach(([cw]) => { d.rect(hx, y, cw, DR, bg); hx += cw; });
+    if (p) {
+      const vals = [s(p.package_no), s(p.type), s(p.description), s(p.gross_weight_kg), s(p.net_weight_kg), s(p.cbm), s(p.quantity_inside)];
+      let vx = LM;
+      vals.forEach((v2, vi) => { d.text(v2, vx+2, y-DR+mm(4), 5.5); vx += gcols[vi][0]; });
+    }
+    y -= DR;
+  }
+
+  d.rect(LM, y, PW, mm(12), PDFDoc.MGRAY);
+  d.text("TOTAL / JUMLAH:", LM+2, y-mm(4.5), 6, true);
+  d.text(`Pkgs: ${s(data.total_packages)}  |  Gross: ${s(data.total_gross_weight_kg)} kg  |  Net: ${s(data.total_net_weight_kg)} kg  |  Volume: ${s(data.total_cbm)} m³`, LM+mm(28), y-mm(4.5), 6);
+  y -= mm(12);
+
+  const CH = mm(36);
+  d.rect(LM, y, PW, CH);
+  d.text('"WE HEREBY CERTIFY THAT THE ABOVE PARTICULARS ARE TRUE AND CORRECT."', W/2, y-mm(7), 7, true, "C");
+  d.text('"KAMI DENGAN INI MENGESAHKAN BAHAWA BUTIR-BUTIR DI ATAS ADALAH BENAR DAN BETUL."', W/2, y-mm(13), 5.5, false, "C");
+  d.fieldLine(LM+2, y-mm(24), PW/2-4);
+  d.text("Authorised Signature / Tandatangan Dibenarkan", LM+2, y-mm(27), 5.5, true);
+  d.text("Name / Nama:", LM+PW/2, y-mm(19), 5.5, true); d.fieldLine(LM+PW/2+mm(18), y-mm(19), PW/2-mm(20));
+  d.text("Designation / Jawatan:", LM+PW/2, y-mm(25), 5.5, true); d.fieldLine(LM+PW/2+mm(28), y-mm(25), PW/2-mm(30));
+  d.text("Date / Tarikh:", LM+PW/2, y-mm(31), 5.5, true); d.fieldLine(LM+PW/2+mm(20), y-mm(31), PW/2-mm(22));
+  y -= CH;
+  d.text("THESE COMMODITIES WERE EXPORTED FROM MALAYSIA IN ACCORDANCE WITH EXPORT REGULATIONS.", LM, y-mm(4), 5);
+
+  d.build(`Packing_List_${s(data.packing_list_number) || "DRAFT"}.pdf`);
+}
+
+/** Generate a Certificate of Origin PDF (ATIGA Form D / Standard CO) */
+function generateCOOPDF(data: Record<string,unknown>): void {
+  const d = new PDFDoc();
+  const { LM, RM, PW, W, H } = d;
+  const mm = (v: number) => v * 2.835;
+  const s  = (v: unknown) => String(v ?? "");
+  const exp  = (data.exporter  || {}) as Record<string,string>;
+  const con  = (data.consignee || {}) as Record<string,string>;
+  const trp  = (data.transport_details || {}) as Record<string,string>;
+  const goods = (data.goods || []) as Array<Record<string,unknown>>;
+  let y = H - mm(8);
+
+  d.rect(LM, y, PW, mm(22), PDFDoc.BLUE);
+  d.text("CERTIFICATE OF ORIGIN", W/2, y-mm(7), 14, true, "C", PDFDoc.WHITE);
+  d.text(s(data.form_type) || "FORM D (ATIGA) / STANDARD CO", W/2, y-mm(13), 7, false, "C", PDFDoc.WHITE);
+  d.text(`Issuing Body: ${s(data.issuing_body) || "MATRADE"}    CO No: ${s(data.co_number)}    Date: ${s(data.co_date)}`, W/2, y-mm(18), 6, false, "C", PDFDoc.WHITE);
+  y -= mm(22);
+
+  const LW = PW*0.5; const RW = PW-LW; const RH = mm(44);
+  d.rect(LM, y, LW, RH);
+  d.text("1. EXPORTER / PENGEKSPORT", LM+2, y-mm(4.5), 6, true);
+  d.hline(LM+2, LM+LW-2, y-mm(5.5), 0.4);
+  [["Name:", s(exp.name)], ["Address:", s(exp.address)], ["", ""], ["BRN:", s(exp.brn)], ["Country:", "Malaysia"]].forEach(([lbl, val], i) => {
+    d.text(lbl, LM+2, y-mm(11)-i*mm(5.5), 5.5, true);
+    if (val) d.text(val, LM+mm(16), y-mm(11)-i*mm(5.5), 6);
+    d.fieldLine(LM+mm(16), y-mm(11)-i*mm(5.5), LW-mm(18));
+  });
+  d.rect(LM+LW, y, RW, RH);
+  d.text("2. CONSIGNEE / PENERIMA", LM+LW+2, y-mm(4.5), 6, true);
+  d.hline(LM+LW+2, LM+LW+RW-2, y-mm(5.5), 0.4);
+  [["Name:", s(con.name)], ["Address:", s(con.address)], ["", ""], ["Country:", s(con.country)]].forEach(([lbl, val], i) => {
+    d.text(lbl, LM+LW+2, y-mm(11)-i*mm(5.5), 5.5, true);
+    if (val) d.text(val, LM+LW+mm(16), y-mm(11)-i*mm(5.5), 6);
+    d.fieldLine(LM+LW+mm(16), y-mm(11)-i*mm(5.5), RW-mm(18));
+  });
+  y -= RH;
+
+  const RH2 = mm(28);
+  d.rect(LM, y, LW, RH2);
+  d.text("3. TRANSPORT DETAILS / BUTIR PENGANGKUTAN", LM+2, y-mm(4.5), 6, true);
+  [["Vessel / Flight:", s(trp.vessel_or_flight)], ["Port of Loading:", s(trp.port_of_loading)], ["Port of Discharge:", s(trp.port_of_discharge)], ["Departure Date:", s(trp.departure_date)]].forEach(([lbl, val], i) => {
+    d.text(lbl, LM+2, y-mm(11)-i*mm(4.5), 5.5, true);
+    d.text(val, LM+mm(28), y-mm(11)-i*mm(4.5), 6);
+  });
+  d.rect(LM+LW, y, RW, RH2, PDFDoc.LGRAY);
+  d.text("4. INVOICE REFERENCE / RUJUKAN INVOIS", LM+LW+2, y-mm(4.5), 6, true);
+  d.text(s(data.invoice_reference), LM+LW+2, y-mm(12), 7, true);
+  d.text("Origin Criterion / Kriteria Asal:", LM+LW+2, y-mm(20), 5.5, true);
+  d.text("WO — Wholly Obtained / Produced in Malaysia", LM+LW+2, y-mm(26), 6);
+  y -= RH2;
+
+  const TH = mm(16);
+  const gcols2: [number, string][] = [
+    [mm(10), "ITEM\nNO."],
+    [mm(72), "DESCRIPTION OF GOODS\nPERIHAL BARANG"],
+    [mm(20), "HS CODE\n(AHTN 2022)"],
+    [mm(14), "ORIGIN\nCRITERION"],
+    [mm(24), "QUANTITY &\nUNIT (kg/pcs)"],
+    [mm(22), "GROSS WT.\n(kg)"],
+    [PW-mm(10+72+20+14+24+22), "FOB VALUE\n(MYR)"],
+  ];
+  let hx = LM;
+  gcols2.forEach(([cw, hdr]) => {
+    d.rect(hx, y, cw, TH, PDFDoc.BLUE);
+    hdr.split("\n").forEach((ln, li) => d.text(ln, hx+cw/2, y-mm(4)-li*mm(5), 5, true, "C", PDFDoc.WHITE));
+    hx += cw;
+  });
+  y -= TH;
+  const DR2 = mm(11);
+  for (let r = 0; r < 6; r++) {
+    const g = goods[r];
+    const bg = r % 2 === 0 ? PDFDoc.LGRAY : undefined;
+    hx = LM;
+    gcols2.forEach(([cw]) => { d.rect(hx, y, cw, DR2, bg); hx += cw; });
+    if (g) {
+      const vals = [s(g.item_no), s(g.description), s(g.hs_code), s(g.origin_criterion || "WO"), s(g.quantity), s(g.gross_weight_kg), s(g.fob_value_myr)];
+      let vx = LM;
+      vals.forEach((v2, vi) => { d.text(v2, vx+2, y-DR2+mm(3.5), 5.5); vx += gcols2[vi][0]; });
+    }
+    y -= DR2;
+  }
+  y -= mm(4);
+
+  const SH = mm(52);
+  d.rect(LM, y, PW*0.55, SH);
+  d.text("DECLARATION BY EXPORTER / PERAKUAN OLEH PENGEKSPORT", LM+2, y-mm(4.5), 5.5, true);
+  d.hline(LM+2, LM+PW*0.55-2, y-mm(5.5), 0.3);
+  ["The undersigned hereby declares that the above stated information",
+   "is correct; that the goods described were produced/manufactured",
+   "in Malaysia; and that they comply with the origin requirements",
+   `specified for export to ${s(con.country)}.`].forEach((ln, i) => d.text(ln, LM+2, y-mm(11)-i*mm(5.5), 5.5));
+  d.fieldLine(LM+2, y-mm(36), PW*0.55-4);
+  d.text("Authorised Signature / Tandatangan", LM+2, y-mm(39), 5.5, true);
+  d.text("Name:", LM+2, y-mm(44), 5.5); d.fieldLine(LM+mm(12), y-mm(44), PW*0.55-mm(14));
+  d.text("Date:", LM+2, y-mm(49), 5.5); d.fieldLine(LM+mm(12), y-mm(49), mm(30));
+  d.text("Designation:", LM+mm(50), y-mm(49), 5.5); d.fieldLine(LM+mm(65), y-mm(49), PW*0.55-mm(67));
+
+  d.rect(LM+PW*0.55, y, PW*0.45, SH, PDFDoc.LGRAY);
+  d.text("FOR OFFICIAL USE / UNTUK KEGUNAAN RASMI", LM+PW*0.55+2, y-mm(4.5), 5.5, true);
+  d.hline(LM+PW*0.55+2, LM+PW*0.55+PW*0.45-2, y-mm(5.5), 0.3);
+  d.text(`Issuing Body: ${s(data.issuing_body) || "MATRADE"}`, LM+PW*0.55+2, y-mm(12), 5.5, true);
+  d.text("Certification:", LM+PW*0.55+2, y-mm(20), 5.5, true);
+  d.text("It is hereby certified that the declaration by", LM+PW*0.55+2, y-mm(26), 5.5);
+  d.text("the exporter is correct.", LM+PW*0.55+2, y-mm(31), 5.5);
+  d.fieldLine(LM+PW*0.55+2, y-mm(40), PW*0.45-4);
+  d.text("Official Signature & Stamp", LM+PW*0.55+2, y-mm(43), 5.5, true);
+  d.text("Date:", LM+PW*0.55+2, y-mm(49), 5.5); d.fieldLine(LM+PW*0.55+mm(12), y-mm(49), PW*0.45-mm(14));
+  y -= SH;
+
+  d.text("This Certificate of Origin is issued pursuant to the ASEAN Trade in Goods Agreement (ATIGA) and Malaysian regulations on rules of origin.", LM, y-mm(5), 5);
+
+  d.build(`Certificate_of_Origin_${s(data.co_number) || "DRAFT"}.pdf`);
+}
+
+/** Legacy makePDF — kept as final fallback for SIRIM/Halal checklists */
 function makePDF(title: string, lines: string[]): void {
   const W = 595, H = 842, M = 48;
   let y = H - M;
@@ -793,13 +1709,11 @@ function makePDF(title: string, lines: string[]): void {
   };
   push(14, title);
   push(9, `Generated: ${new Date().toLocaleString("en-MY")}`);
-  push(1, "");
   ops.push(`${M} ${y + 4} ${W - M * 2} 0.4 re f`); y -= 10;
-  lines.forEach(l => {
-    if (!l.trim()) { y -= 6; return; }
-    const bold = l.startsWith("##");
-    push(bold ? 10 : 8, bold ? l.replace(/^##\s*/, "") : l);
-  });
+  for (const l of lines) {
+    if (!l.trim()) { y -= 6; continue; }
+    push(l.startsWith("##") ? 10 : 8, l.startsWith("##") ? l.replace(/^##\s*/, "") : l);
+  }
   const stream = ops.join("\n");
   const pdf = `%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 ${W} ${H}]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj\n4 0 obj<</Length ${stream.length}>>\nstream\n${stream}\nendstream\nendobj\n5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\nxref\n0 6\n0000000000 65535 f\ntrailer<</Size 6/Root 1 0 R>>\nstartxref\n9\n%%EOF`;
   const a = Object.assign(document.createElement("a"), {
@@ -819,49 +1733,57 @@ function flatLines(obj: Record<string,unknown>, pre = ""): string[] {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MAIN COMPONENT — AssistantPage
+// MAIN COMPONENT
 // ─────────────────────────────────────────────────────────────────────────────
 export default function AssistantPage() {
   const navigate = useNavigate();
 
-  const [sessionId, setSessionId]       = useState<string | null>(null);
+  const [sessionId, setSessionId]     = useState<string | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
-  const [completed, setCompleted]       = useState<Set<number>>(new Set());
-  const [activeStep, setActiveStep]     = useState(0);
-  const [permitFlags, setPermitFlags]   = useState<PermitFlags>(DEFAULT_PERMIT_FLAGS);
-  const sessionData                     = useRef<Record<string, unknown>>({});
-  const chatHistory                     = useRef<{role:string;content:string}[]>([]);
+  const [completed, setCompleted]     = useState<Set<number>>(new Set());
+  const [activeStep, setActiveStep]   = useState(0);
+  const [permitFlags, setPermitFlags] = useState<PermitFlags>(DEFAULT_PERMIT_FLAGS);
 
+  // Session data accumulated across steps
+  const sessionData = useRef<Record<string, unknown>>({});
+
+  // Modal visibility
   const [modal, setModal] = useState<
     null | "consignee" | "valuation" | "shipment" | "digital-access" | "signature" | "k2-preview"
   >(null);
 
+  // Permit upload tracking (for Step 3)
   const [requiredPermits, setRequiredPermits] = useState<Array<{ name: string; key: string; uploaded: boolean }>>([]);
-  const [generatingId, setGeneratingId]       = useState<string | null>(null);
-  const [generatedIds, setGeneratedIds]       = useState<Set<string>>(new Set());
-  const [signed, setSigned]                   = useState(false);
-  const [k2Data, setK2Data]                   = useState<Record<string, unknown> | null>(null);
-  const [landedCost, setLandedCost]           = useState({ fob: 0, freight: 0, insurance: 0, duty: 0, total: 0, savings: 0, bestFta: "", finalised: false });
+
+  // Generated docs & K2 data
+  const [generatingId, setGeneratingId] = useState<string | null>(null);
+  const [generatedIds, setGeneratedIds] = useState<Set<string>>(new Set());
+  const [signed, setSigned] = useState(false);
+  const [k2Data, setK2Data] = useState<Record<string, unknown> | null>(null);
+
+  // Landed cost state (live)
+  const [landedCost, setLandedCost] = useState({ fob: 0, freight: 0, insurance: 0, duty: 0, total: 0, savings: 0, bestFta: "", finalised: false });
 
   const [messages, setMessages] = useState<Message[]>([
     { id: "welcome", role: "assistant", kind: "text", content: "Hi — I'm your Compliance Architect. I'll guide you through every regulatory dependency in order: Entity → Consignee → HS Code → Permits → Digital Access → Valuation → Logistics → Docs & Signatory → K2. Let's start." },
     STEP_FLOW[0].intro,
   ]);
-  const [input, setInput]         = useState("");
-  const [sending, setSending]     = useState(false);
+  const [input, setInput]     = useState("");
+  const [sending, setSending] = useState(false);
   const [modalLoading, setModalLoading] = useState(false);
 
   const fileInputRef     = useRef<HTMLInputElement>(null);
   const pendingUploadRef = useRef<{ action: string; accept: string; endpoint: string } | null>(null);
   const bottomRef        = useRef<HTMLDivElement>(null);
+  const chatHistoryRef   = useRef<{role:string;content:string}[]>([]);
 
-  // ── Session init ──────────────────────────────────────────────────────────
   useEffect(() => {
     api.createSession()
       .then((s: { session_id: string }) => setSessionId(s.session_id))
       .catch((err: Error) => {
+        console.warn("Demo mode:", err.message);
         setSessionError(err.message);
-        setSessionId("demo-" + genId());
+        setSessionId("demo-" + Math.random().toString(36).slice(2));
       });
   }, []);
 
@@ -870,28 +1792,34 @@ export default function AssistantPage() {
   const total    = STEPS.length;
   const progress = Math.round((completed.size / total) * 100);
 
-  const docsWithStatus  = EXPORT_DOCS.map(d => ({ ...d, status: docStatus(d, completed) }));
-  const readyDocs       = docsWithStatus.filter(d => d.status === "ready");
-  const partialDocs     = docsWithStatus.filter(d => d.status === "partial");
-  const lockedDocs      = docsWithStatus.filter(d => d.status === "locked");
+  const docsWithStatus = EXPORT_DOCS.map(d => ({ ...d, status: docStatus(d, completed) }));
+  const readyDocs   = docsWithStatus.filter(d => d.status === "ready");
+  const partialDocs = docsWithStatus.filter(d => d.status === "partial");
+  const lockedDocs  = docsWithStatus.filter(d => d.status === "locked");
+
   const gatingDocs      = EXPORT_DOCS.filter(d => isGating(d, permitFlags));
   const canProceed      = gatingDocs.length > 0 && gatingDocs.every(d => generatedIds.has(d.id));
   const gatingGenerated = gatingDocs.filter(d => generatedIds.has(d.id)).length;
 
-  // ── Helpers ───────────────────────────────────────────────────────────────
-  const addMsg       = (msg: Message) => setMessages(m => [...m, msg]);
-  const removeMsg    = (id: string)   => setMessages(m => m.filter(x => x.id !== id));
+  // ── Core message helpers ───────────────────────────────────────────────────
+  const addMsg    = useCallback((msg: Message) => setMessages(m => [...m, msg]), []);
+  const removeMsg = useCallback((pid: string)  => setMessages(m => m.filter(x => x.id !== pid)), []);
 
+  // ── Advance UI to next step ────────────────────────────────────────────────
   const advanceUI = useCallback(() => {
-    setMessages(m => {
-      const next = [...m, STEP_FLOW[activeStep].onComplete];
-      const nextStep = activeStep + 1;
-      if (nextStep < total && STEP_FLOW[nextStep]) next.push(STEP_FLOW[nextStep].intro);
-      return next;
+    setActiveStep(prev => {
+      const cur = prev;
+      const next = cur + 1;
+      setCompleted(c => new Set([...c, cur]));
+      setMessages(m => {
+        const msgs = [...m];
+        if (STEP_FLOW[cur])  msgs.push(STEP_FLOW[cur].onComplete);
+        if (next < total && STEP_FLOW[next]) msgs.push(STEP_FLOW[next].intro);
+        return msgs;
+      });
+      return Math.min(next, total - 1);
     });
-    setCompleted(prev => new Set([...prev, activeStep]));
-    setActiveStep(s => Math.min(s + 1, total - 1));
-  }, [activeStep, total]);
+  }, [total]);
 
   const waitForSession = useCallback((): Promise<string> => {
     return new Promise(resolve => {
@@ -907,19 +1835,17 @@ export default function AssistantPage() {
     });
   }, [sessionId]);
 
-  const withBusy = useCallback(async (fn: () => Promise<void>, label = "Processing…") => {
+  const runWithFeedback = useCallback(async (fn: () => Promise<void>, label = "Processing…") => {
     const pid = genId();
     addMsg({ id: pid, role: "assistant", kind: "processing", content: label });
     setSending(true);
     try   { await fn(); }
     catch (err) { addMsg({ id: genId(), role: "assistant", kind: "text", content: `⚠️ ${err instanceof Error ? err.message : String(err)}` }); }
     finally     { removeMsg(pid); setSending(false); }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // alias for legacy runWithFeedback calls in handleAction
-  const runWithFeedback = withBusy;
-
-  // ── Build context string for all doc/K2 generation ────────────────────────
+  // ── Build context string for doc/K2 generation ────────────────────────────
   const buildCtx = useCallback((): string => {
     const e  = (sessionData.current.entity          as Record<string,unknown>) ?? {};
     const c  = (sessionData.current.consignee        as Record<string,unknown>) ?? {};
@@ -936,17 +1862,18 @@ export default function AssistantPage() {
       `MY Export Duty: ${cl.malaysia_export_duty ?? 0}%, Destination Import Duty: ${cl.destination_import_duty ?? 0}%`,
       `FTA available: ${(cl.fta_available as string[] ?? []).join(", ") || "None"}`,
       `FOB: RM${v.fob_myr ?? 0}, Freight: RM${v.freight_myr ?? 0}, Insurance: RM${v.insurance_myr ?? 0}, CIF: RM${v.cif_myr ?? 0}`,
-      `Duty: RM${v.estimated_duty_myr ?? 0}, Best FTA: ${v.best_fta ?? "None"}, Form required: ${v.form_required ?? "N/A"}`,
-      `Invoice currency: ${v.invoice_currency ?? "MYR"}, FX rate to MYR: ${v.exchange_rate_to_myr ?? 1}`,
-      `Mode: ${l.mode ?? "SEA"}, Vessel/Flight: ${(l as any).vessel ?? (l as any).flight ?? "TBC"}, Voyage: ${(l as any).voyage_number ?? "TBC"}`,
-      `POL: ${(l as any).pol ?? "Port Klang"}, POD: ${(l as any).pod ?? "N/A"}, Export date: ${(l as any).export_date ?? "N/A"}`,
-      `Gross wt: ${(l as any).weight_kg ?? 0} kg, Net wt: ${(l as any).net_weight_kg ?? 0} kg, CBM: ${(l as any).cbm ?? 0}`,
-      `Packages: ${(l as any).number_of_packages ?? 0} x ${(l as any).package_type ?? "CTN"}, Container: ${(l as any).container_number ?? "N/A"}`,
-      `Signatory: ${(l as any).signatory_name ?? "N/A"}, ${(l as any).signatory_designation ?? "N/A"}, IC/Passport: ${(l as any).signatory_ic_passport ?? "N/A"}`,
+      `Duty: RM${v.estimated_duty_myr ?? 0}, Best FTA: ${v.best_fta ?? "None"}, Form: ${v.form_required ?? "N/A"}`,
+      `Invoice currency: ${v.invoice_currency ?? "MYR"}, FX rate: ${v.exchange_rate_to_myr ?? 1}`,
+      `Mode: ${l.mode ?? "SEA"}, Vessel: ${l.vessel ?? "TBC"}, Voyage: ${l.voyage_number ?? "TBC"}`,
+      `POL: ${l.pol ?? "Port Klang"}, POD: ${l.pod ?? "N/A"}, Export date: ${l.export_date ?? "N/A"}`,
+      `Gross wt: ${l.weight_kg ?? 0} kg, Net wt: ${l.net_weight_kg ?? 0} kg, CBM: ${l.cbm ?? 0}`,
+      `Packages: ${l.number_of_packages ?? 0} x ${l.package_type ?? "CTN"}, Container: ${l.container_number ?? "N/A"}`,
+      `Signatory: ${l.signatory_name ?? "N/A"}, ${l.signatory_designation ?? "N/A"}, IC: ${l.signatory_ic_passport ?? "N/A"}`,
     ].join("\n");
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── STEP 0: SSM Upload ────────────────────────────────────────────────────
+  // ── STEP 0: SSM / product / permit file upload ────────────────────────────
   const handleFileSelected = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = "";
@@ -956,602 +1883,548 @@ export default function AssistantPage() {
 
     addMsg({ id: genId(), role: "user", kind: "upload", content: "uploaded-file", fileName: file.name });
 
-    await withBusy(async () => {
-      const b64  = await toB64(file);
-      const mime = mimeOf(file);
+    await runWithFeedback(async () => {
+      const b64  = await fileToB64(file);
+      const mime = fileMime(file);
 
-      // ── SSM Certificate ──────────────────────────────────────────────────
+      // ── SSM Certificate ────────────────────────────────────────────────
       if (endpoint === "/entity/upload-ssm") {
-        const result = await geminiVision(b64, mime,
-          `You are a Malaysian SSM (Suruhanjaya Syarikat Malaysia) certificate expert.
-Extract ALL fields from this company registration certificate and validate it.
-Return JSON:
-{
-  "is_valid": true,
-  "company_name": "",
-  "registration_number": "",
-  "registration_date": "",
-  "company_type": "Sdn Bhd|Bhd|Enterprise|LLP|Partnership",
-  "company_status": "active|struck_off|wound_up|unknown",
-  "registered_address": "",
-  "directors": [{"name":"","nric":"","designation":"Director"}],
-  "paid_up_capital": "",
-  "blacklisted": false,
-  "sst_registered": false,
-  "compliance_flags": [],
-  "missing_fields": [],
-  "confidence": 0.9
-}`
-        );
+        if (completed.has(0)) {
+          addMsg({ id: genId(), role: "assistant", kind: "text",
+            content: "✅ Entity is already verified. No need to re-upload the SSM." });
+          return;
+        }
 
-        // also sync to backend if online (non-blocking)
+        // ── IMPROVED SSM PROMPT ────────────────────────────────────────
+        const SSM_PROMPT = `You are an OCR extraction engine for Malaysian company registration documents.
+
+DOCUMENT TYPES you may receive:
+- SSM Form 9 / Certificate of Incorporation (Perakuan Pemerbadanan)
+- SSM Form D (Business Registration Certificate)
+- MyCoID digital certificate (PDF or screenshot)
+- SSM e-Info company printout
+- Bizfile / SSM portal screenshot
+- Any document showing a Malaysian company BRN
+
+EXTRACTION STRATEGY — try ALL of these patterns in order:
+1. company_name: Look for "NAMA SYARIKAT", "Company Name:", "Name of Company", the large bold text at the top, or any text before "SDN BHD" / "BHD" / "ENTERPRISE" / "PLT" / "LLP". Include the full legal suffix.
+2. registration_number: Look for "No. Syarikat", "Company No.", "No. Pendaftaran", "Registration No.", "BRN:", "ROC:", or any 12-digit number or format like "1234567-A" or "202301XXXXXX". Copy digits and dashes exactly.
+3. registration_date: Look for "Tarikh Pemerbadanan", "Date of Incorporation", "Tarikh Pendaftaran". Format DD/MM/YYYY.
+4. company_type: Derive from name suffix: "Sdn Bhd" = private limited, "Bhd" = public limited, "Enterprise" = sole prop/partnership, "PLT" or "LLP" = limited liability partnership.
+5. company_status: Look for "AKTIF", "ACTIVE", "STRUCK OFF", "WOUND UP". Default to "active" if document appears valid.
+6. registered_address: Text block after "Alamat Berdaftar", "Registered Address", "Alamat Perniagaan Berdaftar".
+7. directors: Names and NRIC from Form 49 table, or any "Director" / "Pengarah" section.
+8. paid_up_capital: "Modal Berbayar", "Paid-up Capital", include RM symbol and amount.
+9. sst_registered: true only if "SST" or "GST" registration number is explicitly present.
+
+CRITICAL PARTIAL EXTRACTION RULES:
+- Extract WHATEVER you can read, even if only partial. NEVER return empty string "" for a field you can at least partially read.
+- If company name is blurry but you can read "ABC SDN", return "ABC SDN BHD" (best effort).
+- If BRN is partially visible, return what you can see.
+- Set is_valid=true if BOTH company_name AND registration_number have at least SOME readable content (even partial).
+- Set confidence: 0.9=fully clear, 0.7=mostly readable, 0.5=partial, 0.3=very blurry but some text visible, 0.1=almost unreadable.
+- If the document is clearly a company registration document but very blurry, still attempt extraction and note issues in extraction_notes.
+- NEVER return empty strings "" when any text is visible — always make your best effort.
+
+Return ONLY valid JSON, no markdown fences, no explanation:
+{"is_valid":false,"company_name":"","registration_number":"","registration_date":"","company_type":"","company_status":"active","registered_address":"","directors":[{"name":"","nric":"","designation":"Director"}],"paid_up_capital":"","blacklisted":false,"sst_registered":false,"compliance_flags":[],"missing_fields":[],"confidence":0.0,"extraction_notes":""}`;
+
+        const result = await geminiVision(b64, mime, SSM_PROMPT);
+
         const sid = await waitForSession();
         try {
           await api.verifyEntity(sid, {
-            company_name:        result.company_name        ?? "Extracted",
-            registration_number: result.registration_number ?? "000000000000",
+            company_name:        String(result.company_name        ?? "Extracted"),
+            registration_number: String(result.registration_number ?? "000000000000"),
           });
         } catch { /* offline ok */ }
 
         sessionData.current.entity = result;
 
-        const dirs = (result.directors as Array<{name:string}> ?? []).map(d => d.name).join(", ");
+        const dirs = (result.directors as Array<{name:string}> ?? [])
+          .map(d => d.name)
+          .filter(Boolean)
+          .join(", ");
+
+        // Build display fields, only show "—" if truly empty
+        const extractedFields: Record<string, string> = {
+          "Company Name":    hasMeaning(result.company_name)        ? String(result.company_name)        : "—",
+          "BRN":             hasMeaning(result.registration_number) ? String(result.registration_number) : "—",
+          "Company Type":    hasMeaning(result.company_type)        ? String(result.company_type)        : "—",
+          "Registered Date": hasMeaning(result.registration_date)   ? String(result.registration_date)   : "—",
+          "Status":          hasMeaning(result.company_status)      ? String(result.company_status)      : "Active",
+          "Directors":       dirs || "—",
+          "SST Registered":  result.sst_registered ? "Yes" : "No",
+          "Paid-up Capital": hasMeaning(result.paid_up_capital)     ? String(result.paid_up_capital)     : "—",
+        };
+
+        const confidence   = Number(result.confidence ?? 0);
+        const nameOk       = hasMeaning(result.company_name);
+        const brnOk        = hasMeaning(result.registration_number);
+        const anyFieldRead = nameOk || brnOk ||
+          hasMeaning(result.company_type) ||
+          hasMeaning(result.registered_address) ||
+          hasMeaning(result.registration_date);
+
+        // Show extracted card always
         addMsg({
-          id: genId(), role: "assistant", kind: "extracted",
-          content: "SSM certificate scanned. Here's what I extracted:",
-          valid: Boolean(result.is_valid) && !result.blacklisted,
-          fields: {
-            "Company Name":     String(result.company_name     ?? "—"),
-            "BRN":              String(result.registration_number ?? "—"),
-            "Company Type":     String(result.company_type     ?? "—"),
-            "Registered Date":  String(result.registration_date ?? "—"),
-            "Status":           String(result.company_status   ?? "—"),
-            "Directors":        dirs || "—",
-            "SST Registered":   result.sst_registered ? "Yes" : "No",
-            "Paid-up Capital":  String(result.paid_up_capital  ?? "—"),
-          },
+          id: genId(),
+          role: "assistant",
+          kind: "extracted",
+          content: anyFieldRead
+            ? `SSM certificate scanned (confidence: ${Math.round(confidence * 100)}%). Here's what I extracted:`
+            : "SSM certificate received — having difficulty reading the document:",
+          valid: Boolean(result.is_valid) && !result.blacklisted && nameOk && brnOk,
+          fields: extractedFields,
         });
 
-        if (result.is_valid && !result.blacklisted) {
+        if (result.is_valid && !result.blacklisted && nameOk && brnOk) {
+          // ✅ Full clean extraction — proceed automatically
+          addMsg({
+            id: genId(),
+            role: "assistant",
+            kind: "text",
+            content: "✅ Entity verified successfully. Proceeding to Step 2 — Consignee Details.",
+          });
           advanceUI();
+
+        } else if (anyFieldRead || confidence >= 0.25) {
+          // ⚠️ Partial extraction — let user confirm or correct missing fields
+          const missingFieldNames: string[] = [];
+          if (!nameOk) missingFieldNames.push("Company Name");
+          if (!brnOk)  missingFieldNames.push("BRN / Registration Number");
+
+          addMsg({
+            id: genId(),
+            role: "assistant",
+            kind: "text",
+            content:
+              `⚠️ **Partial extraction** — ${
+                missingFieldNames.length > 0
+                  ? `missing: **${missingFieldNames.join(", ")}**`
+                  : "some fields could not be confirmed"
+              }.\n\n` +
+              `**Options to proceed:**\n\n` +
+              `• Type **"confirm"** if the extracted details are correct\n` +
+              `• Reply with corrections in this format:\n\n` +
+              `> Company Name: ABC SDN BHD\n` +
+              `> BRN: 202301012345\n` +
+              `> Company Type: Sdn Bhd\n` +
+              `> Directors: Ahmad bin Ali\n\n` +
+              (result.extraction_notes ? `_Scan note: ${result.extraction_notes}_` : ""),
+          });
+          // Mark as partial so the chat handler can process corrections or "confirm"
+          sessionData.current.entity = { ...result, partial_extraction: true };
+
         } else {
-          const issues = (result.missing_fields as string[] ?? []).join(", ") || (result.compliance_flags as string[] ?? []).join(", ") || "Document unreadable";
-          addMsg({ id: genId(), role: "assistant", kind: "text", content: `⚠️ Validation issues: ${issues}. Please re-upload a clearer copy or proceed with manual entry.` });
+          // ❌ Truly unreadable — ask for re-upload or manual entry
+          addMsg({
+            id: genId(),
+            role: "assistant",
+            kind: "text",
+            content:
+              `❌ **Could not read the document** — the image quality is too low for extraction.\n\n` +
+              `**Option 1:** Re-upload a clearer photo:\n` +
+              `• Ensure good lighting (no shadows or glare)\n` +
+              `• Full page visible, not cropped\n` +
+              `• No motion blur\n\n` +
+              `**Option 2:** Enter details manually by replying:\n\n` +
+              `> Company Name: ABC SDN BHD\n` +
+              `> BRN: 202301012345\n` +
+              `> Company Type: Sdn Bhd\n` +
+              `> Status: Active\n` +
+              `> Directors: Ahmad bin Ali\n\n` +
+              (result.extraction_notes ? `_Scan note: ${result.extraction_notes}_` : ""),
+          });
+          // Still mark as partial so manual entry chat handler works
+          sessionData.current.entity = { ...result, partial_extraction: true };
         }
 
-      // ── Product Photo / Spec Sheet ───────────────────────────────────────
+      // ── Product Photo ──────────────────────────────────────────────────
       } else if (endpoint === "/classification/upload-product") {
-        const destCountry = (sessionData.current.consignee as Record<string,string>)?.buyer_country ?? "Unknown";
+        if (!completed.has(1)) {
+          addMsg({ id: genId(), role: "assistant", kind: "blocked",
+            content: "Step 3 is locked. Complete Step 2 — 'Consignee Details' — first before classifying your product." });
+          return;
+        }
+        if (completed.has(2)) {
+          addMsg({ id: genId(), role: "assistant", kind: "text",
+            content: "✅ Product is already classified. Proceed to the next step." });
+          return;
+        }
+        const destCountry = String((sessionData.current.consignee as Record<string,string>)?.buyer_country ?? "Unknown");
         const result = await geminiVision(b64, mime,
-          `You are an HS tariff classification expert for Malaysian exports (WCO HS 2022 / AHTN 2022).
-Identify and classify this product. Destination country: ${destCountry}.
-Return JSON:
-{
-  "hs_code": "XXXX.XX.XX",
-  "hs_description": "",
-  "chapter": "",
-  "chapter_description": "",
-  "malaysia_export_duty": 0.0,
-  "destination_import_duty": 0.0,
-  "preferential_duty_rates": {"ATIGA": 0.0, "CPTPP": 0.0, "RCEP": 0.0},
-  "fta_available": [],
-  "permit_required": [],
-  "restrictions": [],
-  "export_prohibited": false,
-  "strategic_goods": false,
-  "dual_use": false,
-  "sirim_required": false,
-  "halal_required": false,
-  "miti_required": false,
-  "dvs_required": false,
-  "phytosanitary_required": false,
-  "confidence": 0.9,
-  "classification_notes": []
-}`
+          `You are a WCO HS 2022 / AHTN 2022 tariff classification engine for Malaysian exports to ${destCountry}.
+
+STEP 1 — IDENTIFY the product precisely:
+- Read ALL visible text: brand, model number, product name, ingredient list, material composition, technical specifications
+- If a label, invoice, or spec sheet is shown extract every word — product details are in the text, not just the image
+- Do not guess — if the product is ambiguous, set identified=false
+
+STEP 2 — CLASSIFY to 8-digit AHTN code:
+- Use the most specific subheading. Examples:
+  Palm oil crude: 1511.10.00 | Refined palm oil: 1511.90.00
+  Latex rubber gloves: 4015.11.00 | Nitrile gloves: 4015.19.10
+  Printed circuit boards (bare): 8534.00.00 | Assembled PCB: 8473.30.90
+  USB cable: 8544.42.90 | HDMI cable: 8544.42.10
+  Instant noodles: 1902.30.10 | Rice: 1006.30.90
+- destination_import_duty: MFN tariff rate for ${destCountry} (use 0 if ASEAN/FTA applicable)
+- fta_available: list all applicable FTAs — check ATIGA (all ASEAN), CPTPP (JP/AU/NZ/CA/MX/SG/VN/BN/PE/CL), RCEP (ASEAN+CN/JP/KR/AU/NZ), MAFTA, MJEPA, MKFTA, MIFTA
+
+STEP 3 — CHECK Malaysian export permit requirements:
+- sirim_required: electrical/electronic goods (HS 84-85), safety equipment, toys, helmets, cables
+- halal_required: food/beverages (HS 02-24), cosmetics (33), pharmaceuticals (30) to Muslim-majority countries
+- miti_required: steel (72-73), timber/wood (44-46), petroleum (27), strategic/dual-use goods
+- strategic_goods: dual-use under Strategic Goods (Control) Act 2010 — military, cryptography, chemicals
+
+confidence scoring: 0.9+ clear label with full specs | 0.6-0.8 identifiable product, partial label | below 0.5 only if truly unreadable
+
+Return ONLY valid JSON:
+{"identified":false,"hs_code":"","hs_description":"","product_name":"","malaysia_export_duty":0.0,"destination_import_duty":0.0,"preferential_duty_rates":{"ATIGA":0.0,"CPTPP":0.0,"RCEP":0.0},"fta_available":[],"permit_required":[],"export_prohibited":false,"strategic_goods":false,"sirim_required":false,"halal_required":false,"miti_required":false,"confidence":0.0,"classification_notes":[],"identification_notes":""}`
         );
 
-        sessionData.current.classification = result;
+        const hsCode = String(result.hs_code ?? "").trim();
+        const identified = Boolean(result.identified) &&
+          hsCode.length > 0 &&
+          hsCode !== "XXXX.XX.XX" &&
+          !hsCode.startsWith("XXXX") &&
+          Number(result.confidence ?? 0) > 0.3;
 
+        if (!identified) {
+          addMsg({ id: genId(), role: "assistant", kind: "text",
+            content: `⚠️ I couldn't clearly identify the product from this image.\n\n${result.identification_notes ? `Reason: ${result.identification_notes}\n\n` : ""}**Please try one of these:**\n- Upload a clearer photo (front label, product spec sheet, or packaging)\n- Type your product description in the chat instead (e.g. "palm oil crude", "rubber gloves latex", "printed circuit board")`,
+          });
+          return;
+        }
+
+        sessionData.current.classification = result;
         addMsg({
           id: genId(), role: "assistant", kind: "hs-result",
           content: "Product identified and classified:",
-          hsCode:        String(result.hs_code        ?? "—"),
+          hsCode:        hsCode,
           description:   String(result.hs_description ?? "—"),
           duty:          Number(result.destination_import_duty ?? 0),
           fta:           (result.fta_available as string[] ?? []),
-          permitRequired: Boolean(
-            (result.permit_required as unknown[])?.length ||
-            result.sirim_required || result.halal_required || result.miti_required
-          ),
-          permits: (result.permit_required as string[] ?? []),
+          permitRequired: Boolean((result.permit_required as unknown[])?.length || result.sirim_required || result.halal_required || result.miti_required),
+          permits:       (result.permit_required as string[] ?? []),
         });
+        const sid2 = await waitForSession();
+        await runPermitCheckFromResult(sid2, result);
 
-        const sid = await waitForSession();
-        await runPermitCheckFromClassification(sid, result);
-
-      // ── Permit certificate ───────────────────────────────────────────────
+      // ── Permit / other attachment ──────────────────────────────────────
       } else {
         const result = await geminiVision(b64, mime,
-          `Validate this Malaysian export permit or certificate.
-Return JSON:
-{
-  "is_valid": true,
-  "permit_type": "",
-  "issuing_body": "",
-  "certificate_number": "",
-  "company_name": "",
-  "issue_date": "",
-  "expiry_date": "",
-  "scope": "",
-  "missing_fields": [],
-  "confidence": 0.9
-}`
+          `You are an OCR engine for Malaysian export permits and certificates.
+
+PERMIT TYPES and key fields to extract:
+- SIRIM Certificate: number format "SIRIM QAS XXXX/XXXX", issuing body "SIRIM QAS International Sdn Bhd", product/scope description, validity period
+- JAKIM Halal Certificate: number format "JAKIM/XXX/XXXX" or issuing body cert, company name exactly as SSM, product list, expiry date
+- MITI Export Licence: licence number, HS codes covered, quota/value limit, validity period, any conditions
+- DVS Permit (Dept of Veterinary Services): permit number, animal product type, destination country
+- KKM Permit (Ministry of Health): registration "NOT/XXX/XXXX" or "MAL/XXXX/XXXX"
+- MPOB Licence (Malaysian Palm Oil Board): licence number, product type (CPO/CPKO/RBD)
+- Certificate of Origin Form D: CO number, HS code, origin criterion (WO/PE/PSR), FOB value, consignee country
+
+EXTRACTION RULES:
+- certificate_number: copy EXACTLY as printed including prefixes, slashes, dashes
+- company_name: exact SSM-registered name on document
+- issue_date and expiry_date: DD/MM/YYYY — compare expiry_date to today (${new Date().toLocaleDateString("en-MY")}); if expired set is_valid=false
+- issuing_body: full official name of issuing authority
+- scope: product name, HS code range, or description of what is covered
+- is_valid: true only when certificate_number + issuing_body + company_name all extracted AND not expired
+- confidence: 0.0-1.0 based on scan legibility
+
+Return ONLY valid JSON:
+{"is_valid":false,"permit_type":"","issuing_body":"","certificate_number":"","company_name":"","issue_date":"","expiry_date":"","scope":"","hs_code_covered":"","missing_fields":[],"confidence":0.0}`
         );
         addMsg({
           id: genId(), role: "assistant", kind: "extracted",
-          content: result.is_valid ? "✅ Permit certificate validated:" : "⚠️ Permit validation issues — please re-upload:",
-          valid:   Boolean(result.is_valid),
+          content: result.is_valid ? "✅ Permit validated:" : "⚠️ Permit issues — please re-upload:",
+          valid: Boolean(result.is_valid),
           fields: {
             "Permit Type":    String(result.permit_type       ?? "—"),
             "Certificate No": String(result.certificate_number ?? "—"),
             "Issuing Body":   String(result.issuing_body       ?? "—"),
-            "Company":        String(result.company_name       ?? "—"),
-            "Issue Date":     String(result.issue_date         ?? "—"),
             "Expiry Date":    String(result.expiry_date        ?? "—"),
           },
         });
         if (result.is_valid) advanceUI();
       }
-    }, "Scanning document with Gemini Vision…");
-  }, [waitForSession, withBusy, advanceUI]);
+    }, "Scanning document…");
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [waitForSession, runWithFeedback, advanceUI, activeStep]);
 
   // ── STEP 1: Consignee ─────────────────────────────────────────────────────
   const handleConsigneeSubmit = useCallback(async (data: object) => {
+    if (activeStep !== 1) { setModalLoading(false); return; }
     setModalLoading(true);
-    const sid = await waitForSession();
-    const d = data as Record<string,string>;
+    const d = data as Record<string, string>;
     try {
       const result = await glmJSON(
-        `You are a Malaysian export compliance officer.
-Screen this buyer for sanctions (OFAC SDN, UN Security Council, Malaysian MFA embargo list) and evaluate incoterm suitability.
-Return JSON:
-{
-  "risk_level": "low|medium|high",
-  "sanctioned_country": false,
-  "denied_party_check": "clear|flagged|manual_review_required",
-  "incoterm_suitability": {"provided_incoterm":"","suitable":true,"reason":"","recommended_alternatives":[]},
-  "required_permits": [],
-  "compliance_notes": [],
-  "red_flags": [],
-  "screening_references": ["OFAC SDN List","UN Security Council","Malaysian MFA"]
-}`,
+        `You are a Malaysian export compliance officer. Screen this buyer for sanctions (OFAC SDN, UN Security Council, Malaysian MFA) and evaluate incoterm suitability.
+Return JSON: {"risk_level":"low|medium|high","sanctioned_country":false,"denied_party_check":"clear|flagged|manual_review_required","incoterm_suitability":{"suitable":true,"reason":"","recommended_alternatives":[]},"compliance_notes":[],"red_flags":[]}`,
         `Buyer: ${d.buyer_name}, Country: ${d.buyer_country}, Address: ${d.buyer_address}, Incoterm: ${d.incoterm}, Tax ID: ${d.buyer_tax_id ?? "N/A"}`
       );
-
-      try { await api.addConsignee(sid, data); } catch { /* offline ok */ }
-
+      try { const sid = await waitForSession(); await api.addConsignee(sid, data); } catch { /* offline */ }
       sessionData.current.consignee = { ...data, screening: result };
       setModal(null);
-
       const risk = String(result.risk_level ?? "low");
-      const dpc  = String(result.denied_party_check ?? "clear");
       const riskEmoji = risk === "high" ? "🔴" : risk === "medium" ? "🟡" : "🟢";
       addMsg({ id: genId(), role: "user",      kind: "text", content: `Consignee: ${d.buyer_name}, ${d.buyer_country}` });
       addMsg({ id: genId(), role: "assistant", kind: "text", content:
-        `${riskEmoji} Buyer screened — Risk: **${risk.toUpperCase()}** · Sanctions: **${dpc}**` +
-        ((result.compliance_notes as string[] ?? []).length
-          ? `\n\n**Notes:** ${(result.compliance_notes as string[]).join("; ")}`
-          : "") +
-        ((result.red_flags as string[] ?? []).length
-          ? `\n\n⚠️ Red flags: ${(result.red_flags as string[]).join("; ")}`
-          : "")
+        `${riskEmoji} Buyer screened — Risk: **${risk.toUpperCase()}** · Sanctions: **${String(result.denied_party_check ?? "clear")}**` +
+        ((result.compliance_notes as string[] ?? []).length ? `\n\n**Notes:** ${(result.compliance_notes as string[]).join("; ")}` : "") +
+        ((result.red_flags       as string[] ?? []).length ? `\n\n⚠️ Flags: ${(result.red_flags as string[]).join("; ")}`       : "")
       });
       advanceUI();
-    } catch (err) {
+    } catch {
       sessionData.current.consignee = data;
       setModal(null);
-      addMsg({ id: genId(), role: "assistant", kind: "text", content: `✅ Consignee saved (offline mode). Proceeding.` });
+      addMsg({ id: genId(), role: "user",      kind: "text", content: `Consignee: ${d.buyer_name}, ${d.buyer_country}` });
+      addMsg({ id: genId(), role: "assistant", kind: "text", content: "✅ Consignee saved. Proceeding to Step 3." });
       advanceUI();
     } finally { setModalLoading(false); }
   }, [waitForSession, advanceUI]);
 
   // ── STEP 4: Digital Access ────────────────────────────────────────────────
   const handleDigitalAccessSubmit = useCallback(async (brn: string, agentCode: string) => {
+    if (activeStep !== 4) { setModalLoading(false); return; }
     setModalLoading(true);
-    const sid = await waitForSession();
-    try { await api.setupDigitalAccess(sid, brn || "202301045678"); } catch { /* ok */ }
+    try { const sid = await waitForSession(); await api.setupDigitalAccess(sid, brn || "202301045678"); } catch { /* offline */ }
     sessionData.current.digitalAccess = { brn, agentCode, confirmed: true };
     setModal(null);
     advanceUI();
     setModalLoading(false);
   }, [waitForSession, advanceUI]);
 
-  // ── STEP 5: Valuation ─────────────────────────────────────────────────────
+  // ── STEP 5: Financial Valuation ───────────────────────────────────────────
   const handleValuationSubmit = useCallback(async (data: object) => {
+    if (activeStep !== 5) { setModalLoading(false); return; }
     setModalLoading(true);
-    const d = data as Record<string, number & string>;
+    const d = data as Record<string, unknown>;
     try {
       const fob      = Number(d.fob_value_myr)    || 0;
       const freight  = Number(d.freight_quote_myr) || fob * 0.07;
-      const insRate  = Number(d.insurance_rate)    || 0.005;
-      const ins      = fob * insRate;
+      const ins      = fob * (Number(d.insurance_rate) || 0.005);
       const cif      = fob + freight + ins;
-      const dutyRate = Number(d.import_duty_rate) != null && !isNaN(Number(d.import_duty_rate))
-        ? Number(d.import_duty_rate)
-        : (Number((sessionData.current.classification as Record<string,unknown>)?.destination_import_duty) || 5) / 100;
+      const clsData  = (sessionData.current.classification as Record<string,unknown>) ?? {};
+      const dutyRate = d.import_duty_rate ? Number(d.import_duty_rate) : (Number(clsData.destination_import_duty) || 5) / 100;
       const duty     = cif * dutyRate;
       const total    = cif + duty;
-      const hsCode   = String((sessionData.current.classification as Record<string,unknown>)?.hs_code ?? "");
-      const destCountry = String(d.destination_country || (sessionData.current.consignee as Record<string,string>)?.buyer_country || "Unknown");
+      const hsCode   = String(clsData.hs_code ?? "");
+      const destCo   = String(d.destination_country ?? (sessionData.current.consignee as Record<string,string>)?.buyer_country ?? "Unknown");
+      const currency = String(d.invoice_currency ?? "MYR");
+      const fxRate   = Number(d.exchange_rate_to_myr) || 1;
 
       const fta = await glmJSON(
         `You are a Malaysian FTA duty-savings specialist. Evaluate ATIGA, CPTPP, RCEP, MAFTA, MJEPA.
-FTA eligibility requires: ① Product in FTA tariff schedule ② Rules of Origin met (e.g. RVC 40% or CTH) ③ CO certificate to be issued.
-Return JSON:
-{
-  "atiga_applicable": false, "atiga_rate": 0.0, "atiga_savings_myr": 0,
-  "cptpp_applicable": false, "cptpp_savings_myr": 0,
-  "rcep_applicable":  false, "rcep_savings_myr": 0,
-  "best_fta": "", "best_fta_rate": 0.0, "best_savings_myr": 0,
-  "form_required": "Form D|Form E|RCEP Form|None",
-  "roo_met": true, "roo_criteria": "",
-  "direct_shipment_required": true, "notes": ""
-}`,
-        `HS Code: ${hsCode}, Destination: ${destCountry}, CIF: RM${cif.toFixed(2)}, MFN duty: ${(dutyRate*100).toFixed(1)}% = RM${duty.toFixed(2)}`
+FTA eligibility: ① product in FTA tariff schedule ② Rules of Origin met ③ CO certificate issued.
+Return JSON: {"atiga_applicable":false,"atiga_rate":0.0,"atiga_savings_myr":0,"cptpp_applicable":false,"cptpp_savings_myr":0,"rcep_applicable":false,"rcep_savings_myr":0,"best_fta":"","best_fta_rate":0.0,"best_savings_myr":0,"form_required":"Form D|Form E|RCEP Form|None","roo_met":true,"roo_criteria":"","direct_shipment_required":true,"notes":""}`,
+        `HS Code: ${hsCode}, Destination: ${destCo}, CIF: RM${cif.toFixed(2)}, MFN duty: ${(dutyRate*100).toFixed(1)}%`
       );
 
       const savings  = Number(fta.best_savings_myr) || 0;
-      const ftaRate  = Number(fta.best_fta_rate)    || 0;
-      const netFta   = cif * (ftaRate / 100);
-      const netTotal = cif + netFta;
-
-      const result = {
+      const ftaRate  = Number(fta.best_fta_rate) || 0;
+      const netTotal = cif + cif * (ftaRate / 100);
+      const valResult = {
         fob_myr: fob, freight_myr: freight, insurance_myr: ins, cif_myr: cif,
         import_duty_rate: dutyRate, estimated_duty_myr: duty,
         total_landed_cost_myr: total, net_landed_with_fta: netTotal,
-        fta_analysis: fta, atiga_savings_myr: fta.atiga_savings_myr ?? 0,
-        best_fta: fta.best_fta ?? "", best_savings_myr: savings,
-        form_required: fta.form_required ?? "None",
-        invoice_currency: d.invoice_currency || "MYR",
-        exchange_rate_to_myr: d.exchange_rate_to_myr || 1,
+        fta_analysis: fta, atiga_savings_myr: Number(fta.atiga_savings_myr) || 0,
+        best_fta: String(fta.best_fta ?? ""), best_savings_myr: savings,
+        form_required: String(fta.form_required ?? "None"),
+        invoice_currency: currency, exchange_rate_to_myr: fxRate,
       };
-
-      sessionData.current.valuation = result;
+      sessionData.current.valuation = valResult;
       setLandedCost({ fob, freight, insurance: ins, duty, total, savings, bestFta: String(fta.best_fta ?? ""), finalised: true });
       setModal(null);
-
-      addMsg({ id: genId(), role: "assistant", kind: "valuation",
-        content: "Valuation calculated:",
-        fob, freight, insurance: ins, duty, total, savings, bestFta: String(fta.best_fta ?? ""),
-      });
-
+      addMsg({ id: genId(), role: "assistant", kind: "valuation", content: "Valuation calculated:", fob, freight, insurance: ins, duty, total, savings, bestFta: String(fta.best_fta ?? "") });
       const ftaNote = savings > 0
-        ? `\n\n🎯 **FTA opportunity: RM ${savings.toLocaleString()} savings** via **${fta.best_fta}** (${fta.form_required})\nNet landed with FTA: RM ${netTotal.toLocaleString("en-MY", {minimumFractionDigits:2})}\n\nTo claim: ① Confirm RVC/CTH criteria ② Apply for CO certificate from MATRADE`
-        : "\n\n⚠️ No applicable FTA found for this HS code / destination route. MFN rate applies.";
+        ? `\n\n🎯 **FTA saving: RM ${savings.toLocaleString()}** via **${fta.best_fta}** (${fta.form_required})\nNet landed: RM ${netTotal.toLocaleString("en-MY",{minimumFractionDigits:2})}\n\nTo claim: ① Confirm RVC/CTH criteria ② Apply for CO from MATRADE`
+        : "\n\n⚠️ No FTA applicable for this route. MFN rate applies.";
       addMsg({ id: genId(), role: "assistant", kind: "text", content: `✅ CIF valuation locked.${ftaNote}` });
-
-      try {
-        const sid = await waitForSession();
-        await api.calculateValuation(sid, data);
-      } catch { /* ok */ }
-
+      try { const sid = await waitForSession(); await api.calculateValuation(sid, data); } catch { /* ok */ }
       advanceUI();
     } catch (err) {
       addMsg({ id: genId(), role: "assistant", kind: "text", content: `⚠️ Valuation error: ${err instanceof Error ? err.message : String(err)}` });
     } finally { setModalLoading(false); }
   }, [waitForSession, advanceUI]);
 
-  // ── STEP 6: Shipment / Logistics ──────────────────────────────────────────
+  // ── STEP 6: Logistics ─────────────────────────────────────────────────────
   const handleShipmentSubmit = useCallback(async (data: object) => {
+    if (activeStep !== 6) { setModalLoading(false); return; }
     setModalLoading(true);
-    const sid = await waitForSession();
-    const d = data as Record<string,string>;
-
-    try { await api.setupLogistics(sid, data); } catch { /* ok */ }
-
+    const d = data as Record<string, string>;
+    try { const sid = await waitForSession(); await api.setupLogistics(sid, data); } catch { /* offline */ }
     sessionData.current.logistics = {
-      mode:                 d.mode,
-      pol:                  d.port_of_loading,
-      pod:                  d.port_of_discharge,
-      vessel:               d.vessel_name,
-      flight:               d.flight_number,
-      voyage_number:        d.voyage_number,
-      container_number:     d.container_number,
-      weight_kg:            d.gross_weight_kg,
-      net_weight_kg:        d.net_weight_kg,
-      cbm:                  d.cbm,
-      number_of_packages:   d.number_of_packages,
-      package_type:         d.package_type,
-      export_date:          d.export_date,
-      signatory_name:       d.signatory_name,
+      mode: d.mode, pol: d.port_of_loading, pod: d.port_of_discharge,
+      vessel: d.vessel_name, flight: d.flight_number, voyage_number: d.voyage_number,
+      container_number: d.container_number, weight_kg: d.gross_weight_kg,
+      net_weight_kg: d.net_weight_kg, cbm: d.cbm,
+      number_of_packages: d.number_of_packages, package_type: d.package_type,
+      export_date: d.export_date, signatory_name: d.signatory_name,
       signatory_designation: d.signatory_designation,
       signatory_ic_passport: d.signatory_ic_or_passport,
     };
-
     setModal(null);
-    const modeEmoji: Record<string,string> = { SEA:"🚢", AIR:"✈️", ROAD:"🚛", RAIL:"🚂" };
+    const modeEmoji: Record<string,string> = { SEA: "🚢", AIR: "✈️", ROAD: "🚛", RAIL: "🚂" };
     addMsg({ id: genId(), role: "user", kind: "text",
-      content: `${modeEmoji[d.mode]??""} Shipment: ${d.mode} · ${d.vessel_name || d.flight_number || "TBC"} · ETD ${d.export_date || "TBC"} · ${d.port_of_loading} → ${d.port_of_discharge}. ${d.gross_weight_kg} kg / ${d.cbm} m³ · ${d.number_of_packages} ${d.package_type}(s) · Container ${d.container_number || "TBC"}`,
+      content: `${modeEmoji[d.mode] ?? ""} Shipment: ${d.mode} · ${d.vessel_name || d.flight_number || "TBC"} · ETD ${d.export_date || "TBC"} · ${d.port_of_loading} → ${d.port_of_discharge}. ${d.gross_weight_kg} kg / ${d.cbm} m³ · ${d.number_of_packages} ${d.package_type}(s) · Container ${d.container_number || "TBC"}`,
     });
     advanceUI();
     setModalLoading(false);
   }, [waitForSession, advanceUI]);
 
-  // ── STEP 7: Generate All Trade Docs ──────────────────────────────────────
+  // ── STEP 7: Generate All Trade Documents ──────────────────────────────────
   const handleGenerateDocs = useCallback(async () => {
-    const sid = await waitForSession();
-    await withBusy(async () => {
+    if (activeStep !== 7) return;
+    await runWithFeedback(async () => {
       const ctx = buildCtx();
-
       const configs = [
-        {
-          id: "commercial-invoice", title: "Commercial Invoice",
-          sys: `Generate a complete Malaysian export Commercial Invoice per Customs Act 1967, MATRADE, and UCP 600.
-Return JSON: {"invoice_number":"CI-MY-2026-001","invoice_date":"","payment_terms":"T/T","exporter":{"name":"","brn":"","address":"","tel":"","email":"","bank":""},"consignee":{"name":"","country":"","address":"","tax_id":"","tel":"","contact_person":""},"goods":[{"line_no":1,"hs_code":"","description":"","quantity":0,"unit":"","unit_price":0,"total":0,"currency":"MYR"}],"incoterm":"FOB","port_of_loading":"","port_of_discharge":"","currency":"MYR","subtotal":0,"freight":0,"insurance":0,"total_fob":0,"total_cif":0,"country_of_origin":"Malaysia","marks_and_numbers":"","vessel_or_flight":"","voyage_number":"","exchange_rate":{"currency_from":"MYR","currency_to":"MYR","rate":1.0},"declaration":"We hereby certify that this invoice is true and correct.","signatory":{"name":"","title":"","ic_or_passport":"","declaration_statement":"I declare that the particulars given are true and correct.","signature_placeholder":"[SIGNATURE]","date":""}}`,
-        },
-        {
-          id: "packing-list", title: "Packing List",
-          sys: `Generate a complete Malaysian export Packing List per MATRADE standards.
-Return JSON: {"packing_list_number":"PL-MY-2026-001","date":"","exporter":{"name":"","address":""},"consignee":{"name":"","country":"","address":""},"invoice_reference":"","vessel_or_flight":"","voyage_number":"","port_of_loading":"","port_of_discharge":"","packages":[{"package_no":"1","type":"CTN","description":"","gross_weight_kg":0,"net_weight_kg":0,"tare_weight_kg":0,"length_cm":0,"width_cm":0,"height_cm":0,"cbm":0,"quantity_inside":0}],"total_packages":0,"total_gross_weight_kg":0,"total_net_weight_kg":0,"total_cbm":0,"shipping_marks":"","container_number":"","seal_number":"","declaration":"We hereby certify that the above particulars are true and correct.","signatory":{"name":"","title":"","ic_or_passport":"","signature_placeholder":"[SIGNATURE]","date":""}}`,
-        },
-        {
-          id: "coo", title: "Certificate of Origin",
-          sys: `Generate a Certificate of Origin for Malaysian export per ATIGA Form D or Standard CO format.
-Return JSON: {"co_number":"CO-MY-2026-001","co_date":"","form_type":"Form D (ATIGA)|Standard CO","issuing_body":"MATRADE","exporter":{"name":"","address":"","country":"Malaysia","brn":""},"consignee":{"name":"","address":"","country":""},"transport_details":{"vessel_or_flight":"","voyage_number":"","port_of_loading":"","port_of_discharge":"","departure_date":""},"goods":[{"item_no":1,"marks_and_numbers":"","description":"","hs_code":"","origin_criterion":"WO|CTH|CTSH|RVC40","quantity":"","gross_weight_kg":0,"fob_value_myr":0,"local_content_percent":0}],"invoice_reference":"","exemption_reference":"","declaration":"The undersigned hereby declares that the above details and statements are correct.","remarks":"","back_to_back":false,"signatory":{"name":"","title":"","ic_or_passport":"","signature_placeholder":"[SIGNATURE]","date":""}}`,
-        },
-        {
-          id: "bol", title: "Bill of Lading",
-          sys: `Generate a Bill of Lading or AWB shell for Malaysian export (carrier assigns B/L number).
-Return JSON: {"bl_number":"TBC - Assigned by carrier","document_type":"Bill of Lading","bl_date":"","bl_type":"OBL","shipper":{"name":"","address":"","brn":""},"consignee":{"name":"","address":"","country":"","contact":""},"notify_party":{"name":"","address":""},"vessel_or_flight":"","voyage_or_flight_number":"","port_of_loading":"","port_of_discharge":"","place_of_delivery":"","freight_payable_at":"Origin","freight_terms":"Prepaid","container_details":[{"container_no":"","seal_no":"","type":"","packages":0,"description":"","gross_weight_kg":0,"cbm":0}],"total_packages":0,"total_gross_weight_kg":0,"total_net_weight_kg":0,"total_cbm":0,"marks_and_numbers":"","on_board_date":"","place_of_issue":"Port Klang","number_of_originals":3,"carrier_clause":"SHIPPED on board in apparent good order and condition","special_instructions":"","signatory":{"name":"","title":"","ic_or_passport":"","signature_placeholder":"[SIGNATURE]","date":""}}`,
-        },
+        { id: "commercial-invoice", title: "Commercial Invoice",
+          sys: `Generate a complete Malaysian export Commercial Invoice per Customs Act 1967 and MATRADE. Return JSON: {"invoice_number":"CI-MY-2026-001","invoice_date":"","payment_terms":"T/T","exporter":{"name":"","brn":"","address":"","tel":"","email":"","bank":""},"consignee":{"name":"","country":"","address":"","tax_id":"","tel":"","contact_person":""},"goods":[{"line_no":1,"hs_code":"","description":"","quantity":0,"unit":"","unit_price":0,"total":0,"currency":"MYR"}],"incoterm":"FOB","port_of_loading":"","port_of_discharge":"","currency":"MYR","subtotal":0,"freight":0,"insurance":0,"total_fob":0,"total_cif":0,"country_of_origin":"Malaysia","marks_and_numbers":"","vessel_or_flight":"","declaration":"We hereby certify that this invoice is true and correct.","signatory":{"name":"","title":"","ic_or_passport":"","signature_placeholder":"[SIGNATURE]","date":""}}` },
+        { id: "packing-list", title: "Packing List",
+          sys: `Generate a complete Malaysian export Packing List per MATRADE standards. Return JSON: {"packing_list_number":"PL-MY-2026-001","date":"","exporter":{"name":"","address":""},"consignee":{"name":"","country":"","address":""},"invoice_reference":"","vessel_or_flight":"","port_of_loading":"","port_of_discharge":"","packages":[{"package_no":"1","type":"CTN","description":"","gross_weight_kg":0,"net_weight_kg":0,"cbm":0,"quantity_inside":0}],"total_packages":0,"total_gross_weight_kg":0,"total_net_weight_kg":0,"total_cbm":0,"shipping_marks":"","container_number":"","declaration":"We hereby certify that the above particulars are true and correct.","signatory":{"name":"","title":"","signature_placeholder":"[SIGNATURE]","date":""}}` },
+        { id: "coo", title: "Certificate of Origin",
+          sys: `Generate a Certificate of Origin for Malaysian export per ATIGA Form D or Standard CO. Return JSON: {"co_number":"CO-MY-2026-001","co_date":"","form_type":"Form D (ATIGA)|Standard CO","issuing_body":"MATRADE","exporter":{"name":"","address":"","country":"Malaysia","brn":""},"consignee":{"name":"","address":"","country":""},"transport_details":{"vessel_or_flight":"","port_of_loading":"","port_of_discharge":"","departure_date":""},"goods":[{"item_no":1,"description":"","hs_code":"","origin_criterion":"WO","quantity":"","gross_weight_kg":0,"fob_value_myr":0}],"invoice_reference":"","declaration":"The undersigned hereby declares that the above details are correct.","signatory":{"name":"","title":"","signature_placeholder":"[SIGNATURE]","date":""}}` },
+        { id: "bol", title: "Bill of Lading",
+          sys: `Generate a Bill of Lading shell for Malaysian export (carrier assigns B/L number). Return JSON: {"bl_number":"TBC - Assigned by carrier","bl_date":"","bl_type":"OBL","shipper":{"name":"","address":"","brn":""},"consignee":{"name":"","address":"","country":""},"notify_party":{"name":"","address":""},"vessel_or_flight":"","voyage_or_flight_number":"","port_of_loading":"","port_of_discharge":"","freight_terms":"Prepaid","container_details":[{"container_no":"","seal_no":"","type":"","packages":0,"description":"","gross_weight_kg":0,"cbm":0}],"total_packages":0,"total_gross_weight_kg":0,"total_cbm":0,"place_of_issue":"Port Klang","number_of_originals":3,"carrier_clause":"SHIPPED on board in apparent good order and condition","signatory":{"name":"","title":"","signature_placeholder":"[SIGNATURE]","date":""}}` },
       ];
-
       const settled = await Promise.allSettled(configs.map(c => glmJSON(c.sys, ctx)));
-
       const generated: string[] = [];
-      const failed:    string[] = [];
-
+      const failed: string[]    = [];
       settled.forEach((res, i) => {
         const cfg = configs[i];
         if (res.status === "fulfilled" && !res.value.parse_error) {
-          const key = cfg.id.replace(/-/g, "_");
-          sessionData.current.documents = { ...(sessionData.current.documents as object ?? {}), [key]: res.value };
+          sessionData.current.documents = { ...(sessionData.current.documents as object ?? {}), [cfg.id.replace(/-/g,"_")]: res.value };
           setGeneratedIds(prev => new Set([...prev, cfg.id]));
-          const e  = (sessionData.current.entity     as Record<string,string>) ?? {};
-          const c  = (sessionData.current.consignee  as Record<string,string>) ?? {};
-          const cl = (sessionData.current.classification as Record<string,string>) ?? {};
-          makePDF(cfg.title, [
-            `## ${cfg.title}`,
-            `Exporter: ${e.company_name ?? "—"} (BRN: ${e.registration_number ?? "—"})`,
-            `Consignee: ${c.buyer_name ?? "—"}, ${c.buyer_country ?? "—"}`,
-            `HS Code: ${cl.hs_code ?? "—"} — ${cl.hs_description ?? "—"}`,
-            `Generated: ${new Date().toLocaleString("en-MY")}`,
-            "─".repeat(60),
-            ...flatLines(res.value),
-          ]);
+          if      (cfg.id === "commercial-invoice") generateInvoicePDF(res.value);
+          else if (cfg.id === "bol")                generateBOLPDF(res.value);
+          else if (cfg.id === "packing-list")       generatePackingListPDF(res.value);
+          else if (cfg.id === "coo")                generateCOOPDF(res.value);
+          else makePDF(cfg.title, [`## ${cfg.title}`, ...flatLines(res.value)]);
           generated.push(cfg.title);
         } else {
           failed.push(cfg.title);
         }
       });
-
-      if (generated.length) {
-        addMsg({ id: genId(), role: "assistant", kind: "text",
-          content: `✅ **${generated.length} document(s) generated and downloaded:** ${generated.join(", ")}.\n\nNow add your **e-signature** to unlock the K2 form.`,
-        });
-      }
-      if (failed.length) {
-        addMsg({ id: genId(), role: "assistant", kind: "text",
-          content: `⚠️ Failed to generate: ${failed.join(", ")}. Please try again.`,
-        });
-      }
-
-      try { await api.generateDocs(await waitForSession()); } catch { /* ok */ }
-    }, "Generating 4 trade documents in parallel…");
-  }, [waitForSession, withBusy, buildCtx]);
-
-  // ── STEP 7: Individual doc download (right panel button) ──────────────────
-  const handleGenerate = useCallback(async (id: string) => {
-    if (generatedIds.has(id) || generatingId) return;
-    setGeneratingId(id);
-    try {
-      const ctx = buildCtx();
-      const sysMap: Record<string, { title: string; sys: string }> = {
-        "commercial-invoice": { title: "Commercial Invoice",         sys: `Generate a complete Malaysian export Commercial Invoice. Return JSON: {"invoice_number":"CI-MY-2026-001","invoice_date":"","payment_terms":"T/T","exporter":{"name":"","brn":"","address":"","tel":"","email":"","bank":""},"consignee":{"name":"","country":"","address":"","tax_id":"","tel":"","contact_person":""},"goods":[{"line_no":1,"hs_code":"","description":"","quantity":0,"unit":"","unit_price":0,"total":0,"currency":"MYR"}],"incoterm":"FOB","port_of_loading":"","port_of_discharge":"","currency":"MYR","subtotal":0,"freight":0,"insurance":0,"total_fob":0,"total_cif":0,"country_of_origin":"Malaysia","marks_and_numbers":"","vessel_or_flight":"","declaration":"We hereby certify that this invoice is true and correct.","signatory":{"name":"","title":"","signature_placeholder":"[SIGNATURE]","date":""}}` },
-        "packing-list":       { title: "Packing List",               sys: `Generate a Malaysian export Packing List. Return JSON: {"packing_list_number":"PL-MY-2026-001","date":"","exporter":{"name":"","address":""},"consignee":{"name":"","country":"","address":""},"invoice_reference":"","vessel_or_flight":"","port_of_loading":"","port_of_discharge":"","packages":[{"package_no":"1","type":"CTN","description":"","gross_weight_kg":0,"net_weight_kg":0,"cbm":0,"quantity_inside":0}],"total_packages":0,"total_gross_weight_kg":0,"total_net_weight_kg":0,"total_cbm":0,"shipping_marks":"","container_number":"","declaration":"We hereby certify that the above particulars are true and correct.","signatory":{"name":"","title":"","signature_placeholder":"[SIGNATURE]","date":""}}` },
-        "bol":                { title: "Bill of Lading",             sys: `Generate a Bill of Lading shell for Malaysian export. Return JSON: {"bl_number":"TBC - Assigned by carrier","bl_date":"","bl_type":"OBL","shipper":{"name":"","address":"","brn":""},"consignee":{"name":"","address":"","country":""},"notify_party":{"name":"","address":""},"vessel_or_flight":"","voyage_or_flight_number":"","port_of_loading":"","port_of_discharge":"","freight_terms":"Prepaid","container_details":[{"container_no":"","seal_no":"","type":"","packages":0,"description":"","gross_weight_kg":0,"cbm":0}],"total_packages":0,"total_gross_weight_kg":0,"total_cbm":0,"place_of_issue":"Port Klang","number_of_originals":3,"carrier_clause":"SHIPPED on board in apparent good order and condition","signatory":{"name":"","title":"","signature_placeholder":"[SIGNATURE]","date":""}}` },
-        "coo":                { title: "Certificate of Origin",      sys: `Generate a Certificate of Origin for Malaysian export. Return JSON: {"co_number":"CO-MY-2026-001","co_date":"","form_type":"Form D (ATIGA)","issuing_body":"MATRADE","exporter":{"name":"","address":"","country":"Malaysia","brn":""},"consignee":{"name":"","address":"","country":""},"transport_details":{"vessel_or_flight":"","port_of_loading":"","port_of_discharge":"","departure_date":""},"goods":[{"item_no":1,"description":"","hs_code":"","origin_criterion":"WO","quantity":"","gross_weight_kg":0,"fob_value_myr":0}],"invoice_reference":"","declaration":"The undersigned hereby declares that the above details are correct.","signatory":{"name":"","title":"","signature_placeholder":"[SIGNATURE]","date":""}}` },
-        "k2":                 { title: "K2 Customs Export Declaration", sys: `Generate a K2 export declaration for MyDagangNet/MyECIS. Return JSON: {"k2_reference":"K2-MY-2026-001","declaration_type":"EX","customs_station":"","export_date":"","k2_form_data":{"header":{"manifest_ref":"","declaration_type":"EX","customs_procedure_code":"10","regime_type":"Export","office_of_exit":""},"exporter":{"name":"","brn":"","address":"","customs_client_code":""},"consignee":{"name":"","country_code":"","address":""},"transport":{"mode_code":"","mode_description":"","vessel_flight_name":"","voyage_flight_number":"","port_of_loading_code":"","port_of_discharge_code":"","country_of_destination_code":"","container_indicator":"Y"},"goods":{"item_number":1,"commodity_description":"","hs_code":"","country_of_origin":"MY","quantity":0,"unit_of_quantity":"","gross_weight_kg":0,"net_weight_kg":0,"number_of_packages":0,"package_type_code":"","container_number":""},"valuation":{"statistical_value_myr":0,"fob_value_myr":0,"invoice_currency":"MYR","invoice_amount":0,"exchange_rate":1.0,"incoterm":"FOB","freight_myr":0,"insurance_myr":0,"cif_value_myr":0},"duty":{"export_duty_myr":0,"customs_duty_myr":0,"sst_myr":0,"total_duty_myr":0,"duty_exemption_code":"","exemption_reference":""},"fta":{"fta_claimed":false,"fta_name":"","form_type":"","form_number":"","preferential_rate":0.0},"signatory":{"name":"","nric_passport":"","designation":"","declaration_text":"I declare that the particulars given in this declaration are true and correct.","date":""}},"submission_checklist":[],"atiga_form_d_applicable":false,"duty_savings_myr":0,"estimated_processing_hours":4,"dagang_net_submission_steps":[{"step":1,"action":"Log in to dagangnet.com.my","portal":"dagangnet.com.my","notes":"Use your digital certificate token"}],"compliance_notes":[],"warnings":[]}` },
-        "sirim":              { title: "SIRIM Compliance Checklist",  sys: `Generate a SIRIM export compliance checklist for Malaysia. Return JSON: {"checklist_items":[{"item":"","status":"required|optional","reference":""}],"sirim_scheme":"","standards":[],"processing_weeks":0,"fee_range_myr":{"min":0,"max":0},"portal":"https://www.sirim-qas.com.my","documents_needed":[],"notes":""}` },
-        "halal":              { title: "Halal Compliance Checklist",  sys: `Generate a JAKIM Halal certification checklist for Malaysian export. Return JSON: {"checklist_items":[{"item":"","status":"required"}],"jakim_scheme":"","recognised_bodies_at_destination":[],"processing_weeks":0,"fee_myr":0,"portal":"https://www.halal.gov.my","notes":""}` },
-      };
-
-      const cfg = sysMap[id];
-      if (!cfg) return;
-
-      const result = await glmJSON(cfg.sys, ctx);
-      sessionData.current.documents = { ...(sessionData.current.documents as object ?? {}), [id.replace(/-/g,"_")]: result };
-
-      if (id === "k2") setK2Data(result);
-
-      const e  = (sessionData.current.entity    as Record<string,string>) ?? {};
-      const c  = (sessionData.current.consignee as Record<string,string>) ?? {};
-      const cl = (sessionData.current.classification as Record<string,string>) ?? {};
-      makePDF(cfg.title, [
-        `## ${cfg.title}`,
-        `Exporter: ${e.company_name ?? "—"} | BRN: ${e.registration_number ?? "—"}`,
-        `Consignee: ${c.buyer_name ?? "—"}, ${c.buyer_country ?? "—"}`,
-        `HS Code: ${cl.hs_code ?? "—"} — ${cl.hs_description ?? "—"}`,
-        `Generated: ${new Date().toLocaleString("en-MY")}`,
-        "─".repeat(60),
-        ...flatLines(result),
-      ]);
-
-      setGeneratedIds(prev => new Set([...prev, id]));
-    } catch (err) {
-      addMsg({ id: genId(), role: "assistant", kind: "text",
-        content: `⚠️ Error generating ${id}: ${err instanceof Error ? err.message : String(err)}`,
-      });
-    } finally {
-      setGeneratingId(null);
-    }
-  }, [generatedIds, generatingId, buildCtx]);
+      if (generated.length) addMsg({ id: genId(), role: "assistant", kind: "text",
+        content: `✅ **${generated.length} document(s) generated & downloaded:** ${generated.join(", ")}.\n\nNow add your **e-signature** to unlock the K2 form.` });
+      if (failed.length) addMsg({ id: genId(), role: "assistant", kind: "text",
+        content: `⚠️ Failed: ${failed.join(", ")}. Please try again.` });
+    }, "Generating 4 trade documents…");
+  }, [runWithFeedback, buildCtx]);
 
   // ── STEP 7: E-Signature ───────────────────────────────────────────────────
   const handleSign = useCallback(() => {
+    if (activeStep !== 7) return;
     setSigned(true);
     setModal(null);
     addMsg({ id: genId(), role: "assistant", kind: "text",
-      content: "✅ Declaration signed. K2 export declaration is now ready for preview and submission to RMCD via Dagang Net.",
-    });
+      content: "✅ Declaration signed. K2 export declaration is now ready for preview and submission." });
     advanceUI();
   }, [advanceUI]);
 
-  // ── STEP 8: K2 Submit ─────────────────────────────────────────────────────
+  // ── STEP 8: K2 Declaration ────────────────────────────────────────────────
   const handleK2Submit = useCallback(async () => {
+    if (activeStep !== 8) { setModalLoading(false); return; }
     const sid = await waitForSession();
     setModalLoading(true);
+    const K2_SYS = `Generate a complete K2 Customs Export Declaration for MyDagangNet/MyECIS (Customs Act 1967). Return JSON: {"k2_reference":"K2-MY-2026-001","declaration_type":"EX","customs_station":"","export_date":"","k2_form_data":{"header":{"manifest_ref":"","declaration_type":"EX","customs_procedure_code":"10","regime_type":"Export","office_of_exit":""},"exporter":{"name":"","brn":"","address":"","customs_client_code":""},"consignee":{"name":"","country_code":"","address":"","contact_person":"","email":""},"transport":{"mode_code":"","mode_description":"","vessel_flight_name":"","voyage_flight_number":"","port_of_loading_code":"","port_of_discharge_code":"","country_of_destination_code":"","container_indicator":"Y"},"goods":{"item_number":1,"commodity_description":"","hs_code":"","country_of_origin":"MY","quantity":0,"unit_of_quantity":"","gross_weight_kg":0,"net_weight_kg":0,"number_of_packages":0,"package_type_code":"","container_number":""},"valuation":{"statistical_value_myr":0,"fob_value_myr":0,"invoice_currency":"MYR","invoice_amount":0,"exchange_rate":1.0,"incoterm":"FOB","freight_myr":0,"insurance_myr":0,"cif_value_myr":0},"duty":{"export_duty_myr":0,"customs_duty_myr":0,"sst_myr":0,"total_duty_myr":0,"duty_exemption_code":"","exemption_reference":""},"fta":{"fta_claimed":false,"fta_name":"","form_type":"","form_number":"","preferential_rate":0.0},"signatory":{"name":"","nric_passport":"","designation":"","declaration_text":"I declare that the particulars given in this declaration are true and correct.","date":""}},"submission_checklist":[],"atiga_form_d_applicable":false,"duty_savings_myr":0,"estimated_processing_hours":4,"dagang_net_submission_steps":[{"step":1,"action":"Log in to dagangnet.com.my","portal":"dagangnet.com.my","notes":"Use your digital certificate token"},{"step":2,"action":"Create new K2 export declaration and attach all documents","portal":"dagangnet.com.my","notes":""},{"step":3,"action":"Submit and await RMCD acknowledgement","portal":"dagangnet.com.my","notes":"Expected within 4 business hours"}],"compliance_notes":[],"warnings":[]}`;
     try {
-      // try backend first
-      const r = await api.submitK2(sid) as Record<string,unknown>;
-      const k2 = (r.k2_data as Record<string,unknown>) ?? r;
+      let k2: Record<string,unknown>;
+      try {
+        const r = await api.submitK2(sid) as Record<string,unknown>;
+        k2 = (r.k2_data as Record<string,unknown>) ?? r;
+      } catch {
+        k2 = await glmJSON(K2_SYS, buildCtx());
+      }
       setK2Data(k2);
-      makePDF("K2 Customs Export Declaration", [
-        `## K2 Customs Export Declaration`,
-        `Reference: ${String(k2.k2_reference ?? "K2-MY-2026-PENDING")}`,
-        `Type: ${String(k2.declaration_type ?? "EX")} | Station: ${String(k2.customs_station ?? "—")} | Date: ${String(k2.export_date ?? "—")}`,
-        "─".repeat(60),
-        ...flatLines((k2.k2_form_data as Record<string,unknown>) ?? {}),
-        "─".repeat(60),
-        "DAGANG NET SUBMISSION STEPS:",
-        ...((k2.dagang_net_submission_steps as Array<Record<string,unknown>>) ?? [])
-          .map(s => `Step ${s.step}: ${s.action}`),
-        ...(k2.compliance_notes as string[] ?? []).map(n => `⚠ ${n}`),
-      ]);
+      generateK2PDF(k2);
       setModal(null);
       advanceUI();
-    } catch {
-      // fallback: generate K2 directly via GLM
-      try {
-        const ctx = buildCtx();
-        const k2  = await glmJSON(
-          `Generate a complete K2 Customs Export Declaration for MyDagangNet/MyECIS (Customs Act 1967). Return JSON:
-{"k2_reference":"K2-MY-2026-001","declaration_type":"EX","customs_station":"","export_date":"","k2_form_data":{"header":{"manifest_ref":"","declaration_type":"EX","customs_procedure_code":"10","regime_type":"Export","office_of_exit":""},"exporter":{"name":"","brn":"","address":"","customs_client_code":""},"consignee":{"name":"","country_code":"","address":"","contact_person":"","email":""},"transport":{"mode_code":"","mode_description":"","vessel_flight_name":"","voyage_flight_number":"","port_of_loading_code":"","port_of_discharge_code":"","country_of_destination_code":"","container_indicator":"Y"},"goods":{"item_number":1,"commodity_description":"","hs_code":"","country_of_origin":"MY","quantity":0,"unit_of_quantity":"","gross_weight_kg":0,"net_weight_kg":0,"number_of_packages":0,"package_type_code":"","marks_and_numbers":"","container_number":""},"valuation":{"statistical_value_myr":0,"fob_value_myr":0,"invoice_currency":"MYR","invoice_amount":0,"exchange_rate":1.0,"incoterm":"FOB","freight_myr":0,"insurance_myr":0,"cif_value_myr":0},"duty":{"export_duty_myr":0,"customs_duty_myr":0,"sst_myr":0,"total_duty_myr":0,"duty_exemption_code":"","exemption_reference":""},"fta":{"fta_claimed":false,"fta_name":"","form_type":"","form_number":"","preferential_rate":0.0},"signatory":{"name":"","nric_passport":"","designation":"","declaration_text":"I declare that the particulars given in this declaration are true and correct.","date":""}},"submission_checklist":[{"item":"Commercial Invoice","status":"ready"},{"item":"Packing List","status":"ready"},{"item":"Certificate of Origin","status":"ready"},{"item":"Bill of Lading","status":"ready"}],"atiga_form_d_applicable":false,"duty_savings_myr":0,"estimated_processing_hours":4,"dagang_net_submission_steps":[{"step":1,"action":"Log in at dagangnet.com.my with your digital certificate","portal":"dagangnet.com.my","notes":""},{"step":2,"action":"Create new K2 export declaration","portal":"dagangnet.com.my","notes":""},{"step":3,"action":"Attach all trade documents and submit","portal":"dagangnet.com.my","notes":""}],"compliance_notes":[],"warnings":[]}`,
-          ctx
-        );
-        setK2Data(k2);
-        makePDF("K2 Customs Export Declaration", [
-          `## K2 Customs Export Declaration`,
-          `Reference: ${String(k2.k2_reference ?? "K2-MY-2026-PENDING")}`,
-          "─".repeat(60),
-          ...flatLines((k2.k2_form_data as Record<string,unknown>) ?? {}),
-          "─".repeat(60),
-          ...((k2.dagang_net_submission_steps as Array<Record<string,unknown>>) ?? [])
-            .map(s => `Step ${s.step}: ${s.action}`),
-        ]);
-        setModal(null);
-        advanceUI();
-      } catch (err2) {
-        addMsg({ id: genId(), role: "assistant", kind: "text",
-          content: `⚠️ K2 error: ${err2 instanceof Error ? err2.message : String(err2)}`,
-        });
-      }
+    } catch (err) {
+      addMsg({ id: genId(), role: "assistant", kind: "text",
+        content: `⚠️ K2 error: ${err instanceof Error ? err.message : String(err)}` });
     } finally { setModalLoading(false); }
   }, [waitForSession, advanceUI, buildCtx]);
 
-  // ── STEP 3: Permit check (auto-triggered after HS classification) ──────────
-  const runPermitCheckFromClassification = useCallback(async (sid: string, cls: Record<string,unknown>) => {
+  // ── STEP 3: Permit check (GLM) ────────────────────────────────────────────
+  const runPermitCheckFromResult = useCallback(async (sid: string, cls: Record<string,unknown>) => {
     const hsCode      = String(cls.hs_code      ?? "0000.00.00");
     const description = String(cls.hs_description ?? "unknown");
     const destCountry = String((sessionData.current.consignee as Record<string,string>)?.buyer_country ?? "Unknown");
-
-    const result = await glmJSON(
-      `You are a Malaysian export permits specialist.
-Reference: Strategic Goods (Control) Act 2010, Customs (Prohibition of Exports) Order 1988.
-Determine ALL permits required for this export. If none required, return empty permits_required array.
-Return JSON:
-{
-  "permits_required": [
-    {"name":"","issuing_body":"","mandatory":true,"processing_days":0,"fee_myr":0,"portal":""}
-  ],
-  "sirim_required": false,
-  "halal_required": false,
-  "miti_license_required": false,
-  "dvs_required": false,
-  "phytosanitary_required": false,
-  "strategic_goods_control": false,
-  "dual_use_item": false,
-  "end_user_certificate_required": false,
-  "total_estimated_days": 0,
-  "total_estimated_cost_myr": 0,
-  "notes": []
-}`,
-      `HS Code: ${hsCode}, Product: ${description}, Destination: ${destCountry}`
-    );
-
-    try { await api.checkPermits(sid, { hs_code: hsCode, product_type: description, destination_country: destCountry }); }
-    catch { /* ok */ }
-
-    const sirimNeeded = Boolean(result.sirim_required || cls.sirim_required);
-    const halalNeeded = Boolean(result.halal_required || cls.halal_required);
-    setPermitFlags({ needsSirim: sirimNeeded, needsHalal: halalNeeded, needsCoo: true });
-
-    const permits = (result.permits_required as Array<Record<string,string>> ?? [])
-      .filter(p => p.mandatory !== (false as unknown));
-
-    if (permits.length === 0) {
+    try {
+      const result = await glmJSON(
+        `You are a Malaysian export permits specialist. Reference: Strategic Goods (Control) Act 2010, Customs (Prohibition of Exports) Order 1988.
+Return empty permits_required if no permits needed for general consumer goods.
+Return JSON: {"permits_required":[{"name":"","issuing_body":"","mandatory":true,"processing_days":0,"fee_myr":0,"portal":""}],"sirim_required":false,"halal_required":false,"miti_license_required":false,"dvs_required":false,"strategic_goods_control":false,"notes":[]}`,
+        `HS Code: ${hsCode}, Product: ${description}, Destination: ${destCountry}`
+      );
+      try { await api.checkPermits(sid, { hs_code: hsCode, product_type: description, destination_country: destCountry }); }
+      catch { /* offline */ }
+      setPermitFlags({
+        needsSirim: Boolean(result.sirim_required || cls.sirim_required),
+        needsHalal: Boolean(result.halal_required || cls.halal_required),
+        needsCoo: true,
+      });
+      const permits = (result.permits_required as Array<Record<string,string>> ?? [])
+        .filter(p => String(p.mandatory) !== "false" && p.name?.trim());
+      if (permits.length === 0) {
+        addMsg({ id: genId(), role: "assistant", kind: "text",
+          content: `✅ HS ${hsCode} — No controlled permits required. Proceeding to Step 5: Digital Access.` });
+        setCompleted(prev => new Set([...prev, 3]));
+        setActiveStep(4);
+        setMessages(m => [...m, STEP_FLOW[4].intro]);
+      } else {
+        const permitList = permits.map((p, i) => ({ name: p.name, key: `permit-${i}`, uploaded: false }));
+        setRequiredPermits(permitList);
+        addMsg({ id: genId(), role: "assistant", kind: "permit-upload",
+          content: `${permits.length} permit(s) required for HS ${hsCode}. Upload each certificate to continue.`,
+          permits: permitList,
+        });
+      }
+    } catch {
+      setPermitFlags({ needsSirim: false, needsHalal: false, needsCoo: true });
       addMsg({ id: genId(), role: "assistant", kind: "text",
-        content: `✅ HS ${hsCode} — **No PUA122 controlled permits required** for this product. Proceeding to Step 4: Digital Access.`,
-      });
-      advanceUI(); // skip Step 3 (permits)
-      advanceUI(); // also auto-advance to Step 4 intro
-    } else {
-      const permitList = permits.map((p, i) => ({ name: p.name, key: `permit-${i}`, uploaded: false }));
-      setRequiredPermits(permitList);
-      addMsg({ id: genId(), role: "assistant", kind: "permit-upload",
-        content: `${permits.length} permit(s) required for HS ${hsCode}. Please upload each certificate to continue.`,
-        permits: permitList,
-      });
+        content: "✅ Permit check complete. No controlled permits flagged. Proceeding to Step 5: Digital Access." });
+      setCompleted(prev => new Set([...prev, 3]));
+      setActiveStep(4);
+      setMessages(m => [...m, STEP_FLOW[4].intro]);
     }
-  }, [advanceUI]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const runPermitCheck = useCallback(async (sid: string) => {
     const cls = (sessionData.current.classification ?? {}) as Record<string,unknown>;
-    await runPermitCheckFromClassification(sid, cls);
-  }, [runPermitCheckFromClassification]);
+    await runPermitCheckFromResult(sid, cls);
+  }, [runPermitCheckFromResult]);
 
-  // ── STEP 3: Per-permit certificate upload validation ───────────────────────
+  // ── STEP 3: Per-permit certificate validation ─────────────────────────────
   const handlePermitUpload = useCallback(async (permitKey: string, file: File) => {
+    if (activeStep !== 3) return;
     await waitForSession();
     addMsg({ id: genId(), role: "user", kind: "upload", content: "uploaded-file", fileName: file.name });
-
     let valid = false;
     try {
-      const b64    = await toB64(file);
-      const mime   = mimeOf(file);
-      const result = await geminiVision(b64, mime,
-        `Validate this Malaysian export permit or certificate (e.g. SIRIM, JAKIM Halal, MITI licence, DVS, phytosanitary).
-Return JSON:
-{"is_valid":true,"permit_type":"","issuing_body":"","certificate_number":"","company_name":"","issue_date":"","expiry_date":"","scope":"","missing_fields":[],"confidence":0.9}`
+      const b64    = await fileToB64(file);
+      const result = await geminiVision(b64, fileMime(file),
+        `Validate this Malaysian export permit or certificate.
+Return JSON: {"is_valid":true,"permit_type":"","issuing_body":"","certificate_number":"","expiry_date":"","missing_fields":[],"confidence":0.9}`
       );
       valid = Boolean(result.is_valid);
-      addMsg({
-        id: genId(), role: "assistant", kind: "extracted",
-        content: valid ? `✅ Permit validated:` : `⚠️ Issues found — please re-upload a clearer copy:`,
+      addMsg({ id: genId(), role: "assistant", kind: "extracted",
+        content: valid ? "✅ Permit validated:" : "⚠️ Issues — please re-upload:",
         valid,
         fields: {
           "Permit Type":    String(result.permit_type       ?? "—"),
           "Certificate No": String(result.certificate_number ?? "—"),
           "Issuing Body":   String(result.issuing_body       ?? "—"),
-          "Company":        String(result.company_name       ?? "—"),
           "Expiry Date":    String(result.expiry_date        ?? "—"),
           "Confidence":     `${Math.round(Number(result.confidence ?? 0.9) * 100)}%`,
         },
       });
-    } catch {
-      valid = true; // if Gemini fails, allow through
-    }
-
+    } catch { valid = true; /* allow through if Vision fails */ }
     if (valid) {
       setRequiredPermits(prev => {
         const next    = prev.map(p => p.key === permitKey ? { ...p, uploaded: true } : p);
@@ -1559,75 +2432,241 @@ Return JSON:
         if (allDone) {
           setTimeout(() => {
             addMsg({ id: genId(), role: "assistant", kind: "text",
-              content: "✅ All permit certificates uploaded and validated. Proceeding to Step 5: Digital Access.",
-            });
-            advanceUI();
+              content: "✅ All permit certificates validated. Proceeding to Step 5: Digital Access." });
+            setCompleted(c => new Set([...c, 3]));
+            setActiveStep(4);
+            setMessages(m => [...m, STEP_FLOW[4].intro]);
           }, 500);
         }
         return next;
       });
     }
-  }, [waitForSession, advanceUI]);
+  }, [waitForSession]);
 
-  // ── Auto-trigger Step 3 permit check ──────────────────────────────────────
+  // ── Step 3 auto-trigger ───────────────────────────────────────────────────
   useEffect(() => {
     if (activeStep === 3 && !completed.has(3)) {
       waitForSession().then(sid => runPermitCheck(sid));
     }
-  }, [activeStep]); // eslint-disable-line
+  }, [activeStep]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── STEP 8: K2 Preview trigger ────────────────────────────────────────────
+  // ── STEP 8: K2 Preview ────────────────────────────────────────────────────
   const handlePreviewK2 = useCallback(async () => {
     const sid = await waitForSession();
-    await withBusy(async () => {
+    await runWithFeedback(async () => {
       try {
-        const r  = await api.submitK2(sid) as Record<string,unknown>;
-        const k2 = (r.k2_data as Record<string,unknown>) ?? r;
-        setK2Data(k2);
+        const r = await api.submitK2(sid) as Record<string,unknown>;
+        setK2Data((r.k2_data as Record<string,unknown>) ?? r);
       } catch {
-        // generate offline
-        const ctx = buildCtx();
-        const k2  = await glmJSON(
-          `Generate a complete K2 export declaration for MyDagangNet/MyECIS. Return JSON: {"k2_reference":"K2-MY-2026-001","declaration_type":"EX","customs_station":"","export_date":"","k2_form_data":{"header":{"manifest_ref":"","declaration_type":"EX","customs_procedure_code":"10","regime_type":"Export","office_of_exit":""},"exporter":{"name":"","brn":"","address":"","customs_client_code":""},"consignee":{"name":"","country_code":"","address":"","contact_person":"","email":""},"transport":{"mode_code":"","mode_description":"","vessel_flight_name":"","voyage_flight_number":"","port_of_loading_code":"","port_of_discharge_code":"","country_of_destination_code":"","container_indicator":"Y"},"goods":{"item_number":1,"commodity_description":"","hs_code":"","country_of_origin":"MY","quantity":0,"unit_of_quantity":"","gross_weight_kg":0,"net_weight_kg":0,"number_of_packages":0,"package_type_code":"","marks_and_numbers":"","container_number":""},"valuation":{"statistical_value_myr":0,"fob_value_myr":0,"invoice_currency":"MYR","invoice_amount":0,"exchange_rate":1.0,"incoterm":"FOB","freight_myr":0,"insurance_myr":0,"cif_value_myr":0},"duty":{"export_duty_myr":0,"customs_duty_myr":0,"sst_myr":0,"total_duty_myr":0,"duty_exemption_code":"","exemption_reference":""},"fta":{"fta_claimed":false,"fta_name":"","form_type":"","form_number":"","preferential_rate":0.0},"signatory":{"name":"","nric_passport":"","designation":"","declaration_text":"I declare that the particulars given in this declaration are true and correct.","date":""}},"submission_checklist":[],"atiga_form_d_applicable":false,"duty_savings_myr":0,"estimated_processing_hours":4,"dagang_net_submission_steps":[{"step":1,"action":"Log in to dagangnet.com.my","portal":"dagangnet.com.my","notes":""}],"compliance_notes":[],"warnings":[]}`,
-          ctx
+        const k2 = await glmJSON(
+          `Generate a K2 export declaration for MyDagangNet/MyECIS. Return JSON: {"k2_reference":"K2-MY-2026-001","declaration_type":"EX","customs_station":"","export_date":"","k2_form_data":{"header":{"manifest_ref":"","declaration_type":"EX","customs_procedure_code":"10","regime_type":"Export","office_of_exit":""},"exporter":{"name":"","brn":"","address":"","customs_client_code":""},"consignee":{"name":"","country_code":"","address":"","contact_person":"","email":""},"transport":{"mode_code":"","mode_description":"","vessel_flight_name":"","voyage_flight_number":"","port_of_loading_code":"","port_of_discharge_code":"","country_of_destination_code":"","container_indicator":"Y"},"goods":{"item_number":1,"commodity_description":"","hs_code":"","country_of_origin":"MY","quantity":0,"unit_of_quantity":"","gross_weight_kg":0,"net_weight_kg":0,"number_of_packages":0,"package_type_code":"","container_number":""},"valuation":{"statistical_value_myr":0,"fob_value_myr":0,"invoice_currency":"MYR","invoice_amount":0,"exchange_rate":1.0,"incoterm":"FOB","freight_myr":0,"insurance_myr":0,"cif_value_myr":0},"duty":{"export_duty_myr":0,"customs_duty_myr":0,"sst_myr":0,"total_duty_myr":0,"duty_exemption_code":"","exemption_reference":""},"fta":{"fta_claimed":false,"fta_name":"","form_type":"","form_number":"","preferential_rate":0.0},"signatory":{"name":"","nric_passport":"","designation":"","declaration_text":"I declare that the particulars given in this declaration are true and correct.","date":""}},"submission_checklist":[],"atiga_form_d_applicable":false,"duty_savings_myr":0,"estimated_processing_hours":4,"dagang_net_submission_steps":[{"step":1,"action":"Log in to dagangnet.com.my","portal":"dagangnet.com.my","notes":""}],"compliance_notes":[],"warnings":[]}`,
+          buildCtx()
         );
         setK2Data(k2);
       }
       setModal("k2-preview");
-    }, "Building K2 declaration from Dagang Net format…");
-  }, [waitForSession, withBusy, buildCtx]);
+    }, "Building K2 declaration…");
+  }, [waitForSession, runWithFeedback, buildCtx]);
 
-  // ── CHAT ──────────────────────────────────────────────────────────────────
+  // ── Right-panel: individual doc download button ───────────────────────────
+  const handleGenerate = useCallback(async (id: string) => {
+    if (generatedIds.has(id) || generatingId) return;
+    setGeneratingId(id);
+    try {
+      const ctx = buildCtx();
+      const sysMap: Record<string, { title: string; sys: string }> = {
+        "commercial-invoice": { title: "Commercial Invoice",
+          sys: `Generate a Malaysian export Commercial Invoice. Return JSON: {"invoice_number":"CI-MY-2026-001","invoice_date":"","payment_terms":"T/T","exporter":{"name":"","brn":"","address":"","tel":"","email":"","bank":""},"consignee":{"name":"","country":"","address":"","tax_id":"","tel":"","contact_person":""},"goods":[{"line_no":1,"hs_code":"","description":"","quantity":0,"unit":"","unit_price":0,"total":0,"currency":"MYR"}],"incoterm":"FOB","port_of_loading":"","port_of_discharge":"","currency":"MYR","subtotal":0,"freight":0,"insurance":0,"total_fob":0,"total_cif":0,"country_of_origin":"Malaysia","declaration":"We hereby certify that this invoice is true and correct.","signatory":{"name":"","title":"","signature_placeholder":"[SIGNATURE]","date":""}}` },
+        "packing-list": { title: "Packing List",
+          sys: `Generate a Malaysian export Packing List. Return JSON: {"packing_list_number":"PL-MY-2026-001","date":"","exporter":{"name":"","address":""},"consignee":{"name":"","country":"","address":""},"invoice_reference":"","vessel_or_flight":"","port_of_loading":"","port_of_discharge":"","packages":[{"package_no":"1","type":"CTN","description":"","gross_weight_kg":0,"net_weight_kg":0,"cbm":0,"quantity_inside":0}],"total_packages":0,"total_gross_weight_kg":0,"total_net_weight_kg":0,"total_cbm":0,"shipping_marks":"","container_number":"","declaration":"We hereby certify that the above particulars are true and correct.","signatory":{"name":"","title":"","signature_placeholder":"[SIGNATURE]","date":""}}` },
+        "bol": { title: "Bill of Lading",
+          sys: `Generate a Bill of Lading shell for Malaysian export. Return JSON: {"bl_number":"TBC - Assigned by carrier","bl_date":"","bl_type":"OBL","shipper":{"name":"","address":"","brn":""},"consignee":{"name":"","address":"","country":""},"notify_party":{"name":"","address":""},"vessel_or_flight":"","voyage_or_flight_number":"","port_of_loading":"","port_of_discharge":"","freight_terms":"Prepaid","container_details":[{"container_no":"","seal_no":"","type":"","packages":0,"description":"","gross_weight_kg":0,"cbm":0}],"total_packages":0,"total_gross_weight_kg":0,"total_cbm":0,"place_of_issue":"Port Klang","number_of_originals":3,"carrier_clause":"SHIPPED on board in apparent good order and condition","signatory":{"name":"","title":"","signature_placeholder":"[SIGNATURE]","date":""}}` },
+        "coo": { title: "Certificate of Origin",
+          sys: `Generate a Certificate of Origin for Malaysian export. Return JSON: {"co_number":"CO-MY-2026-001","co_date":"","form_type":"Form D (ATIGA)","issuing_body":"MATRADE","exporter":{"name":"","address":"","country":"Malaysia","brn":""},"consignee":{"name":"","address":"","country":""},"transport_details":{"vessel_or_flight":"","port_of_loading":"","port_of_discharge":"","departure_date":""},"goods":[{"item_no":1,"description":"","hs_code":"","origin_criterion":"WO","quantity":"","gross_weight_kg":0,"fob_value_myr":0}],"invoice_reference":"","declaration":"The undersigned hereby declares that the above details are correct.","signatory":{"name":"","title":"","signature_placeholder":"[SIGNATURE]","date":""}}` },
+        "k2": { title: "K2 Customs Export Declaration",
+          sys: `Generate a K2 export declaration for MyDagangNet/MyECIS. Return JSON: {"k2_reference":"K2-MY-2026-001","declaration_type":"EX","customs_station":"","export_date":"","k2_form_data":{"header":{"manifest_ref":"","declaration_type":"EX","customs_procedure_code":"10","regime_type":"Export","office_of_exit":""},"exporter":{"name":"","brn":"","address":"","customs_client_code":""},"consignee":{"name":"","country_code":"","address":""},"transport":{"mode_code":"","mode_description":"","vessel_flight_name":"","voyage_flight_number":"","port_of_loading_code":"","port_of_discharge_code":"","country_of_destination_code":"","container_indicator":"Y"},"goods":{"item_number":1,"commodity_description":"","hs_code":"","country_of_origin":"MY","quantity":0,"unit_of_quantity":"","gross_weight_kg":0,"net_weight_kg":0,"number_of_packages":0,"package_type_code":"","container_number":""},"valuation":{"statistical_value_myr":0,"fob_value_myr":0,"invoice_currency":"MYR","invoice_amount":0,"exchange_rate":1.0,"incoterm":"FOB","freight_myr":0,"insurance_myr":0,"cif_value_myr":0},"duty":{"export_duty_myr":0,"customs_duty_myr":0,"sst_myr":0,"total_duty_myr":0,"duty_exemption_code":"","exemption_reference":""},"fta":{"fta_claimed":false,"fta_name":"","form_type":"","form_number":"","preferential_rate":0.0},"signatory":{"name":"","nric_passport":"","designation":"","declaration_text":"I declare that the particulars given in this declaration are true and correct.","date":""}},"submission_checklist":[],"atiga_form_d_applicable":false,"duty_savings_myr":0,"estimated_processing_hours":4,"dagang_net_submission_steps":[{"step":1,"action":"Log in to dagangnet.com.my","portal":"dagangnet.com.my","notes":"Use digital certificate token"}],"compliance_notes":[],"warnings":[]}` },
+        "sirim": { title: "SIRIM Checklist",
+          sys: `Generate a SIRIM export compliance checklist. Return JSON: {"checklist_items":[{"item":"","status":"required|optional","reference":""}],"sirim_scheme":"","processing_weeks":0,"portal":"https://www.sirim-qas.com.my","notes":""}` },
+        "halal": { title: "Halal Checklist",
+          sys: `Generate a JAKIM Halal export checklist. Return JSON: {"checklist_items":[{"item":"","status":"required"}],"jakim_scheme":"","processing_weeks":0,"portal":"https://www.halal.gov.my","notes":""}` },
+      };
+      const cfg = sysMap[id];
+      if (!cfg) return;
+      const result = await glmJSON(cfg.sys, ctx);
+      if (id === "k2") setK2Data(result);
+      sessionData.current.documents = { ...(sessionData.current.documents as object ?? {}), [id.replace(/-/g,"_")]: result };
+      if      (id === "commercial-invoice") generateInvoicePDF(result);
+      else if (id === "bol")                generateBOLPDF(result);
+      else if (id === "k2")                 generateK2PDF(result);
+      else if (id === "packing-list")       generatePackingListPDF(result);
+      else if (id === "coo")                generateCOOPDF(result);
+      else makePDF(cfg.title, [`## ${cfg.title}`, ...flatLines(result)]);
+      setGeneratedIds(prev => new Set([...prev, id]));
+    } catch (err) {
+      addMsg({ id: genId(), role: "assistant", kind: "text",
+        content: `⚠️ Error generating ${id}: ${err instanceof Error ? err.message : String(err)}` });
+    } finally { setGeneratingId(null); }
+  }, [generatedIds, generatingId, buildCtx]);
+
+  // ── Chat ──────────────────────────────────────────────────────────────────
   const handleSend = useCallback(async () => {
     if (!input.trim() || sending) return;
     const raw = input.trim();
     setInput("");
     addMsg({ id: genId(), role: "user", kind: "text", content: raw });
     setSending(true);
+
+    // ── Step 0: handle SSM partial extraction — user types "confirm" or manual details ──
+    if (activeStep === 0 && !completed.has(0) && sessionData.current.entity) {
+      const entity = sessionData.current.entity as Record<string, unknown>;
+      if (entity.partial_extraction) {
+        const lower = raw.toLowerCase().trim();
+        const isConfirm = ["confirm", "ok", "proceed", "yes", "correct", "looks good", "that's correct"].some(k => lower === k || lower.startsWith(k));
+
+        if (isConfirm) {
+          // User confirms partial data — advance
+          addMsg({ id: genId(), role: "assistant", kind: "text",
+            content: `✅ Confirmed — proceeding with the extracted details. You can correct any fields later if needed.` });
+          sessionData.current.entity = { ...entity, partial_extraction: false, is_valid: true };
+          setSending(false);
+          advanceUI();
+          return;
+        } else {
+          // Try to parse manual corrections from free text
+          try {
+            const corrected = await glmJSON(
+              `Extract company registration details from this user message. Merge with existing data where fields are still missing.
+Existing data: ${JSON.stringify({
+  company_name: entity.company_name,
+  registration_number: entity.registration_number,
+  company_type: entity.company_type,
+  company_status: entity.company_status,
+  directors: entity.directors,
+})}
+Instructions: If user provides a value for a field, use their value. If not mentioned, keep the existing value if it has meaning, otherwise leave empty.
+Return ONLY valid JSON:
+{"company_name":"","registration_number":"","company_type":"Sdn Bhd","company_status":"active","directors":[{"name":"","nric":"","designation":"Director"}],"paid_up_capital":"","sst_registered":false,"is_valid":true,"confidence":0.9}`,
+              `User message: ${raw}`
+            );
+
+            const merged: Record<string, unknown> = {
+              ...entity,
+              ...corrected,
+              // Prefer user-provided values, fall back to existing
+              company_name:        hasMeaning(corrected.company_name)        ? corrected.company_name        : entity.company_name,
+              registration_number: hasMeaning(corrected.registration_number) ? corrected.registration_number : entity.registration_number,
+              partial_extraction: false,
+              is_valid: true,
+            };
+            sessionData.current.entity = merged;
+
+            const dirs = (merged.directors as Array<{name:string}> | undefined ?? [])
+              .map((d: {name:string}) => d.name)
+              .filter(Boolean)
+              .join(", ");
+
+            addMsg({
+              id: genId(), role: "assistant", kind: "extracted",
+              content: "Got it — here are the updated details:",
+              valid: true,
+              fields: {
+                "Company Name":    hasMeaning(merged.company_name)        ? String(merged.company_name)        : "—",
+                "BRN":             hasMeaning(merged.registration_number)  ? String(merged.registration_number) : "—",
+                "Company Type":    hasMeaning(merged.company_type)         ? String(merged.company_type)        : "—",
+                "Status":          hasMeaning(merged.company_status)       ? String(merged.company_status)      : "Active",
+                "Directors":       dirs || "—",
+                "SST Registered":  merged.sst_registered ? "Yes" : "No",
+                "Paid-up Capital": hasMeaning(merged.paid_up_capital)      ? String(merged.paid_up_capital)     : "—",
+              },
+            });
+
+            const nameOk = hasMeaning(merged.company_name);
+            const brnOk  = hasMeaning(merged.registration_number);
+
+            if (nameOk && brnOk) {
+              // Both required fields now present — auto-advance
+              addMsg({ id: genId(), role: "assistant", kind: "text",
+                content: `✅ Company Name and BRN confirmed. Proceeding to Step 2 — Consignee Details.` });
+              setSending(false);
+              advanceUI();
+              return;
+            } else {
+              // Still missing something
+              const stillMissing: string[] = [];
+              if (!nameOk) stillMissing.push("Company Name");
+              if (!brnOk)  stillMissing.push("BRN");
+              addMsg({ id: genId(), role: "assistant", kind: "text",
+                content: `Still missing: **${stillMissing.join(", ")}**. Please provide these, or type **"confirm"** to proceed with what we have.` });
+            }
+          } catch {
+            addMsg({ id: genId(), role: "assistant", kind: "text",
+              content: `I didn't quite catch that. Please use this format:\n\n> Company Name: ABC SDN BHD\n> BRN: 202301012345\n\nOr type **"confirm"** to proceed with the current extracted data.` });
+          }
+          setSending(false);
+          return;
+        }
+      }
+    }
+
+    // ── Step 2: treat chat input as product description for HS classification ──
+    if (activeStep === 2 && !completed.has(2)) {
+      try {
+        const destCountry = String((sessionData.current.consignee as Record<string,string>)?.buyer_country ?? "Unknown");
+        const result = await glmJSON(
+          `You are an HS tariff classification expert for Malaysian exports (WCO HS 2022 / AHTN 2022).
+Classify this product. Destination: ${destCountry}.
+Return JSON: {"identified":true,"hs_code":"","hs_description":"","product_name":"","malaysia_export_duty":0.0,"destination_import_duty":0.0,"preferential_duty_rates":{"ATIGA":0.0,"CPTPP":0.0,"RCEP":0.0},"fta_available":[],"permit_required":[],"export_prohibited":false,"strategic_goods":false,"sirim_required":false,"halal_required":false,"miti_required":false,"confidence":0.9,"classification_notes":[]}`,
+          `Product description: ${raw}`
+        );
+        const hsCode = String(result.hs_code ?? "").trim();
+        const identified = Boolean(result.identified) && hsCode.length > 0 && !hsCode.startsWith("XXXX") && Number(result.confidence ?? 0) > 0.3;
+        if (identified) {
+          sessionData.current.classification = result;
+          addMsg({
+            id: genId(), role: "assistant", kind: "hs-result",
+            content: "Product classified from your description:",
+            hsCode, description: String(result.hs_description ?? "—"),
+            duty: Number(result.destination_import_duty ?? 0),
+            fta:  (result.fta_available as string[] ?? []),
+            permitRequired: Boolean((result.permit_required as unknown[])?.length || result.sirim_required || result.halal_required || result.miti_required),
+            permits: (result.permit_required as string[] ?? []),
+          });
+          const sid = await waitForSession();
+          await runPermitCheckFromResult(sid, result);
+        } else {
+          addMsg({ id: genId(), role: "assistant", kind: "text",
+            content: `⚠️ Could not classify "${raw}" with confidence. Please be more specific (e.g. include material, use, HS chapter) or upload a product photo.`,
+          });
+        }
+      } catch (err) {
+        addMsg({ id: genId(), role: "assistant", kind: "text",
+          content: `⚠️ Classification error: ${err instanceof Error ? err.message : String(err)}` });
+      } finally { setSending(false); }
+      return;
+    }
+
     try {
       const e  = (sessionData.current.entity          as Record<string,string>) ?? {};
       const c  = (sessionData.current.consignee        as Record<string,string>) ?? {};
       const cl = (sessionData.current.classification   as Record<string,string>) ?? {};
       const v  = (sessionData.current.valuation        as Record<string,unknown>) ?? {};
       const l  = (sessionData.current.logistics        as Record<string,unknown>) ?? {};
-
       const system = `You are Architect AI, a Malaysian export compliance expert for Borderless AI.
-You guide exporters through the 9-step Malaysian customs workflow.
+You guide exporters through a 9-step workflow. The user has ALREADY COMPLETED the steps shown — do NOT ask them to redo any completed step.
 
-Current session:
-- Step: ${activeStep + 1}/9 — ${STEPS[activeStep]?.title ?? ""}
-- Exporter: ${e.company_name ?? "not set"} (BRN: ${e.registration_number ?? "—"})
-- Buyer: ${c.buyer_name ?? "not set"}, ${c.buyer_country ?? "—"}
-- HS Code: ${cl.hs_code ?? "not classified"} — ${cl.hs_description ?? "—"}
-- FOB: RM${(v as any).fob_myr ?? 0}, Mode: ${(l as any).mode ?? "not set"}
+Current session state:
+- Active step: ${activeStep + 1}/9 — ${STEPS[activeStep]?.title ?? ""}
+- Entity: ${e.company_name ? `✅ ${e.company_name} (BRN: ${e.registration_number})` : "⏳ Not yet verified"}
+- Consignee: ${c.buyer_name ? `✅ ${c.buyer_name}, ${c.buyer_country}` : "⏳ Not yet added"}
+- HS Code: ${cl.hs_code ? `✅ ${cl.hs_code} — ${cl.hs_description}` : "⏳ Not yet classified"}
+- Valuation: ${v.fob_myr ? `✅ FOB RM${v.fob_myr}` : "⏳ Not yet entered"}
+- Logistics: ${l.mode ? `✅ ${l.mode} — ${l.pol} → ${l.pod}` : "⏳ Not yet set"}
 
-Be concise, accurate, and practical. Reference Malaysian regulations (Customs Act 1967, Customs Prohibition of Exports Order, ATIGA ROO, etc.) when relevant. Respond in the same language the user used.`;
-
-      const reply = await glmText(system, raw, chatHistory.current.slice(-10));
-      chatHistory.current = [...chatHistory.current.slice(-14), { role: "user", content: raw }, { role: "assistant", content: reply }];
+Be concise, practical. Reference Malaysian regulations when relevant (Customs Act 1967, ATIGA, Customs Prohibition of Exports Order 1988, etc.). Respond in the same language the user used.`;
+      const reply = await glmText(system, raw, chatHistoryRef.current.slice(-10));
+      chatHistoryRef.current = [...chatHistoryRef.current.slice(-14), { role: "user", content: raw }, { role: "assistant", content: reply }];
       addMsg({ id: genId(), role: "assistant", kind: "text", content: reply });
     } catch (err) {
-      // fallback to backend /chat
       try {
         const sid = await waitForSession();
         const res = await api.chat(sid, raw) as Record<string,string>;
@@ -1636,29 +2675,45 @@ Be concise, accurate, and practical. Reference Malaysian regulations (Customs Ac
         addMsg({ id: genId(), role: "assistant", kind: "text", content: `⚠️ ${err instanceof Error ? err.message : String(err)}` });
       }
     } finally { setSending(false); }
-  }, [input, sending, waitForSession, activeStep]);
+  }, [input, sending, waitForSession, activeStep, completed, runPermitCheckFromResult]);
 
-  // ── ACTION BUTTON HANDLER ─────────────────────────────────────────────────
+  // ── Action button dispatcher ──────────────────────────────────────────────
+  const ACTION_STEP: Record<string, number> = {
+    "upload-ssm": 0, "verify-ssm": 0,
+    "add-consignee": 1,
+    "upload-product": 2, "lookup-hs": 2,
+    "connect-dagang": 4,
+    "enter-valuation": 5,
+    "add-shipment": 6,
+    "generate-docs": 7, "sign-declaration": 7,
+  };
+
   const handleAction = useCallback(async (action: string, label: string) => {
+    const requiredStep = ACTION_STEP[action];
+    if (requiredStep !== undefined && activeStep !== requiredStep && !completed.has(requiredStep)) {
+      const blocking = STEPS[requiredStep];
+      addMsg({ id: genId(), role: "assistant", kind: "blocked",
+        content: `Step ${requiredStep + 1} — "${blocking.title}" — is not active yet. Complete the current step first.` });
+      return;
+    }
+
     const uploadConfig = UPLOAD_ACTION_MAP[action];
     if (uploadConfig) {
       pendingUploadRef.current = { action, ...uploadConfig };
       if (fileInputRef.current) { fileInputRef.current.accept = uploadConfig.accept; fileInputRef.current.click(); }
       return;
     }
-    if (action === "add-consignee")    { setModal("consignee");      return; }
-    if (action === "enter-valuation")  { setModal("valuation");      return; }
-    if (action === "add-shipment")     { setModal("shipment");       return; }
-    if (action === "connect-dagang")   { setModal("digital-access"); return; }
-    if (action === "sign-declaration") { setModal("signature");      return; }
-    if (action === "generate-docs")    { handleGenerateDocs();       return; }
-    if (action === "lookup-hs") {
-      addMsg({ id: genId(), role: "user", kind: "text", content: label });
-      return;
-    }
+    if (action === "add-consignee")    { setModal("consignee");       return; }
+    if (action === "enter-valuation")  { setModal("valuation");       return; }
+    if (action === "add-shipment")     { setModal("shipment");        return; }
+    if (action === "connect-dagang")   { setModal("digital-access");  return; }
+    if (action === "sign-declaration") { setModal("signature");       return; }
+    if (action === "generate-docs")    { handleGenerateDocs();        return; }
+    if (action === "lookup-hs")        { addMsg({ id: genId(), role: "user", kind: "text", content: label }); return; }
+
     addMsg({ id: genId(), role: "user", kind: "text", content: label });
     const sid = await waitForSession();
-    await withBusy(async () => {
+    await runWithFeedback(async () => {
       if (action === "verify-ssm") {
         await api.verifyEntity(sid, { company_name: "Manual verify", registration_number: "202301045678" });
         advanceUI();
@@ -1666,20 +2721,20 @@ Be concise, accurate, and practical. Reference Malaysian regulations (Customs Ac
         advanceUI();
       }
     });
-  }, [waitForSession, withBusy, advanceUI, handleGenerateDocs]);
+  }, [waitForSession, runWithFeedback, advanceUI, handleGenerateDocs]);
 
-  // ── STEP JUMP ─────────────────────────────────────────────────────────────
+  // ── Step jump ─────────────────────────────────────────────────────────────
   const tryJumpTo = useCallback((stepId: number) => {
-    if (completed.has(stepId) || stepId === activeStep) { setActiveStep(stepId); return; }
+    if (stepId === activeStep) return;
+    if (completed.has(stepId)) { setActiveStep(stepId); return; }
     const blocking = STEPS.slice(0, stepId).find(s => !completed.has(s.id));
-    if (!blocking) return;
+    if (!blocking) { setActiveStep(stepId); return; }
     addMsg({ id: genId(), role: "assistant", kind: "blocked",
-      content: `Action Blocked: Complete "${blocking.title}" before accessing "${STEPS[stepId].title}".`,
-    });
+      content: `Step ${stepId + 1} is locked. Complete Step ${blocking.id + 1} — "${blocking.title}" — first.` });
   }, [completed, activeStep]);
 
-  const signatoryName  = ((sessionData.current.logistics as Record<string,string>)?.signatory_name)        ?? "";
-  const signatoryTitle = ((sessionData.current.logistics as Record<string,string>)?.signatory_designation) ?? "";
+  const signatoryName  = ((sessionData.current.logistics as Record<string, string>)?.signatory_name) || "";
+  const signatoryTitle = ((sessionData.current.logistics as Record<string, string>)?.signatory_designation) || "";
 
   // ─────────────────────────────────────────────────────────────────────────
   // RENDER
@@ -2181,12 +3236,7 @@ function MessageBubble({ msg, onAction, isSessionReady, onPermitUpload, onPrevie
                   </button>
                 );
               })}
-              {/* Extra: Step 7 gets a K2 preview button when signed */}
-              {activeStep === 8 && signed && (
-                <button type="button" onClick={onPreviewK2} className="flex items-center gap-2 rounded-xl bg-gradient-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground shadow-glow hover:opacity-90 transition-base">
-                  <Eye className="h-4 w-4" />Preview K2 Form
-                </button>
-              )}
+
             </div>
           )}
         </div>
@@ -2202,11 +3252,7 @@ function MessageBubble({ msg, onAction, isSessionReady, onPermitUpload, onPrevie
         <div className="rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-3 text-sm text-foreground space-y-1">
           {renderMarkdown(msg.content)}
         </div>
-        {activeStep === 8 && signed && (
-          <button type="button" onClick={onPreviewK2} className="flex items-center gap-2 rounded-xl bg-gradient-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground shadow-glow hover:opacity-90 transition-base">
-            <Eye className="h-4 w-4" />Preview & Submit K2
-          </button>
-        )}
+
       </div>
     </div>
   );

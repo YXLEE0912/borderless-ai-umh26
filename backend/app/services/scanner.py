@@ -9,6 +9,7 @@ from app.core.config import Settings
 from app.schemas.scan import ScanAnalysis, ScanResult, ScanStatus
 from app.services.gemini_vision_client import GeminiVisionClient
 from app.services.rules_engine import apply_rules
+from app.services.rules_enrichment import RulesEnrichmentService
 from app.services.rules_repository import RulesRepository
 from app.services.zai_client import ZAIClient
 
@@ -30,6 +31,7 @@ class ProductScanner:
             model=settings.gemini_vision_model,
         )
         self.rules_repository = RulesRepository(settings=settings, supabase_client=supabase_client)
+        self.rules_enrichment = RulesEnrichmentService(supabase_client=supabase_client)
 
     async def analyze(
         self,
@@ -63,13 +65,23 @@ class ProductScanner:
 
         effective_destination_country = destination_country or _extract_destination_country_from_prompt(prompt)
 
-        # Step 2: Build enhanced prompt with Gemini vision results
+        # Step 2: Fetch enriched context from Malaysian trade policies (scraped from Supabase)
+        enriched_context = None
+        if gemini_vision_summary and isinstance(gemini_vision_summary, dict):
+            enriched_context = await self.rules_enrichment.get_relevant_context(
+                materials=gemini_vision_summary.get("materials_detected"),
+                product_name=gemini_vision_summary.get("product_name"),
+                destination_country=effective_destination_country,
+            )
+
+        # Step 3: Build enhanced prompt with Gemini vision results + scraped trade context
         enhanced_prompt = _build_enhanced_prompt(
             original_prompt=prompt,
             gemini_vision_summary=gemini_vision_summary,
+            enriched_context=enriched_context,
         )
 
-        # Step 3: Analyze with ILMU using enhanced prompt
+        # Step 4: Analyze with ILMU using enhanced prompt
         base_result: ScanResult
         if vision_restriction_reason:
             base_result = _fallback_result(
@@ -158,58 +170,62 @@ class ProductScanner:
         return result.model_copy(update=base_updates)
 
 
-def _build_enhanced_prompt(original_prompt: str, gemini_vision_summary: dict | None) -> str:
-    """Merge Gemini vision analysis results with the original prompt for ILMU processing.
+def _build_enhanced_prompt(
+    original_prompt: str, gemini_vision_summary: dict | None, enriched_context: str | None = None
+) -> str:
+    """Merge Gemini vision analysis results + Malaysian trade policy context with the original prompt.
     
     Args:
         original_prompt: The user-provided text prompt
         gemini_vision_summary: Dictionary with vision analysis results from Gemini (product_name,
                                materials_detected, visual_summary, etc.)
+        enriched_context: Formatted context from Malaysian trade policy scraped data
     
     Returns:
-        Enhanced prompt string that includes both original context and vision analysis
+        Enhanced prompt string that includes original context, vision analysis, and trade policies
     """
-    if not gemini_vision_summary:
-        return original_prompt
+    prompt_parts = [original_prompt]
 
-    # Extract key information from Gemini vision results
-    product_name = (gemini_vision_summary.get("product_name") or "").strip()
-    materials = gemini_vision_summary.get("materials_detected") or []
-    visual_summary = (gemini_vision_summary.get("visual_summary") or "").strip()
-    brand = (gemini_vision_summary.get("brand_detected") or "").strip()
-    packaging_text = gemini_vision_summary.get("packaging_text") or []
+    # Add vision analysis block
+    if gemini_vision_summary and isinstance(gemini_vision_summary, dict):
+        # Extract key information from Gemini vision results
+        product_name = (gemini_vision_summary.get("product_name") or "").strip()
+        materials = gemini_vision_summary.get("materials_detected") or []
+        visual_summary = (gemini_vision_summary.get("visual_summary") or "").strip()
+        brand = (gemini_vision_summary.get("brand_detected") or "").strip()
+        packaging_text = gemini_vision_summary.get("packaging_text") or []
 
-    # Build vision context block
-    vision_context_parts = []
-    
-    if product_name:
-        vision_context_parts.append(f"Product name (from image): {product_name}")
-    
-    if materials:
-        materials_str = ", ".join([str(m).strip() for m in materials if str(m).strip()])
-        if materials_str:
-            vision_context_parts.append(f"Materials detected: {materials_str}")
-    
-    if brand:
-        vision_context_parts.append(f"Brand/Manufacturer: {brand}")
-    
-    if packaging_text:
-        packaging_str = " | ".join([str(p).strip() for p in packaging_text if str(p).strip()])
-        if packaging_str:
-            vision_context_parts.append(f"Packaging text: {packaging_str}")
-    
-    if visual_summary:
-        vision_context_parts.append(f"Visual description: {visual_summary}")
+        # Build vision context block
+        vision_context_parts = []
+        
+        if product_name:
+            vision_context_parts.append(f"Product name (from image): {product_name}")
+        
+        if materials:
+            materials_str = ", ".join([str(m).strip() for m in materials if str(m).strip()])
+            if materials_str:
+                vision_context_parts.append(f"Materials detected: {materials_str}")
+        
+        if brand:
+            vision_context_parts.append(f"Brand/Manufacturer: {brand}")
+        
+        if packaging_text:
+            packaging_str = " | ".join([str(p).strip() for p in packaging_text if str(p).strip()])
+            if packaging_str:
+                vision_context_parts.append(f"Packaging text: {packaging_str}")
+        
+        if visual_summary:
+            vision_context_parts.append(f"Visual description: {visual_summary}")
 
-    # If no vision data was extracted, return original prompt
-    if not vision_context_parts:
-        return original_prompt
+        if vision_context_parts:
+            vision_block = "\n".join(vision_context_parts)
+            prompt_parts.append(f"\n[Image Analysis from Gemini Vision]\n{vision_block}")
 
-    # Combine original prompt with vision analysis
-    vision_block = "\n".join(vision_context_parts)
-    enhanced = f"{original_prompt}\n\n[Image Analysis from Gemini Vision]\n{vision_block}"
-    
-    return enhanced
+    # Add Malaysian trade policy context from scraped sources
+    if enriched_context:
+        prompt_parts.append(f"\n{enriched_context}")
+
+    return "".join(prompt_parts)
 
 
 def _resolve_product_name(*, existing: str | None, gemini_vision_summary: dict | None) -> str:

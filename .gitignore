@@ -22,7 +22,6 @@ dist-ssr
 
 # Python
 .venv/
-__pycache__/
 *.pyc
 
 # Editor directories and files

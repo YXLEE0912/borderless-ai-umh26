@@ -4,8 +4,7 @@
  * digital access checklist, valuation, logistics, e-signature & K2 preview.
  */
 
-import { useState, useRef, useEffect, useCallback, Fragment } from "react";
-import { useNavigate } from "react-router-dom";
+import { useState, useRef, useEffect, useCallback } from "react";
 import TopNav from "@/components/TopNav";
 import {
   Building2, FileCheck2, Award, FileSearch,
@@ -22,697 +21,10 @@ import {
 // ─────────────────────────────────────────────────────────────────────────────
 // API CLIENT
 // ─────────────────────────────────────────────────────────────────────────────
-const BASE_URL = (() => {
-  const fromVite = typeof import.meta !== "undefined" ? (import.meta as any).env?.VITE_API_URL : undefined;
-  const fromNext = typeof process !== "undefined" ? (process.env as any).NEXT_PUBLIC_API_URL : undefined;
-  const raw = fromVite || fromNext || "";
-  const cleaned = raw.replace(/\/$/, "");
-  if (cleaned.includes("localhost") || cleaned.includes("127.0.0.1")) return "";
-  return cleaned;
-})();
-
-async function apiRequest(method: string, path: string, body?: unknown, params?: Record<string, string>) {
-  let url = `${BASE_URL}${path}`;
-  if (params) url += `?${new URLSearchParams(params)}`;
-  const res = await fetch(url, {
-    method,
-    headers: { "Content-Type": "application/json" },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || `HTTP ${res.status}`);
-  }
-  return res.json();
-}
-
-async function apiUpload(path: string, file: File, params?: Record<string, string>) {
-  let url = `${BASE_URL}${path}`;
-  if (params) url += `?${new URLSearchParams(params)}`;
-  const form = new FormData();
-  form.append("file", file);
-  const res = await fetch(url, { method: "POST", body: form });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || `HTTP ${res.status}`);
-  }
-  return res.json();
-}
-
-const api = {
-  createSession: () => apiRequest("POST", "/sessions"),
-  chat: (sid: string, message: string) => apiRequest("POST", "/chat", { session_id: sid, message, stream: false }),
-  verifyEntity: (sid: string, data: object) => apiRequest("POST", "/entity/verify", { session_id: sid, ...data }),
-  uploadSsm: (sid: string, file: File) => apiUpload("/entity/upload-ssm", file, { session_id: sid }),
-  addConsignee: (sid: string, data: object) => apiRequest("POST", "/consignee/add", { session_id: sid, ...data }),
-  classifyHSCode: (sid: string, data: object) => apiRequest("POST", "/classification/hs-code", { session_id: sid, ...data }),
-  uploadProduct: (sid: string, file: File) => apiUpload("/classification/upload-product", file, { session_id: sid }),
-  checkPermits: (sid: string, data: object) => apiRequest("POST", "/permits/check", { session_id: sid, ...data }),
-  setupDigitalAccess: (sid: string, company_brn: string) => apiRequest("POST", "/digital-access/setup", null, { session_id: sid, company_brn }),
-  calculateValuation: (sid: string, data: object) => apiRequest("POST", "/valuation/calculate", { session_id: sid, ...data }),
-  setupLogistics: (sid: string, data: object) => apiRequest("POST", "/logistics/setup", { session_id: sid, ...data }),
-  generateDocs: (sid: string) => apiRequest("POST", "/trade-docs/generate", null, { session_id: sid }),
-  submitK2: (sid: string) => apiRequest("POST", "/customs/submit-k2", null, { session_id: sid }),
-  searchHS: (keyword: string) => apiRequest("GET", "/hs/search", undefined, { keyword }),
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// TYPES
-// ─────────────────────────────────────────────────────────────────────────────
-type ChecklistStatus = "REQUIRED" | "PENDING" | "COMPLETED";
-type DocStatus = "ready" | "partial" | "locked";
-
-type Step = { id: number; title: string; subtitle: string; icon: React.ElementType };
-
-const STEPS: Step[] = [
-  { id: 0, title: "Entity Verification",   subtitle: "SSM & BRN Registration",   icon: Building2 },
-  { id: 1, title: "Consignee Details",      subtitle: "Buyer & Importer Info",     icon: UserSquare2 },
-  { id: 2, title: "Classification",         subtitle: "HS Code & Duty Lookup",     icon: FileSearch },
-  { id: 3, title: "Special Permits",        subtitle: "SIRIM / Halal / MITI",      icon: Award },
-  { id: 4, title: "Digital Access",         subtitle: "MyCIEDS & Dagang Net",      icon: KeyRound },
-  { id: 5, title: "Financial Valuation",    subtitle: "FOB, Freight & FX",         icon: Coins },
-  { id: 6, title: "Logistics & Metrics",    subtitle: "Mode, Vessel, Weight",      icon: PackageSearch },
-  { id: 7, title: "Trade Docs & Signatory", subtitle: "Invoice, B/L, Declaration", icon: FileText },
-  { id: 8, title: "Customs Submission",     subtitle: "K2 Form Preview",           icon: FileCheck2 },
-];
-
-type ChecklistItem = { label: string; status: ChecklistStatus };
-type ActionButton = { label: string; icon: React.ElementType; intent: "primary" | "ghost"; action: string };
-
-type Message =
-  | { id: string; role: "user"; kind: "text"; content: string }
-  | { id: string; role: "user"; kind: "upload"; content: string; fileName: string }
-  | { id: string; role: "assistant"; kind: "processing"; content: string }
-  | { id: string; role: "assistant"; kind: "text"; content: string }
-  | { id: string; role: "assistant"; kind: "checklist"; content: string; items: ChecklistItem[]; actions?: ActionButton[] }
-  | { id: string; role: "assistant"; kind: "options"; content: string; options: { label: string; value: string }[] }
-  | { id: string; role: "assistant"; kind: "blocked"; content: string }
-  | { id: string; role: "assistant"; kind: "reference"; content: string; refTitle: string; refUrl: string }
-  | { id: string; role: "assistant"; kind: "extracted"; content: string; fields: Record<string, string>; valid: boolean }
-  | { id: string; role: "assistant"; kind: "hs-result"; content: string; hsCode: string; description: string; duty: number; fta: string[]; permitRequired: boolean; permits: string[] }
-  | { id: string; role: "assistant"; kind: "permit-upload"; content: string; permits: Array<{ name: string; key: string; uploaded: boolean }> }
-  | { id: string; role: "assistant"; kind: "valuation"; content: string; fob: number; freight: number; insurance: number; duty: number; total: number; savings: number; bestFta: string }
-  | { id: string; role: "assistant"; kind: "k2-preview"; content: string; k2Data: Record<string, unknown> };
-
-const genId = () => Math.random().toString(36).slice(2);
-
-// ─────────────────────────────────────────────────────────────────────────────
-// EXPORT DOCS CONFIG
-// ─────────────────────────────────────────────────────────────────────────────
-type ExportDoc = {
-  id: string; label: string; sublabel: string; icon: React.ElementType;
-  requiredSteps: number[]; coreRequired?: boolean;
-  conditionalKey?: "needsSirim" | "needsHalal" | "needsCoo";
-};
-
-const EXPORT_DOCS: ExportDoc[] = [
-  { id: "commercial-invoice", label: "Commercial Invoice",        sublabel: "Buyer & seller details, FOB value, FX",    icon: FileText,       requiredSteps: [0,1,2,5], coreRequired: true },
-  { id: "packing-list",       label: "Packing List",              sublabel: "Item weights, dimensions & quantities",     icon: FileSpreadsheet, requiredSteps: [0,1,2,6], coreRequired: true },
-  { id: "bol",                label: "Bill of Lading / AWB",      sublabel: "Carrier, vessel & routing information",     icon: Ship,           requiredSteps: [0,1,2,6,7], coreRequired: true },
-  { id: "k2",                 label: "K2 Declaration Form",       sublabel: "Customs export declaration (signed)",       icon: ClipboardList,  requiredSteps: [0,1,2,3,4,5,6,7], coreRequired: true },
-  { id: "coo",                label: "Certificate of Origin",     sublabel: "ATIGA / FTA Form D",                        icon: Stamp,          requiredSteps: [0,1,2,3], conditionalKey: "needsCoo" },
-  { id: "sirim",              label: "SIRIM Certificate",         sublabel: "Standards & quality compliance",            icon: ShieldCheck,    requiredSteps: [0,2,3],   conditionalKey: "needsSirim" },
-  { id: "halal",              label: "Halal Certificate",         sublabel: "JAKIM-recognised certification",            icon: Leaf,           requiredSteps: [0,2,3,4], conditionalKey: "needsHalal" },
-];
-
-type PermitFlags = { needsSirim: boolean; needsHalal: boolean; needsCoo: boolean };
-const DEFAULT_PERMIT_FLAGS: PermitFlags = { needsSirim: false, needsHalal: false, needsCoo: false };
-
-const isGating = (doc: ExportDoc, flags: PermitFlags) => {
-  if (doc.coreRequired) return true;
-  if (doc.conditionalKey && flags[doc.conditionalKey]) return true;
-  return false;
-};
-
-const docStatus = (doc: ExportDoc, completed: Set<number>): DocStatus => {
-  const missing = doc.requiredSteps.filter(s => !completed.has(s)).length;
-  if (missing === 0) return "ready";
-  if (missing <= 2) return "partial";
-  return "locked";
-};
-
-const UPLOAD_ACTION_MAP: Record<string, { accept: string; endpoint: string }> = {
-  "upload-ssm":     { accept: ".pdf,.jpg,.jpeg,.png", endpoint: "/entity/upload-ssm" },
-  "upload-product": { accept: ".pdf,.jpg,.jpeg,.png", endpoint: "/classification/upload-product" },
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// MODAL COMPONENTS
-// ─────────────────────────────────────────────────────────────────────────────
-
-function ModalOverlay({ onClose, children }: { onClose: () => void; children: React.ReactNode }) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
-      <div className="relative z-10 w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-2xl border border-border bg-card shadow-2xl" onClick={e => e.stopPropagation()}>
-        {children}
-      </div>
-    </div>
-  );
-}
-
-function ModalHeader({ title, subtitle, onClose }: { title: string; subtitle?: string; onClose: () => void }) {
-  return (
-    <div className="flex items-start justify-between border-b border-border px-5 py-4">
-      <div>
-        <h2 className="text-sm font-semibold text-foreground">{title}</h2>
-        {subtitle && <p className="mt-0.5 text-[11px] text-muted-foreground">{subtitle}</p>}
-      </div>
-      <button onClick={onClose} className="flex h-7 w-7 items-center justify-center rounded-lg hover:bg-secondary transition-base text-muted-foreground">
-        <X className="h-4 w-4" />
-      </button>
-    </div>
-  );
-}
-
-function Field({ label, required, children }: { label: string; required?: boolean; children: React.ReactNode }) {
-  return (
-    <div className="space-y-1">
-      <label className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-        {label}{required && <span className="ml-1 text-danger">*</span>}
-      </label>
-      {children}
-    </div>
-  );
-}
-
-function Input({ value, onChange, placeholder, type = "text" }: { value: string; onChange: (v: string) => void; placeholder?: string; type?: string }) {
-  return (
-    <input
-      type={type}
-      value={value}
-      onChange={e => onChange(e.target.value)}
-      placeholder={placeholder}
-      className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary/50 transition-base"
-    />
-  );
-}
-
-function Select({ value, onChange, options }: { value: string; onChange: (v: string) => void; options: string[] }) {
-  return (
-    <div className="relative">
-      <select
-        value={value}
-        onChange={e => onChange(e.target.value)}
-        className="w-full appearance-none rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50 transition-base pr-8"
-      >
-        {options.map(o => <option key={o} value={o}>{o}</option>)}
-      </select>
-      <ChevronDown className="pointer-events-none absolute right-2.5 top-2.5 h-3.5 w-3.5 text-muted-foreground" />
-    </div>
-  );
-}
-
-// ── Consignee Modal ──────────────────────────────────────────────────────────
-function ConsigneeModal({ onClose, onSubmit, loading }: {
-  onClose: () => void;
-  onSubmit: (data: object) => Promise<void>;
-  loading: boolean;
-}) {
-  const [form, setForm] = useState({
-    buyer_name: "", buyer_country: "", buyer_address: "",
-    buyer_email: "", buyer_phone: "", buyer_contact_person: "",
-    buyer_tax_id: "", importer_of_record: "", incoterm: "FOB",
-  });
-  const set = (k: string) => (v: string) => setForm(f => ({ ...f, [k]: v }));
-
-  return (
-    <ModalOverlay onClose={onClose}>
-      <ModalHeader title="Step 2 — Consignee Details" subtitle="Buyer information for Commercial Invoice & B/L" onClose={onClose} />
-      <div className="space-y-4 px-5 py-4">
-        <Field label="Buyer / Consignee Company Name" required><Input value={form.buyer_name} onChange={set("buyer_name")} placeholder="PT Sumber Rasa" /></Field>
-        <Field label="Buyer Country" required><Input value={form.buyer_country} onChange={set("buyer_country")} placeholder="Indonesia" /></Field>
-        <Field label="Buyer Full Address" required><Input value={form.buyer_address} onChange={set("buyer_address")} placeholder="Jl. Sudirman No.1, Jakarta Pusat 10110" /></Field>
-        <Field label="Contact Person"><Input value={form.buyer_contact_person} onChange={set("buyer_contact_person")} placeholder="Ahmad Rizal" /></Field>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Email" required><Input value={form.buyer_email} onChange={set("buyer_email")} placeholder="buyer@company.com" type="email" /></Field>
-          <Field label="Phone"><Input value={form.buyer_phone} onChange={set("buyer_phone")} placeholder="+62 21 1234567" /></Field>
-        </div>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Tax / VAT ID"><Input value={form.buyer_tax_id} onChange={set("buyer_tax_id")} placeholder="01.234.567.8-901.000" /></Field>
-          <Field label="Incoterm" required>
-            <Select value={form.incoterm} onChange={set("incoterm")} options={["FOB","CIF","DAP","DDP","EXW","CFR","CIP","CPT","DPU","FAS","FCA"]} />
-          </Field>
-        </div>
-        <Field label="Importer of Record (if different from buyer)"><Input value={form.importer_of_record} onChange={set("importer_of_record")} placeholder="Same as buyer" /></Field>
-      </div>
-      <div className="flex gap-2 border-t border-border px-5 py-4">
-        <button onClick={onClose} className="flex-1 rounded-xl border border-border bg-secondary px-4 py-2.5 text-sm font-semibold text-foreground hover:bg-secondary/70 transition-base">Cancel</button>
-        <button
-          onClick={() => onSubmit(form)}
-          disabled={loading || !form.buyer_name || !form.buyer_country || !form.buyer_address || !form.buyer_email}
-          className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground shadow-glow hover:opacity-90 disabled:opacity-50 transition-base"
-        >
-          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
-          Confirm Consignee
-        </button>
-      </div>
-    </ModalOverlay>
-  );
-}
-
-// ── Valuation Modal ──────────────────────────────────────────────────────────
-function ValuationModal({ onClose, onSubmit, loading, hsCode }: {
-  onClose: () => void;
-  onSubmit: (data: object) => Promise<void>;
-  loading: boolean;
-  hsCode: string;
-}) {
-  const [form, setForm] = useState({
-    fob_value_myr: "", freight_quote_myr: "", insurance_rate: "0.005",
-    invoice_currency: "MYR", invoice_amount_foreign: "", exchange_rate_to_myr: "",
-    destination_country: "", hs_code: hsCode, incoterm: "FOB",
-    fta_exemption_ref: "", import_duty_rate: "",
-  });
-  const set = (k: string) => (v: string) => setForm(f => ({ ...f, [k]: v }));
-  const isForeign = form.invoice_currency !== "MYR";
-
-  return (
-    <ModalOverlay onClose={onClose}>
-      <ModalHeader title="Step 5 — Financial Valuation" subtitle="FOB → CIF → Duty breakdown for K2 declaration" onClose={onClose} />
-      <div className="space-y-4 px-5 py-4">
-        <div className="rounded-xl bg-primary-soft/50 border border-primary/20 px-3 py-2.5 text-[11px] text-primary">
-          💡 RMCD requires CIF valuation. Provide FOB value — freight & insurance are added automatically.
-        </div>
-
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Invoice Currency" required>
-            <Select value={form.invoice_currency} onChange={set("invoice_currency")} options={["MYR","USD","EUR","GBP","SGD","CNY","JPY","AUD","HKD"]} />
-          </Field>
-          <Field label="Destination Country" required><Input value={form.destination_country} onChange={set("destination_country")} placeholder="Indonesia" /></Field>
-        </div>
-
-        {isForeign && (
-          <div className="grid grid-cols-2 gap-3">
-            <Field label={`Invoice Amount (${form.invoice_currency})`}><Input value={form.invoice_amount_foreign} onChange={set("invoice_amount_foreign")} placeholder="1000.00" /></Field>
-            <Field label="Exchange Rate to MYR"><Input value={form.exchange_rate_to_myr} onChange={set("exchange_rate_to_myr")} placeholder="4.72 (BNM)" /></Field>
-          </div>
-        )}
-
-        <Field label="FOB Value (MYR)" required><Input value={form.fob_value_myr} onChange={set("fob_value_myr")} placeholder="4720.00" /></Field>
-
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Freight Cost (MYR)" required><Input value={form.freight_quote_myr} onChange={set("freight_quote_myr")} placeholder="210.00" /></Field>
-          <Field label="Insurance Rate"><Input value={form.insurance_rate} onChange={set("insurance_rate")} placeholder="0.005 = 0.5%" /></Field>
-        </div>
-
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Import Duty Rate (0–1)"><Input value={form.import_duty_rate} onChange={set("import_duty_rate")} placeholder="0.05 = 5%" /></Field>
-          <Field label="Incoterm"><Select value={form.incoterm} onChange={set("incoterm")} options={["FOB","CIF","DAP","DDP","EXW","CFR"]} /></Field>
-        </div>
-
-        <div className="border-t border-border pt-3">
-          <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">FTA Exemption (Optional)</p>
-          <Field label="FTA Exemption Reference (if claiming Form D/RCEP)">
-            <Input value={form.fta_exemption_ref} onChange={set("fta_exemption_ref")} placeholder="ATIGA Form D · Ref CO-2026-00123" />
-          </Field>
-          <p className="mt-1.5 text-[10px] text-muted-foreground">
-            To claim FTA duty savings you need: ① Product on FTA list ② Rules of Origin met ③ CO certificate issued
-          </p>
-        </div>
-      </div>
-      <div className="flex gap-2 border-t border-border px-5 py-4">
-        <button onClick={onClose} className="flex-1 rounded-xl border border-border bg-secondary px-4 py-2.5 text-sm font-semibold text-foreground hover:bg-secondary/70 transition-base">Cancel</button>
-        <button
-          onClick={() => onSubmit({ ...form, fob_value_myr: parseFloat(form.fob_value_myr) || 0, freight_quote_myr: parseFloat(form.freight_quote_myr) || undefined, insurance_rate: parseFloat(form.insurance_rate) || 0.005, import_duty_rate: parseFloat(form.import_duty_rate) || undefined, invoice_amount_foreign: parseFloat(form.invoice_amount_foreign) || undefined, exchange_rate_to_myr: parseFloat(form.exchange_rate_to_myr) || undefined })}
-          disabled={loading || !form.fob_value_myr || !form.destination_country}
-          className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground shadow-glow hover:opacity-90 disabled:opacity-50 transition-base"
-        >
-          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Coins className="h-4 w-4" />}
-          Calculate Valuation
-        </button>
-      </div>
-    </ModalOverlay>
-  );
-}
-
-// ── Shipment / Logistics Modal ───────────────────────────────────────────────
-function ShipmentModal({ onClose, onSubmit, loading }: {
-  onClose: () => void;
-  onSubmit: (data: object) => Promise<void>;
-  loading: boolean;
-}) {
-  const [form, setForm] = useState({
-    mode: "SEA", port_of_loading: "Port Klang", port_of_discharge: "",
-    vessel_name: "", flight_number: "", voyage_number: "",
-    container_number: "", export_date: "",
-    gross_weight_kg: "", net_weight_kg: "", cbm: "",
-    number_of_packages: "", package_type: "CTN",
-    signatory_name: "", signatory_ic_or_passport: "", signatory_designation: "",
-  });
-  const set = (k: string) => (v: string) => setForm(f => ({ ...f, [k]: v }));
-  const modeIcon = { SEA: Ship, AIR: Plane, ROAD: Truck, RAIL: Train }[form.mode] || Ship;
-  const ModeIcon = modeIcon;
-
-  return (
-    <ModalOverlay onClose={onClose}>
-      <ModalHeader title="Step 6 — Shipment Details" subtitle="Logistics & transport info for K2 & Bill of Lading" onClose={onClose} />
-      <div className="space-y-4 px-5 py-4">
-
-        {/* Mode */}
-        <Field label="Mode of Transport" required>
-          <div className="grid grid-cols-4 gap-2">
-            {(["SEA","AIR","ROAD","RAIL"] as const).map(m => {
-              const Icon = { SEA: Ship, AIR: Plane, ROAD: Truck, RAIL: Train }[m];
-              return (
-                <button key={m} onClick={() => set("mode")(m)} className={`flex flex-col items-center gap-1 rounded-xl border py-2.5 text-[11px] font-semibold transition-base ${form.mode === m ? "border-primary bg-primary-soft text-primary" : "border-border bg-background text-muted-foreground hover:bg-secondary"}`}>
-                  <Icon className="h-4 w-4" />{m}
-                </button>
-              );
-            })}
-          </div>
-        </Field>
-
-        {/* Ports */}
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Port of Loading (Malaysia)" required><Input value={form.port_of_loading} onChange={set("port_of_loading")} placeholder="Port Klang" /></Field>
-          <Field label="Port of Discharge" required><Input value={form.port_of_discharge} onChange={set("port_of_discharge")} placeholder="Tanjung Priok" /></Field>
-        </div>
-
-        {/* Vessel / Flight */}
-        <div className="grid grid-cols-2 gap-3">
-          {form.mode === "SEA" && <Field label="Vessel Name" required><Input value={form.vessel_name} onChange={set("vessel_name")} placeholder="MV Bunga Mas 5" /></Field>}
-          {form.mode === "AIR" && <Field label="Flight Number" required><Input value={form.flight_number} onChange={set("flight_number")} placeholder="MH 713" /></Field>}
-          {(form.mode === "SEA" || form.mode === "AIR") && <Field label="Voyage / Flight No"><Input value={form.voyage_number} onChange={set("voyage_number")} placeholder="0412W" /></Field>}
-          {form.mode === "SEA" && <Field label="Container Number"><Input value={form.container_number} onChange={set("container_number")} placeholder="MSKU-7842150" /></Field>}
-        </div>
-
-        <Field label="Scheduled Export Date" required><Input value={form.export_date} onChange={set("export_date")} type="date" /></Field>
-
-        {/* Weights & Dimensions */}
-        <div className="grid grid-cols-3 gap-3">
-          <Field label="Gross Weight (kg)" required><Input value={form.gross_weight_kg} onChange={set("gross_weight_kg")} placeholder="480" /></Field>
-          <Field label="Net Weight (kg)"><Input value={form.net_weight_kg} onChange={set("net_weight_kg")} placeholder="440" /></Field>
-          <Field label="Volume (m³)" required><Input value={form.cbm} onChange={set("cbm")} placeholder="1.2" /></Field>
-        </div>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Number of Packages"><Input value={form.number_of_packages} onChange={set("number_of_packages")} placeholder="12" /></Field>
-          <Field label="Package Type"><Select value={form.package_type} onChange={set("package_type")} options={["CTN","PALLET","DRUM","BAG","BOX"]} /></Field>
-        </div>
-
-        {/* Signatory */}
-        <div className="rounded-xl border border-border bg-secondary/30 p-3 space-y-3">
-          <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground flex items-center gap-1.5"><PenLine className="h-3.5 w-3.5" />Authorised Signatory for K2 & Trade Docs</p>
-          <Field label="Full Name" required><Input value={form.signatory_name} onChange={set("signatory_name")} placeholder="Aisyah Rahman" /></Field>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="NRIC / Passport No." required><Input value={form.signatory_ic_or_passport} onChange={set("signatory_ic_or_passport")} placeholder="880412-14-5566" /></Field>
-            <Field label="Job Title / Designation" required><Input value={form.signatory_designation} onChange={set("signatory_designation")} placeholder="Director" /></Field>
-          </div>
-        </div>
-      </div>
-      <div className="flex gap-2 border-t border-border px-5 py-4">
-        <button onClick={onClose} className="flex-1 rounded-xl border border-border bg-secondary px-4 py-2.5 text-sm font-semibold text-foreground hover:bg-secondary/70 transition-base">Cancel</button>
-        <button
-          onClick={() => onSubmit({ ...form, gross_weight_kg: parseFloat(form.gross_weight_kg) || 0, net_weight_kg: parseFloat(form.net_weight_kg) || undefined, cbm: parseFloat(form.cbm) || 0, number_of_packages: parseInt(form.number_of_packages) || undefined })}
-          disabled={loading || !form.port_of_discharge || !form.export_date || !form.gross_weight_kg || !form.cbm || !form.signatory_name || !form.signatory_ic_or_passport || !form.signatory_designation}
-          className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground shadow-glow hover:opacity-90 disabled:opacity-50 transition-base"
-        >
-          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <ModeIcon className="h-4 w-4" />}
-          Confirm Shipment
-        </button>
-      </div>
-    </ModalOverlay>
-  );
-}
-
-// ── Digital Access Modal ─────────────────────────────────────────────────────
-function DigitalAccessModal({ onClose, onSubmit, loading, companyBrn }: {
-  onClose: () => void;
-  onSubmit: (brn: string, agentCode: string) => Promise<void>;
-  loading: boolean;
-  companyBrn: string;
-}) {
-  const [myciedsOk, setMyciedsOk] = useState(false);
-  const [dagangOk,  setDagangOk]  = useState(false);
-  const [certOk,    setCertOk]    = useState(false);
-  const [agentCode, setAgentCode] = useState("");
-  const [dagangId,  setDagangId]  = useState("");
-  const connected = myciedsOk && dagangOk;
-
-  return (
-    <ModalOverlay onClose={onClose}>
-      <ModalHeader title="Step 4 — Digital Access Setup" subtitle="Required for K2 submission via MyDagangNet / MyECIS" onClose={onClose} />
-      <div className="space-y-3 px-5 py-4">
-        <div className="rounded-xl border border-border bg-background p-4 space-y-3">
-          {/* MyCIEDS */}
-          <div className="flex items-start gap-3">
-            <button onClick={() => setMyciedsOk(v => !v)} className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-md border-2 transition-base ${myciedsOk ? "border-success bg-success text-white" : "border-border bg-background"}`}>
-              {myciedsOk && <Check className="h-3 w-3" />}
-            </button>
-            <div className="flex-1">
-              <p className="text-sm font-semibold text-foreground">MyCIEDS Account <span className="ml-1 rounded-full bg-danger-soft px-1.5 py-px text-[9px] font-bold text-danger">REQUIRED</span></p>
-              <p className="text-[11px] text-muted-foreground mt-0.5">Royal Malaysian Customs e-customs system. Register at mycustoms.gov.my</p>
-            </div>
-          </div>
-
-          {/* Dagang Net */}
-          <div className="flex items-start gap-3">
-            <button onClick={() => setDagangOk(v => !v)} className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-md border-2 transition-base ${dagangOk ? "border-success bg-success text-white" : "border-border bg-background"}`}>
-              {dagangOk && <Check className="h-3 w-3" />}
-            </button>
-            <div className="flex-1">
-              <p className="text-sm font-semibold text-foreground">Dagang Net Subscription <span className="ml-1 rounded-full bg-danger-soft px-1.5 py-px text-[9px] font-bold text-danger">REQUIRED</span></p>
-              <p className="text-[11px] text-muted-foreground mt-0.5">EDI portal for submitting K2 declarations. Register at dagangnet.com.my</p>
-              {dagangOk && (
-                <div className="mt-2">
-                  <Input value={dagangId} onChange={setDagangId} placeholder="Dagang Net User ID (optional)" />
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Digital Certificate */}
-          <div className="flex items-start gap-3">
-            <button onClick={() => setCertOk(v => !v)} className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-md border-2 transition-base ${certOk ? "border-success bg-success text-white" : "border-border bg-background"}`}>
-              {certOk && <Check className="h-3 w-3" />}
-            </button>
-            <div className="flex-1">
-              <p className="text-sm font-semibold text-foreground">Digital Certificate (Token) <span className="ml-1 rounded-full bg-warning-soft px-1.5 py-px text-[9px] font-bold text-warning">REQUIRED</span></p>
-              <p className="text-[11px] text-muted-foreground mt-0.5">PKI certificate from MSC Trustgate or Pos Digicert. Required for e-signature on K2.</p>
-            </div>
-          </div>
-        </div>
-
-        <Field label="Customs Agent Code (if using agent — optional)">
-          <Input value={agentCode} onChange={setAgentCode} placeholder="e.g. CA-MY-12345" />
-        </Field>
-
-        {connected && (
-          <div className="flex items-center gap-2 rounded-xl bg-success-soft border border-success/30 px-3 py-2.5 text-[12px] font-semibold text-success">
-            <CheckCircle2 className="h-4 w-4 shrink-0" /> Dagang Net connected. Ready for K2 submission.
-          </div>
-        )}
-      </div>
-      <div className="flex gap-2 border-t border-border px-5 py-4">
-        <button onClick={onClose} className="flex-1 rounded-xl border border-border bg-secondary px-4 py-2.5 text-sm font-semibold text-foreground hover:bg-secondary/70 transition-base">Cancel</button>
-        <button
-          onClick={() => onSubmit(companyBrn, agentCode)}
-          disabled={loading || !connected}
-          className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground shadow-glow hover:opacity-90 disabled:opacity-50 transition-base"
-        >
-          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Link2 className="h-4 w-4" />}
-          {connected ? "Confirm Digital Access" : "Tick boxes above to proceed"}
-        </button>
-      </div>
-    </ModalOverlay>
-  );
-}
-
-// ── E-Signature Modal ────────────────────────────────────────────────────────
-function SignatureModal({ signatoryName, signatoryTitle, onClose, onSign }: {
-  signatoryName: string; signatoryTitle: string;
-  onClose: () => void; onSign: () => void;
-}) {
-  const [agreed, setAgreed] = useState(false);
-  const [signed, setSigned] = useState(false);
-  const today = new Date().toLocaleDateString("en-MY", { day: "2-digit", month: "long", year: "numeric" });
-
-  const doSign = () => { setSigned(true); setTimeout(() => { onSign(); }, 800); };
-
-  return (
-    <ModalOverlay onClose={onClose}>
-      <ModalHeader title="Declaration of Truth — E-Signature" subtitle="Required for K2 submission under Customs Act 1967" onClose={onClose} />
-      <div className="space-y-4 px-5 py-4">
-        <div className="rounded-xl border border-border bg-secondary/30 p-4 text-sm text-foreground leading-relaxed">
-          <p className="font-semibold mb-2 text-[11px] uppercase tracking-wide text-muted-foreground">Declaration</p>
-          <p>
-            I, <strong>{signatoryName || "[Signatory Name]"}</strong> ({signatoryTitle || "[Designation]"}),
-            hereby declare that the particulars given in this export declaration and all accompanying
-            trade documents are true and correct to the best of my knowledge and belief.
-          </p>
-          <p className="mt-2 text-[11px] text-muted-foreground">
-            This declaration is made pursuant to Section 121 of the Customs Act 1967 (Act 235).
-            False declaration is an offence under Section 135.
-          </p>
-          <p className="mt-3 font-medium">Date: {today}</p>
-        </div>
-
-        <label className="flex items-start gap-3 cursor-pointer">
-          <button onClick={() => setAgreed(v => !v)} className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-md border-2 transition-base ${agreed ? "border-primary bg-primary text-white" : "border-border bg-background"}`}>
-            {agreed && <Check className="h-3 w-3" />}
-          </button>
-          <span className="text-sm text-foreground">I confirm the declaration above and authorise submission of the K2 export declaration on my behalf.</span>
-        </label>
-
-        {signed && (
-          <div className="flex items-center gap-2 rounded-xl bg-success-soft border border-success/30 px-3 py-2.5 text-sm font-semibold text-success">
-            <CheckCircle2 className="h-4 w-4" /> Signed. Documents are ready for final review.
-          </div>
-        )}
-      </div>
-      <div className="flex gap-2 border-t border-border px-5 py-4">
-        <button onClick={onClose} className="flex-1 rounded-xl border border-border bg-secondary px-4 py-2.5 text-sm font-semibold text-foreground">Cancel</button>
-        <button
-          onClick={doSign}
-          disabled={!agreed || signed}
-          className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-gradient-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground shadow-glow hover:opacity-90 disabled:opacity-50 transition-base"
-        >
-          {signed ? <CheckCircle2 className="h-4 w-4" /> : <PenLine className="h-4 w-4" />}
-          {signed ? "Signed ✓" : "Sign Declaration"}
-        </button>
-      </div>
-    </ModalOverlay>
-  );
-}
-
-// ── K2 Preview Modal ─────────────────────────────────────────────────────────
-function K2PreviewModal({ k2Data, onClose, onSubmit, loading }: {
-  k2Data: Record<string, unknown>; onClose: () => void;
-  onSubmit: () => void; loading: boolean;
-}) {
-  const form = (k2Data?.k2_form_data || {}) as Record<string, unknown>;
-  const exp  = (form?.exporter || {}) as Record<string, string>;
-  const con  = (form?.consignee || {}) as Record<string, string>;
-  const gds  = (form?.goods || {}) as Record<string, unknown>;
-  const val  = (form?.valuation || {}) as Record<string, number>;
-  const dty  = (form?.duty || {}) as Record<string, number>;
-  const trp  = (form?.transport || {}) as Record<string, string>;
-  const sig  = (form?.signatory || {}) as Record<string, string>;
-
-  function K2Row({ label, value }: { label: string; value?: unknown }) {
-    return (
-      <div className="flex items-start justify-between gap-4 py-1.5 border-b border-border/50 last:border-0">
-        <span className="text-[11px] text-muted-foreground shrink-0 w-36">{label}</span>
-        <span className="text-[12px] font-medium text-foreground text-right">{String(value ?? "—")}</span>
-      </div>
-    );
-  }
-
-  function Section({ title, children }: { title: string; children: React.ReactNode }) {
-    return (
-      <div className="rounded-xl border border-border bg-background p-3 space-y-0">
-        <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{title}</p>
-        {children}
-      </div>
-    );
-  }
-
-  return (
-    <ModalOverlay onClose={onClose}>
-      <ModalHeader title="K2 Export Declaration — Preview" subtitle="Review before submitting to RMCD via Dagang Net" onClose={onClose} />
-      <div className="space-y-3 px-5 py-4">
-        <div className="flex items-center justify-between rounded-xl bg-primary-soft border border-primary/30 px-3 py-2">
-          <span className="text-[11px] font-bold text-primary">K2 Reference</span>
-          <span className="text-sm font-mono font-bold text-primary">{String(k2Data?.k2_reference || "K2-MY-2026-PENDING")}</span>
-        </div>
-
-        <Section title="Exporter">
-          <K2Row label="Company" value={exp.name} /><K2Row label="BRN" value={exp.brn} /><K2Row label="Address" value={exp.address} />
-        </Section>
-        <Section title="Consignee">
-          <K2Row label="Name" value={con.name} /><K2Row label="Country" value={con.country_code} /><K2Row label="Address" value={con.address} />
-        </Section>
-        <Section title="Transport">
-          <K2Row label="Mode" value={trp.mode_description} /><K2Row label="Vessel / Flight" value={trp.vessel_flight_name} />
-          <K2Row label="POL" value={trp.port_of_loading_code} /><K2Row label="POD" value={trp.port_of_discharge_code} />
-        </Section>
-        <Section title="Goods">
-          <K2Row label="HS Code" value={gds.hs_code as string} /><K2Row label="Description" value={gds.commodity_description as string} />
-          <K2Row label="Quantity" value={`${gds.quantity} ${gds.unit_of_quantity}`} />
-          <K2Row label="Gross Weight" value={`${gds.gross_weight_kg} kg`} />
-        </Section>
-        <Section title="Valuation & Duty">
-          <K2Row label="FOB (MYR)" value={`RM ${Number(val.fob_value_myr || 0).toLocaleString()}`} />
-          <K2Row label="CIF (MYR)" value={`RM ${Number(val.cif_value_myr || 0).toLocaleString()}`} />
-          <K2Row label="Export Duty" value={`RM ${Number(dty.export_duty_myr || 0).toLocaleString()}`} />
-          <K2Row label="Total Duty" value={`RM ${Number(dty.total_duty_myr || 0).toLocaleString()}`} />
-        </Section>
-        <Section title="Signatory">
-          <K2Row label="Name" value={sig.name} /><K2Row label="NRIC/Passport" value={sig.nric_passport} /><K2Row label="Designation" value={sig.designation} />
-        </Section>
-
-        {(k2Data?.compliance_notes as string[] || []).length > 0 && (
-          <div className="rounded-xl bg-warning-soft border border-warning/30 p-3 text-[11px] text-warning space-y-1">
-            {(k2Data.compliance_notes as string[]).map((n, i) => <p key={i}>⚠ {n}</p>)}
-          </div>
-        )}
-      </div>
-      <div className="flex gap-2 border-t border-border px-5 py-4">
-        <button onClick={onClose} className="flex-1 rounded-xl border border-border bg-secondary px-4 py-2.5 text-sm font-semibold text-foreground">Close</button>
-        <button
-          onClick={onSubmit}
-          disabled={loading}
-          className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-gradient-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground shadow-glow hover:opacity-90 disabled:opacity-50 transition-base"
-        >
-          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-          Submit to Dagang Net
-        </button>
-      </div>
-    </ModalOverlay>
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// STEP FLOW DEFINITIONS
-// ─────────────────────────────────────────────────────────────────────────────
-const STEP_FLOW: Record<number, { intro: Message; onComplete: Message }> = {
-  0: {
-    intro: { id: "i0", role: "assistant", kind: "checklist", content: "To verify your entity, I need your SSM (Suruhanjaya Syarikat Malaysia) certificate. Upload a PDF or image — I'll extract and validate all fields automatically.", items: [{ label: "SSM Certificate (Form 9 / Form D)", status: "REQUIRED" }, { label: "Business Registration Number (BRN)", status: "REQUIRED" }, { label: "Director NRIC verification", status: "PENDING" }], actions: [{ label: "Upload SSM Certificate", icon: Upload, intent: "primary", action: "upload-ssm" }, { label: "Verify SSM manually", icon: ShieldCheck, intent: "ghost", action: "verify-ssm" }] },
-    onComplete: { id: "c0", role: "assistant", kind: "text", content: "✅ Entity verified. Company linked to RMCD records. Now collecting your overseas buyer details." },
-  },
-  1: {
-    intro: { id: "i1", role: "assistant", kind: "checklist", content: "Every export declaration requires the consignee on record. This pre-fills the Commercial Invoice, B/L, and K2 automatically.", items: [{ label: "Consignee (Buyer) name & full address", status: "REQUIRED" }, { label: "Contact person, email & phone", status: "REQUIRED" }, { label: "Importer Tax / VAT ID (destination country)", status: "PENDING" }, { label: "Incoterm & notify party", status: "PENDING" }], actions: [{ label: "Add Consignee Details", icon: UserSquare2, intent: "primary", action: "add-consignee" }] },
-    onComplete: { id: "c1", role: "assistant", kind: "text", content: "✅ Consignee captured and screened. No sanctions flags. Mapping product classification next." },
-  },
-  2: {
-    intro: { id: "i2", role: "assistant", kind: "checklist", content: "The HS Code drives every downstream permit and duty calculation. Upload a product photo or describe the product.", items: [{ label: "Product description & specs", status: "REQUIRED" }, { label: "HS Code lookup (8-digit AHTN)", status: "PENDING" }, { label: "Import duty rate at destination", status: "PENDING" }], actions: [{ label: "Upload Product Photo", icon: Upload, intent: "primary", action: "upload-product" }, { label: "Search HS Code", icon: FileSearch, intent: "ghost", action: "lookup-hs" }] },
-    onComplete: { id: "c2", role: "assistant", kind: "text", content: "✅ HS Classification complete. Duty rates and FTA eligibility determined. Checking permit dependencies." },
-  },
-  3: {
-    intro: { id: "i3", role: "assistant", kind: "text", content: "Checking permit requirements against PUA122 (Customs Prohibition of Exports Order). Any SIRIM, Halal, MITI, or strategic goods triggers will appear below." },
-    onComplete: { id: "c3", role: "assistant", kind: "text", content: "✅ Permit check complete. Proceeding to digital access setup." },
-  },
-  4: {
-    intro: { id: "i4", role: "assistant", kind: "checklist", content: "K2 declaration must be submitted via Dagang Net. Confirm your digital access and authentication setup.", items: [{ label: "MyCIEDS account", status: "REQUIRED" }, { label: "Dagang Net subscription", status: "REQUIRED" }, { label: "Digital Certificate (token)", status: "REQUIRED" }], actions: [{ label: "Connect Dagang Net", icon: Link2, intent: "primary", action: "connect-dagang" }] },
-    onComplete: { id: "c4", role: "assistant", kind: "text", content: "✅ Dagang Net linked. Digital Certificate active. Now valuing the shipment." },
-  },
-  5: {
-    intro: { id: "i5", role: "assistant", kind: "checklist", content: "RMCD requires a full CIF valuation for K2. I'll convert foreign currency automatically using BNM reference rates.", items: [{ label: "FOB value (goods at Malaysian port)", status: "REQUIRED" }, { label: "Freight cost (MYR)", status: "REQUIRED" }, { label: "Insurance cost (CIF component)", status: "REQUIRED" }, { label: "Invoice currency & exchange rate", status: "PENDING" }, { label: "FTA exemption reference (if claiming)", status: "PENDING" }], actions: [{ label: "Enter Valuation", icon: Coins, intent: "primary", action: "enter-valuation" }] },
-    onComplete: { id: "c5", role: "assistant", kind: "text", content: "✅ Valuation locked. CIF and landed cost calculated. FTA savings assessed." },
-  },
-  6: {
-    intro: { id: "i6", role: "assistant", kind: "checklist", content: "Logistics details flow directly into the K2 form and Bill of Lading. Get this right to avoid port holds.", items: [{ label: "Mode of Transport (Sea / Air / Rail / Road)", status: "REQUIRED" }, { label: "Vessel name or Flight number", status: "REQUIRED" }, { label: "Port of Loading & Port of Discharge", status: "REQUIRED" }, { label: "Scheduled export date", status: "REQUIRED" }, { label: "Gross weight (kg) & volume (m³)", status: "PENDING" }, { label: "Packaging type & container number", status: "PENDING" }, { label: "Authorised signatory (NRIC / Passport)", status: "REQUIRED" }], actions: [{ label: "Add Shipment Details", icon: PackageSearch, intent: "primary", action: "add-shipment" }] },
-    onComplete: { id: "c6", role: "assistant", kind: "text", content: "✅ Shipment details confirmed. Signatory recorded. Generating trade documents." },
-  },
-  7: {
-    intro: { id: "i7", role: "assistant", kind: "checklist", content: "Generating Commercial Invoice, Packing List, Certificate of Origin, and Bill of Lading from verified data. Sign the declaration to unlock K2.", items: [{ label: "Commercial Invoice", status: "PENDING" }, { label: "Packing List", status: "PENDING" }, { label: "Bill of Lading / Air Waybill", status: "PENDING" }, { label: "Certificate of Origin (if FTA claimed)", status: "PENDING" }, { label: "Declaration of truth (e-signature)", status: "REQUIRED" }], actions: [{ label: "Generate Trade Docs", icon: FileText, intent: "primary", action: "generate-docs" }, { label: "Sign Declaration", icon: PenLine, intent: "ghost", action: "sign-declaration" }] },
-    onComplete: { id: "c7", role: "assistant", kind: "text", content: "✅ All trade documents generated and signed. Ready for K2 submission." },
-  },
-  8: {
-    intro: { id: "i8", role: "assistant", kind: "text", content: "All dependencies satisfied. K2 Customs Declaration is ready. Review the form below then submit to RMCD via Dagang Net." },
-    onComplete: { id: "c8", role: "assistant", kind: "text", content: "🎉 K2 submitted. RMCD acknowledgement expected within 4 business hours." },
-  },
-};
-
-
-// ─────────────────────────────────────────────────────────────────────────────
-// AI HELPERS — module level (no hooks needed)
-// ─────────────────────────────────────────────────────────────────────────────
 const GLM_KEY = "sk-fd9182ed29f4722fd9c3fc8b852a43e39c01234247156a93";
 const GLM_URL = "https://api.ilmu.ai/v1/chat/completions";
 const GLM_MDL = "ilmu-glm-5.1";
-const GEM_KEY = "AIzaSyDXnhf8TrJzUq1rkC2c5_XKuUpvDMZXU-8";
-const GEM_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEM_KEY}`;
+// Gemini Vision replaced with GLM multimodal + text-fallback (see geminiVision below)
 
 async function glmJSON(system: string, user: string, history: {role:string;content:string}[] = []): Promise<Record<string,unknown>> {
   const r = await fetch(GLM_URL, {
@@ -748,23 +60,52 @@ async function glmText(system: string, user: string, history: {role:string;conte
   return (d.choices?.[0]?.message?.content as string) ?? "";
 }
 
+/**
+ * Document extraction — no vision API required.
+ * For PDFs with a text layer: extracts printable ASCII and sends to GLM.
+ * For JPEGs/images (no text layer): returns a partial result that triggers
+ * the manual-entry flow in the SSM handler.
+ */
+// ── Claude Vision — uses Anthropic API for image/PDF understanding ──────────
 async function geminiVision(b64: string, mime: string, prompt: string): Promise<Record<string,unknown>> {
-  const r = await fetch(GEM_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ parts: [
-        { inline_data: { mime_type: mime, data: b64 } },
-        { text: prompt + "\n\nReturn ONLY valid JSON. No markdown fences." },
-      ]}],
-      generationConfig: { maxOutputTokens: 2000, temperature: 0.1 },
-    }),
-  });
-  if (!r.ok) throw new Error(`Vision ${r.status}`);
-  const d = await r.json();
-  const raw: string = d.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
-  try { return JSON.parse(raw.replace(/```json|```/g, "").trim()); }
-  catch { return { parse_error: true, raw }; }
+  const isPDF = mime === "application/pdf" || mime.includes("pdf");
+  const mediaType = (isPDF ? "application/pdf" : (mime.startsWith("image/") ? mime : "image/jpeg")) as "application/pdf" | "image/jpeg" | "image/png" | "image/gif" | "image/webp";
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 1000,
+        messages: [{
+          role: "user",
+          content: [
+            { type: isPDF ? "document" : "image", source: { type: "base64", media_type: mediaType, data: b64 } },
+            { type: "text", text: prompt + "\n\nReturn ONLY valid JSON. No markdown fences, no explanation." },
+          ],
+        }],
+      }),
+    });
+    if (!res.ok) throw new Error(`Claude API ${res.status}`);
+    const d = await res.json();
+    const raw: string = d.content?.[0]?.text ?? "{}";
+    try { return JSON.parse(raw.replace(/```json|```/g, "").trim()); }
+    catch { return { parse_error: true, raw }; }
+  } catch (err) {
+    if (isPDF) {
+      try {
+        const binary = atob(b64);
+        const printable = binary.split("").map(c => {
+          const code = c.charCodeAt(0);
+          return (code >= 32 && code < 127) || code === 10 || code === 13 ? c : " ";
+        }).join("").replace(/\s{3,}/g, " ").trim().slice(0, 4000);
+        if (printable.length > 100) {
+          return await glmJSON("Extract required fields from this document. Return ONLY valid JSON.", `${prompt}\n\nDocument text:\n${printable}`);
+        }
+      } catch { /* ignore */ }
+    }
+    return { confidence: 0.0, _vision_failed: true };
+  }
 }
 
 function fileToB64(file: File): Promise<string> {
@@ -1732,1282 +1073,1135 @@ function flatLines(obj: Record<string,unknown>, pre = ""): string[] {
   });
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STEP CONFIG
+// ─────────────────────────────────────────────────────────────────────────────
+const STEPS = [
+  { id: 0, title: "Entity Verification",   icon: Building2,    subtitle: "SSM / BRN" },
+  { id: 1, title: "Consignee Details",      icon: UserSquare2,  subtitle: "Buyer info" },
+  { id: 2, title: "HS Classification",      icon: FileSearch,   subtitle: "Product & HS Code" },
+  { id: 3, title: "Special Permits",        icon: Award,        subtitle: "SIRIM / Halal / MITI" },
+  { id: 4, title: "Digital Access",         icon: KeyRound,     subtitle: "Dagang Net" },
+  { id: 5, title: "Financial Valuation",    icon: Coins,        subtitle: "FOB / CIF / FTA" },
+  { id: 6, title: "Logistics & Shipment",   icon: PackageSearch,subtitle: "Mode / Vessel / Weight" },
+  { id: 7, title: "Trade Documents",        icon: FileText,     subtitle: "Invoice / B/L / COO" },
+  { id: 8, title: "K2 Customs Declaration", icon: FileCheck2,   subtitle: "Submit to RMCD" },
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODALS
+// ─────────────────────────────────────────────────────────────────────────────
+function MO({ onClose, children }: { onClose: () => void; children: React.ReactNode }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+      <div className="relative z-10 w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-2xl border border-border bg-card shadow-2xl" onClick={e => e.stopPropagation()}>
+        {children}
+      </div>
+    </div>
+  );
+}
+function MH({ title, sub, onClose }: { title: string; sub?: string; onClose: () => void }) {
+  return (
+    <div className="flex items-start justify-between border-b border-border px-5 py-4">
+      <div><p className="text-sm font-semibold text-foreground">{title}</p>{sub && <p className="text-[11px] text-muted-foreground mt-0.5">{sub}</p>}</div>
+      <button onClick={onClose} className="flex h-7 w-7 items-center justify-center rounded-lg hover:bg-secondary text-muted-foreground"><X className="h-4 w-4" /></button>
+    </div>
+  );
+}
+function MF({ label, req, children }: { label: string; req?: boolean; children: React.ReactNode }) {
+  return (
+    <div className="space-y-1">
+      <label className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{label}{req && <span className="ml-1 text-red-500">*</span>}</label>
+      {children}
+    </div>
+  );
+}
+function MI({ value, onChange, placeholder, type = "text" }: { value: string; onChange: (v: string) => void; placeholder?: string; type?: string }) {
+  return <input type={type} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder} className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary/50" />;
+}
+function MS({ value, onChange, options }: { value: string; onChange: (v: string) => void; options: string[] }) {
+  return (
+    <div className="relative">
+      <select value={value} onChange={e => onChange(e.target.value)} className="w-full appearance-none rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary/50 pr-8">
+        {options.map(o => <option key={o}>{o}</option>)}
+      </select>
+      <ChevronDown className="pointer-events-none absolute right-2.5 top-2.5 h-3.5 w-3.5 text-muted-foreground" />
+    </div>
+  );
+}
+function MBtn({ onClick, disabled, loading, icon: Icon, children, variant = "primary" }: { onClick: () => void; disabled?: boolean; loading?: boolean; icon?: React.ElementType; children: React.ReactNode; variant?: "primary" | "ghost" }) {
+  return (
+    <button onClick={onClick} disabled={disabled || loading} className={`flex flex-1 items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold disabled:opacity-50 transition-all ${variant === "primary" ? "bg-primary text-primary-foreground shadow-glow hover:opacity-90" : "border border-border bg-secondary text-foreground hover:bg-secondary/70"}`}>
+      {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : Icon ? <Icon className="h-4 w-4" /> : null}
+      {children}
+    </button>
+  );
+}
+
+// Step 1 – Entity (SSM upload → extract → confirm)
+function EntityModal({ onClose, onSubmit, loading, prefill }: {
+  onClose: () => void;
+  onSubmit: (d: object) => void;
+  loading: boolean;
+  prefill?: Record<string, string>;
+}) {
+  const [stage, setStage] = useState<"upload" | "extracting" | "confirm">(prefill ? "confirm" : "upload");
+  const [f, setF] = useState({
+    company_name:        prefill?.company_name        ?? "",
+    registration_number: prefill?.registration_number ?? "",
+    director_nric:       prefill?.director_nric       ?? "",
+    company_type:        prefill?.company_type        ?? "Sdn Bhd",
+    company_status:      prefill?.company_status      ?? "Active",
+    registered_address:  prefill?.registered_address  ?? "",
+  });
+  const [confidence, setConfidence] = useState(prefill ? Number(prefill.confidence ?? 0) : 0);
+  const [fileName, setFileName]     = useState(prefill?.fileName ?? "");
+  const [extractErr, setExtractErr] = useState("");
+  const fileRef = useRef<HTMLInputElement>(null);
+  const s = (k: string) => (v: string) => setF(p => ({ ...p, [k]: v }));
+
+  const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setFileName(file.name);
+    setStage("extracting");
+    setExtractErr("");
+    try {
+      const b64 = await fileToB64(file);
+      const mime = fileMime(file);
+      const r = await geminiVision(b64, mime,
+        `You are an OCR engine for Malaysian SSM company registration documents (Form 9, Form D, MyCoID, e-Info printout).
+Extract ALL visible fields. Return ONLY valid JSON:
+{"is_valid":false,"company_name":"","registration_number":"","registration_date":"","company_type":"","company_status":"active","registered_address":"","directors":[{"name":"","nric":"","designation":"Director"}],"paid_up_capital":"","sst_registered":false,"confidence":0.0,"extraction_notes":""}`
+      );
+      if (r._vision_failed) {
+        setExtractErr("Could not read the document automatically. Please fill in your details below.");
+      } else {
+        setConfidence(Number(r.confidence ?? 0));
+        setF({
+          company_name:        String(r.company_name        ?? ""),
+          registration_number: String(r.registration_number ?? ""),
+          director_nric:       String((r.directors as Array<Record<string,string>> ?? [])[0]?.nric ?? ""),
+          company_type:        String(r.company_type        ?? "Sdn Bhd"),
+          company_status:      String(r.company_status      ?? "Active"),
+          registered_address:  String(r.registered_address  ?? ""),
+        });
+      }
+      setStage("confirm");
+    } catch (err) {
+      setExtractErr(String(err instanceof Error ? err.message : err));
+      setStage("confirm"); // still let user fill manually
+    }
+  };
+
+  return (
+    <MO onClose={onClose}>
+      <MH title="Step 1 — Entity Verification" sub="Upload your SSM certificate to verify your company" onClose={onClose} />
+
+      {stage === "upload" && (
+        <div className="px-5 py-8 flex flex-col items-center gap-4">
+          <input ref={fileRef} type="file" className="hidden" accept=".pdf,.jpg,.jpeg,.png" onChange={handleFile} />
+          <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10">
+            <Upload className="h-8 w-8 text-primary" />
+          </div>
+          <div className="text-center">
+            <p className="font-semibold text-foreground">Upload SSM Certificate</p>
+            <p className="text-sm text-muted-foreground mt-1">PDF, JPG or PNG · Form 9 / Form D / MyCoID</p>
+          </div>
+          <button onClick={() => fileRef.current?.click()} className="flex items-center gap-2 rounded-xl bg-primary px-6 py-2.5 text-sm font-semibold text-white shadow-glow hover:opacity-90">
+            <Upload className="h-4 w-4" />Choose File
+          </button>
+          <button onClick={() => setStage("confirm")} className="text-xs text-muted-foreground hover:text-foreground underline">
+            Enter details manually instead
+          </button>
+        </div>
+      )}
+
+      {stage === "extracting" && (
+        <div className="px-5 py-12 flex flex-col items-center gap-4">
+          <Loader2 className="h-10 w-10 animate-spin text-primary" />
+          <p className="text-sm font-medium text-foreground">Reading {fileName}…</p>
+          <p className="text-xs text-muted-foreground">Extracting company details from your SSM certificate</p>
+        </div>
+      )}
+
+      {stage === "confirm" && (
+        <>
+          {confidence > 0 && (
+            <div className={`mx-5 mt-4 flex items-center gap-2 rounded-xl px-3 py-2 text-[11px] font-semibold ${confidence >= 0.7 ? "bg-green-50 border border-green-200 text-green-700" : "bg-yellow-50 border border-yellow-200 text-yellow-700"}`}>
+              {confidence >= 0.7 ? <CheckCircle2 className="h-3.5 w-3.5" /> : <AlertCircle className="h-3.5 w-3.5" />}
+              Extracted from {fileName} · {Math.round(confidence * 100)}% confidence
+              {confidence < 0.7 && " — please review and correct below"}
+            </div>
+          )}
+          {extractErr && (
+            <div className="mx-5 mt-4 rounded-xl bg-yellow-50 border border-yellow-200 px-3 py-2 text-[11px] text-yellow-700">
+              ⚠️ Could not auto-extract — please fill in manually.
+            </div>
+          )}
+          <div className="space-y-4 px-5 py-4">
+            <MF label="Company Name (as per SSM)" req><MI value={f.company_name} onChange={s("company_name")} placeholder="e.g. ABC Trading Sdn Bhd" /></MF>
+            <MF label="BRN / Registration Number" req><MI value={f.registration_number} onChange={s("registration_number")} placeholder="e.g. 202301012345" /></MF>
+            <MF label="Registered Address"><MI value={f.registered_address} onChange={s("registered_address")} placeholder="No. 1, Jalan xxx, KL" /></MF>
+            <div className="grid grid-cols-2 gap-3">
+              <MF label="Company Type"><MS value={f.company_type} onChange={s("company_type")} options={["Sdn Bhd","Bhd","Enterprise","LLP","PLT","Partnership"]} /></MF>
+              <MF label="Status"><MS value={f.company_status} onChange={s("company_status")} options={["Active","Dormant"]} /></MF>
+            </div>
+            <MF label="Director NRIC (optional)"><MI value={f.director_nric} onChange={s("director_nric")} placeholder="e.g. 880101-14-1234" /></MF>
+          </div>
+          <div className="flex gap-2 border-t border-border px-5 py-4">
+            <MBtn onClick={() => setStage("upload")} variant="ghost" icon={Upload}>Re-upload</MBtn>
+            <MBtn onClick={() => onSubmit(f)} disabled={!f.company_name || !f.registration_number} loading={loading} icon={ShieldCheck}>Confirm & Verify</MBtn>
+          </div>
+        </>
+      )}
+    </MO>
+  );
+}
+
+// Step 2 – Consignee
+function ConsigneeModal({ onClose, onSubmit, loading }: { onClose: () => void; onSubmit: (d: object) => void; loading: boolean }) {
+  const [f, setF] = useState({ buyer_name: "", buyer_country: "", buyer_address: "", buyer_email: "", buyer_phone: "", buyer_contact_person: "", buyer_tax_id: "", incoterm: "FOB", importer_of_record: "" });
+  const s = (k: string) => (v: string) => setF(p => ({ ...p, [k]: v }));
+  return (
+    <MO onClose={onClose}>
+      <MH title="Step 2 — Consignee Details" sub="Buyer information for Invoice & B/L" onClose={onClose} />
+      <div className="space-y-4 px-5 py-4">
+        <MF label="Buyer Company Name" req><MI value={f.buyer_name} onChange={s("buyer_name")} placeholder="PT Sumber Rasa" /></MF>
+        <MF label="Buyer Country" req><MI value={f.buyer_country} onChange={s("buyer_country")} placeholder="Indonesia" /></MF>
+        <MF label="Buyer Full Address" req><MI value={f.buyer_address} onChange={s("buyer_address")} placeholder="Jl. Sudirman No.1, Jakarta" /></MF>
+        <MF label="Contact Person"><MI value={f.buyer_contact_person} onChange={s("buyer_contact_person")} placeholder="Ahmad Rizal" /></MF>
+        <div className="grid grid-cols-2 gap-3">
+          <MF label="Email" req><MI value={f.buyer_email} onChange={s("buyer_email")} placeholder="buyer@company.com" type="email" /></MF>
+          <MF label="Phone"><MI value={f.buyer_phone} onChange={s("buyer_phone")} placeholder="+62 21 1234567" /></MF>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <MF label="Tax / VAT ID"><MI value={f.buyer_tax_id} onChange={s("buyer_tax_id")} placeholder="01.234.567.8-901" /></MF>
+          <MF label="Incoterm" req><MS value={f.incoterm} onChange={s("incoterm")} options={["FOB","CIF","DAP","DDP","EXW","CFR","CIP","CPT","DPU","FAS","FCA"]} /></MF>
+        </div>
+        <MF label="Importer of Record (if different)"><MI value={f.importer_of_record} onChange={s("importer_of_record")} placeholder="Same as buyer" /></MF>
+      </div>
+      <div className="flex gap-2 border-t border-border px-5 py-4">
+        <MBtn onClick={onClose} variant="ghost">Cancel</MBtn>
+        <MBtn onClick={() => onSubmit(f)} disabled={!f.buyer_name || !f.buyer_country || !f.buyer_address || !f.buyer_email} loading={loading} icon={UserSquare2}>Confirm Consignee</MBtn>
+      </div>
+    </MO>
+  );
+}
+
+// Step 5 – Valuation
+function ValuationModal({ onClose, onSubmit, loading, hsCode }: { onClose: () => void; onSubmit: (d: object) => void; loading: boolean; hsCode: string }) {
+  const [f, setF] = useState({ fob_value_myr: "", freight_quote_myr: "", insurance_rate: "0.005", invoice_currency: "MYR", invoice_amount_foreign: "", exchange_rate_to_myr: "", destination_country: "", hs_code: hsCode, incoterm: "FOB", import_duty_rate: "", fta_co_number: "" });
+  const s = (k: string) => (v: string) => setF(p => ({ ...p, [k]: v }));
+  const isFx = f.invoice_currency !== "MYR";
+  return (
+    <MO onClose={onClose}>
+      <MH title="Step 5 — Financial Valuation" sub="FOB → CIF → Duty breakdown for K2" onClose={onClose} />
+      <div className="space-y-4 px-5 py-4">
+        <div className="rounded-xl bg-blue-50 border border-blue-200 px-3 py-2.5 text-[11px] text-blue-700">💡 RMCD requires CIF valuation. Provide FOB — freight & insurance added automatically.</div>
+        <div className="grid grid-cols-2 gap-3">
+          <MF label="Invoice Currency" req><MS value={f.invoice_currency} onChange={s("invoice_currency")} options={["MYR","USD","EUR","GBP","SGD","CNY","JPY","AUD","HKD"]} /></MF>
+          <MF label="Destination Country" req><MI value={f.destination_country} onChange={s("destination_country")} placeholder="Indonesia" /></MF>
+        </div>
+        {isFx && <div className="grid grid-cols-2 gap-3">
+          <MF label={`Amount (${f.invoice_currency})`}><MI value={f.invoice_amount_foreign} onChange={s("invoice_amount_foreign")} placeholder="1000.00" /></MF>
+          <MF label="Rate to MYR"><MI value={f.exchange_rate_to_myr} onChange={s("exchange_rate_to_myr")} placeholder="4.72" /></MF>
+        </div>}
+        <MF label="FOB Value (MYR)" req><MI value={f.fob_value_myr} onChange={s("fob_value_myr")} placeholder="4720.00" /></MF>
+        <div className="grid grid-cols-2 gap-3">
+          <MF label="Freight Cost (MYR)" req><MI value={f.freight_quote_myr} onChange={s("freight_quote_myr")} placeholder="210.00" /></MF>
+          <MF label="Insurance Rate"><MI value={f.insurance_rate} onChange={s("insurance_rate")} placeholder="0.005 = 0.5%" /></MF>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <MF label="Import Duty Rate (0–1)"><MI value={f.import_duty_rate} onChange={s("import_duty_rate")} placeholder="0.05 = 5%" /></MF>
+          <MF label="Incoterm"><MS value={f.incoterm} onChange={s("incoterm")} options={["FOB","CIF","DAP","DDP","EXW","CFR"]} /></MF>
+        </div>
+        <div className="border-t border-border pt-3 space-y-2">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">FTA Claim (Optional)</p>
+          <MF label="CO Certificate Number (Form D / RCEP Form)"><MI value={f.fta_co_number} onChange={s("fta_co_number")} placeholder="CO-MY-2026-00123" /></MF>
+          <p className="text-[10px] text-muted-foreground">To claim FTA: ① Product on FTA list ② Rules of Origin met ③ CO certificate issued by MATRADE</p>
+        </div>
+      </div>
+      <div className="flex gap-2 border-t border-border px-5 py-4">
+        <MBtn onClick={onClose} variant="ghost">Cancel</MBtn>
+        <MBtn onClick={() => onSubmit({ ...f, fob_value_myr: parseFloat(f.fob_value_myr)||0, freight_quote_myr: parseFloat(f.freight_quote_myr)||undefined, insurance_rate: parseFloat(f.insurance_rate)||0.005, import_duty_rate: parseFloat(f.import_duty_rate)||undefined, invoice_amount_foreign: parseFloat(f.invoice_amount_foreign)||undefined, exchange_rate_to_myr: parseFloat(f.exchange_rate_to_myr)||undefined })} disabled={!f.fob_value_myr||!f.destination_country} loading={loading} icon={Coins}>Calculate Valuation</MBtn>
+      </div>
+    </MO>
+  );
+}
+
+// Step 6 – Logistics
+function ShipmentModal({ onClose, onSubmit, loading }: { onClose: () => void; onSubmit: (d: object) => void; loading: boolean }) {
+  const [f, setF] = useState({ mode: "SEA", port_of_loading: "Port Klang", port_of_discharge: "", vessel_name: "", flight_number: "", voyage_number: "", container_number: "", export_date: "", gross_weight_kg: "", net_weight_kg: "", cbm: "", number_of_packages: "", package_type: "CTN", signatory_name: "", signatory_ic_or_passport: "", signatory_designation: "" });
+  const s = (k: string) => (v: string) => setF(p => ({ ...p, [k]: v }));
+  const modes = ["SEA","AIR","ROAD","RAIL"] as const;
+  const modeIcons: Record<string, React.ElementType> = { SEA: Ship, AIR: Plane, ROAD: Truck, RAIL: Train };
+  return (
+    <MO onClose={onClose}>
+      <MH title="Step 6 — Logistics & Shipment" sub="Transport info for K2 & Bill of Lading" onClose={onClose} />
+      <div className="space-y-4 px-5 py-4">
+        <MF label="Mode of Transport" req>
+          <div className="grid grid-cols-4 gap-2">
+            {modes.map(m => { const Icon = modeIcons[m]; return (
+              <button key={m} onClick={() => s("mode")(m)} className={`flex flex-col items-center gap-1 rounded-xl border py-2.5 text-[11px] font-semibold transition-all ${f.mode===m ? "border-primary bg-primary/10 text-primary" : "border-border bg-background text-muted-foreground hover:bg-secondary"}`}>
+                <Icon className="h-4 w-4" />{m}
+              </button>
+            );})}
+          </div>
+        </MF>
+        <div className="grid grid-cols-2 gap-3">
+          <MF label="Port of Loading" req><MI value={f.port_of_loading} onChange={s("port_of_loading")} placeholder="Port Klang" /></MF>
+          <MF label="Port of Discharge" req><MI value={f.port_of_discharge} onChange={s("port_of_discharge")} placeholder="Tanjung Priok" /></MF>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          {f.mode==="SEA" && <MF label="Vessel Name" req><MI value={f.vessel_name} onChange={s("vessel_name")} placeholder="MV Bunga Mas 5" /></MF>}
+          {f.mode==="AIR" && <MF label="Flight Number" req><MI value={f.flight_number} onChange={s("flight_number")} placeholder="MH 713" /></MF>}
+          {(f.mode==="SEA"||f.mode==="AIR") && <MF label="Voyage / Flight No"><MI value={f.voyage_number} onChange={s("voyage_number")} placeholder="0412W" /></MF>}
+          {f.mode==="SEA" && <MF label="Container Number"><MI value={f.container_number} onChange={s("container_number")} placeholder="MSKU-7842150" /></MF>}
+        </div>
+        <MF label="Export Date" req><MI value={f.export_date} onChange={s("export_date")} type="date" /></MF>
+        <div className="grid grid-cols-3 gap-3">
+          <MF label="Gross Weight (kg)" req><MI value={f.gross_weight_kg} onChange={s("gross_weight_kg")} placeholder="480" /></MF>
+          <MF label="Net Weight (kg)"><MI value={f.net_weight_kg} onChange={s("net_weight_kg")} placeholder="440" /></MF>
+          <MF label="Volume (m³)" req><MI value={f.cbm} onChange={s("cbm")} placeholder="1.2" /></MF>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <MF label="Packages"><MI value={f.number_of_packages} onChange={s("number_of_packages")} placeholder="12" /></MF>
+          <MF label="Package Type"><MS value={f.package_type} onChange={s("package_type")} options={["CTN","PALLET","DRUM","BAG","BOX"]} /></MF>
+        </div>
+        <div className="rounded-xl border border-border bg-secondary/30 p-3 space-y-3">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground flex items-center gap-1.5"><PenLine className="h-3.5 w-3.5" />Authorised Signatory</p>
+          <MF label="Full Name" req><MI value={f.signatory_name} onChange={s("signatory_name")} placeholder="Aisyah Rahman" /></MF>
+          <div className="grid grid-cols-2 gap-3">
+            <MF label="NRIC / Passport" req><MI value={f.signatory_ic_or_passport} onChange={s("signatory_ic_or_passport")} placeholder="880412-14-5566" /></MF>
+            <MF label="Designation" req><MI value={f.signatory_designation} onChange={s("signatory_designation")} placeholder="Director" /></MF>
+          </div>
+        </div>
+      </div>
+      <div className="flex gap-2 border-t border-border px-5 py-4">
+        <MBtn onClick={onClose} variant="ghost">Cancel</MBtn>
+        <MBtn onClick={() => onSubmit({ ...f, gross_weight_kg: parseFloat(f.gross_weight_kg)||0, net_weight_kg: parseFloat(f.net_weight_kg)||undefined, cbm: parseFloat(f.cbm)||0, number_of_packages: parseInt(f.number_of_packages)||undefined })} disabled={!f.port_of_discharge||!f.export_date||!f.gross_weight_kg||!f.cbm||!f.signatory_name||!f.signatory_ic_or_passport||!f.signatory_designation} loading={loading} icon={Ship}>Confirm Shipment</MBtn>
+      </div>
+    </MO>
+  );
+}
+
+// Step 4 – Digital Access
+function DagangNetModal({ onClose, onSubmit, loading }: { onClose: () => void; onSubmit: (agentCode: string) => void; loading: boolean }) {
+  const [mycieds, setMycieds] = useState(false);
+  const [dagang, setDagang] = useState(false);
+  const [cert, setCert] = useState(false);
+  const [dagangId, setDagangId] = useState("");
+  const [agentCode, setAgentCode] = useState("");
+  const ready = mycieds && dagang;
+  return (
+    <MO onClose={onClose}>
+      <MH title="Step 4 — Digital Access Setup" sub="Required for K2 submission via MyDagangNet" onClose={onClose} />
+      <div className="space-y-3 px-5 py-4">
+        {[
+          { label: "MyCIEDS Account", tag: "REQUIRED", desc: "Royal Malaysian Customs e-system. Register at mycustoms.gov.my", checked: mycieds, set: setMycieds },
+          { label: "Dagang Net Subscription", tag: "REQUIRED", desc: "EDI portal for K2 declarations. Register at dagangnet.com.my", checked: dagang, set: setDagang },
+          { label: "Digital Certificate (Token)", tag: "REQUIRED", desc: "PKI certificate from MSC Trustgate or Pos Digicert.", checked: cert, set: setCert },
+        ].map(item => (
+          <div key={item.label} className="flex items-start gap-3 rounded-xl border border-border bg-background p-3">
+            <button onClick={() => item.set((v: boolean) => !v)} className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-md border-2 transition-all ${item.checked ? "border-green-500 bg-green-500 text-white" : "border-border"}`}>
+              {item.checked && <Check className="h-3 w-3" />}
+            </button>
+            <div className="flex-1">
+              <p className="text-sm font-semibold text-foreground">{item.label} <span className="ml-1 rounded-full bg-red-100 px-1.5 py-px text-[9px] font-bold text-red-600">{item.tag}</span></p>
+              <p className="text-[11px] text-muted-foreground mt-0.5">{item.desc}</p>
+              {item.label.includes("Dagang") && item.checked && (
+                <div className="mt-2"><MI value={dagangId} onChange={setDagangId} placeholder="Dagang Net User ID (optional)" /></div>
+              )}
+            </div>
+          </div>
+        ))}
+        <MF label="Customs Agent Code (optional)"><MI value={agentCode} onChange={setAgentCode} placeholder="CA-MY-12345" /></MF>
+        {ready && <div className="flex items-center gap-2 rounded-xl bg-green-50 border border-green-200 px-3 py-2.5 text-[12px] font-semibold text-green-700"><CheckCircle2 className="h-4 w-4" />Connected — ready for K2 submission</div>}
+      </div>
+      <div className="flex gap-2 border-t border-border px-5 py-4">
+        <MBtn onClick={onClose} variant="ghost">Cancel</MBtn>
+        <MBtn onClick={() => onSubmit(agentCode)} disabled={!ready} loading={loading} icon={Link2}>{ready ? "Confirm Digital Access" : "Tick all boxes above"}</MBtn>
+      </div>
+    </MO>
+  );
+}
+
+// Step 7 – E-Signature
+function SignatureModal({ name, title, onClose, onSign }: { name: string; title: string; onClose: () => void; onSign: () => void }) {
+  const [agreed, setAgreed] = useState(false);
+  const [signed, setSigned] = useState(false);
+  const today = new Date().toLocaleDateString("en-MY", { day: "2-digit", month: "long", year: "numeric" });
+  const doSign = () => { setSigned(true); setTimeout(onSign, 600); };
+  return (
+    <MO onClose={onClose}>
+      <MH title="E-Signature — Declaration of Truth" sub="Required under Customs Act 1967" onClose={onClose} />
+      <div className="space-y-4 px-5 py-4">
+        <div className="rounded-xl border border-border bg-secondary/30 p-4 text-sm leading-relaxed">
+          <p className="font-semibold mb-2 text-[11px] uppercase tracking-wide text-muted-foreground">Declaration</p>
+          <p>I, <strong>{name || "[Signatory Name]"}</strong> ({title || "[Designation]"}), hereby declare that the particulars given in this export declaration and all accompanying documents are true and correct to the best of my knowledge and belief.</p>
+          <p className="mt-2 text-[11px] text-muted-foreground">Pursuant to Section 121, Customs Act 1967 (Act 235). False declaration is an offence under Section 135.</p>
+          <p className="mt-3 font-medium">Date: {today}</p>
+        </div>
+        <label className="flex items-start gap-3 cursor-pointer">
+          <button onClick={() => setAgreed(v => !v)} className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-md border-2 transition-all ${agreed ? "border-primary bg-primary text-white" : "border-border"}`}>
+            {agreed && <Check className="h-3 w-3" />}
+          </button>
+          <span className="text-sm">I confirm this declaration and authorise submission of the K2 export declaration.</span>
+        </label>
+        {signed && <div className="flex items-center gap-2 rounded-xl bg-green-50 border border-green-200 px-3 py-2.5 text-sm font-semibold text-green-700"><CheckCircle2 className="h-4 w-4" />Signed — documents ready for K2</div>}
+      </div>
+      <div className="flex gap-2 border-t border-border px-5 py-4">
+        <MBtn onClick={onClose} variant="ghost">Cancel</MBtn>
+        <MBtn onClick={doSign} disabled={!agreed || signed} icon={PenLine}>{signed ? "Signed ✓" : "Sign Declaration"}</MBtn>
+      </div>
+    </MO>
+  );
+}
+
+// K2 Preview
+function K2PreviewModal({ k2Data, onClose, onSubmit, loading }: { k2Data: Record<string,unknown>; onClose: () => void; onSubmit: () => void; loading: boolean }) {
+  const form = (k2Data?.k2_form_data || {}) as Record<string,unknown>;
+  const exp = (form?.exporter || {}) as Record<string,string>;
+  const con = (form?.consignee || {}) as Record<string,string>;
+  const gds = (form?.goods || {}) as Record<string,unknown>;
+  const val = (form?.valuation || {}) as Record<string,number>;
+  const dty = (form?.duty || {}) as Record<string,number>;
+  const trp = (form?.transport || {}) as Record<string,string>;
+  const sig = (form?.signatory || {}) as Record<string,string>;
+  const Row = ({ l, v }: { l: string; v?: unknown }) => (
+    <div className="flex items-start justify-between gap-4 py-1.5 border-b border-border/50 last:border-0">
+      <span className="text-[11px] text-muted-foreground shrink-0 w-36">{l}</span>
+      <span className="text-[12px] font-medium text-foreground text-right">{String(v ?? "—")}</span>
+    </div>
+  );
+  const Sec = ({ t, children }: { t: string; children: React.ReactNode }) => (
+    <div className="rounded-xl border border-border bg-background p-3">
+      <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{t}</p>
+      {children}
+    </div>
+  );
+  return (
+    <MO onClose={onClose}>
+      <MH title="K2 Export Declaration — Preview" sub="Review before submitting to RMCD" onClose={onClose} />
+      <div className="space-y-3 px-5 py-4">
+        <div className="flex items-center justify-between rounded-xl bg-primary/10 border border-primary/30 px-3 py-2">
+          <span className="text-[11px] font-bold text-primary">K2 Reference</span>
+          <span className="text-sm font-mono font-bold text-primary">{String(k2Data?.k2_reference || "K2-MY-2026-PENDING")}</span>
+        </div>
+        <Sec t="Exporter"><Row l="Company" v={exp.name} /><Row l="BRN" v={exp.brn} /></Sec>
+        <Sec t="Consignee"><Row l="Name" v={con.name} /><Row l="Country" v={con.country_code} /></Sec>
+        <Sec t="Transport"><Row l="Mode" v={trp.mode_description} /><Row l="Vessel/Flight" v={trp.vessel_flight_name} /><Row l="POL" v={trp.port_of_loading_code} /><Row l="POD" v={trp.port_of_discharge_code} /></Sec>
+        <Sec t="Goods"><Row l="HS Code" v={gds.hs_code as string} /><Row l="Description" v={gds.commodity_description as string} /><Row l="Gross Weight" v={`${gds.gross_weight_kg} kg`} /></Sec>
+        <Sec t="Valuation & Duty"><Row l="FOB (MYR)" v={`RM ${Number(val.fob_value_myr||0).toLocaleString()}`} /><Row l="CIF (MYR)" v={`RM ${Number(val.cif_value_myr||0).toLocaleString()}`} /><Row l="Total Duty" v={`RM ${Number(dty.total_duty_myr||0).toLocaleString()}`} /></Sec>
+        <Sec t="Signatory"><Row l="Name" v={sig.name} /><Row l="NRIC/Passport" v={sig.nric_passport} /><Row l="Designation" v={sig.designation} /></Sec>
+      </div>
+      <div className="flex gap-2 border-t border-border px-5 py-4">
+        <MBtn onClick={onClose} variant="ghost">Close</MBtn>
+        <MBtn onClick={onSubmit} loading={loading} icon={Send}>Submit to Dagang Net</MBtn>
+      </div>
+    </MO>
+  );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // MAIN COMPONENT
 // ─────────────────────────────────────────────────────────────────────────────
 export default function AssistantPage() {
-  const navigate = useNavigate();
 
-  const [sessionId, setSessionId]     = useState<string | null>(null);
+  // ── Session ────────────────────────────────────────────────────────────────
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
-  const [completed, setCompleted]     = useState<Set<number>>(new Set());
+
+  // ── Step state ─────────────────────────────────────────────────────────────
   const [activeStep, setActiveStep]   = useState(0);
-  const [permitFlags, setPermitFlags] = useState<PermitFlags>(DEFAULT_PERMIT_FLAGS);
+  const [completed, setCompleted]     = useState<Set<number>>(new Set());
+  const activeStepRef = useRef(0);
+  const completedRef  = useRef(new Set<number>());
+  useEffect(() => { activeStepRef.current = activeStep; }, [activeStep]);
+  useEffect(() => { completedRef.current  = completed; },  [completed]);
 
-  // Session data accumulated across steps
-  const sessionData = useRef<Record<string, unknown>>({});
+  // ── Accumulated data ────────────────────────────────────────────────────────
+  const sd = useRef<Record<string, unknown>>({});
 
-  // Modal visibility
-  const [modal, setModal] = useState<
-    null | "consignee" | "valuation" | "shipment" | "digital-access" | "signature" | "k2-preview"
-  >(null);
+  // ── Modal ──────────────────────────────────────────────────────────────────
+  const [modal, setModal] = useState<null | "entity" | "consignee" | "valuation" | "shipment" | "dagang" | "signature" | "k2preview">(null);
+  const [mLoading, setMLoading] = useState(false);
+  const [entityPrefill, setEntityPrefill] = useState<Record<string,string> | undefined>(undefined);
 
-  // Permit upload tracking (for Step 3)
-  const [requiredPermits, setRequiredPermits] = useState<Array<{ name: string; key: string; uploaded: boolean }>>([]);
+  // ── Permits ────────────────────────────────────────────────────────────────
+  const [permits, setPermits] = useState<Array<{ name: string; key: string; uploaded: boolean }>>([]);
 
-  // Generated docs & K2 data
-  const [generatingId, setGeneratingId] = useState<string | null>(null);
-  const [generatedIds, setGeneratedIds] = useState<Set<string>>(new Set());
+  // ── Docs ───────────────────────────────────────────────────────────────────
+  const [generatedDocs, setGeneratedDocs] = useState<Set<string>>(new Set());
+  const [generatingDoc, setGeneratingDoc] = useState<string | null>(null);
   const [signed, setSigned] = useState(false);
   const [k2Data, setK2Data] = useState<Record<string, unknown> | null>(null);
 
-  // Landed cost state (live)
-  const [landedCost, setLandedCost] = useState({ fob: 0, freight: 0, insurance: 0, duty: 0, total: 0, savings: 0, bestFta: "", finalised: false });
+  // ── Landed cost ────────────────────────────────────────────────────────────
+  const [lc, setLc] = useState({ fob: 0, freight: 0, ins: 0, duty: 0, total: 0, savings: 0, fta: "", finalised: false });
 
-  const [messages, setMessages] = useState<Message[]>([
-    { id: "welcome", role: "assistant", kind: "text", content: "Hi — I'm your Compliance Architect. I'll guide you through every regulatory dependency in order: Entity → Consignee → HS Code → Permits → Digital Access → Valuation → Logistics → Docs & Signatory → K2. Let's start." },
-    STEP_FLOW[0].intro,
+  // ── Chat ───────────────────────────────────────────────────────────────────
+  type Msg = { id: string; from: "user" | "ai"; kind: "text" | "upload" | "spin" | "card"; text?: string; fileName?: string; card?: Record<string, unknown> };
+  const gid = () => Math.random().toString(36).slice(2);
+  const [msgs, setMsgs] = useState<Msg[]>([
+    { id: "w", from: "ai", kind: "text", text: "Hi — I'm your Compliance Architect. I'll guide you step-by-step through the full Malaysian export process. Let's start with your company details." },
   ]);
-  const [input, setInput]     = useState("");
-  const [sending, setSending] = useState(false);
-  const [modalLoading, setModalLoading] = useState(false);
+  const [input, setInput]   = useState("");
+  const [busy, setBusy]     = useState(false);
+  const chatRef             = useRef<HTMLDivElement>(null);
+  const fileRef             = useRef<HTMLInputElement>(null);
+  const pendingEndpoint     = useRef<string | null>(null);
+  const pendingPermitKey    = useRef<string | null>(null);
+  const chatHistory         = useRef<{ role: string; content: string }[]>([]);
 
-  const fileInputRef     = useRef<HTMLInputElement>(null);
-  const pendingUploadRef = useRef<{ action: string; accept: string; endpoint: string } | null>(null);
-  const bottomRef        = useRef<HTMLDivElement>(null);
-  const chatHistoryRef   = useRef<{role:string;content:string}[]>([]);
+  const push = (m: Msg) => setMsgs(p => [...p, m]);
+  const pushAI = (text: string) => push({ id: gid(), from: "ai", kind: "text", text });
+  const pushSpin = (text: string) => { const id = gid(); push({ id, from: "ai", kind: "spin", text }); return id; }
+  const removeSpin = (id: string) => setMsgs(p => p.filter(m => m.id !== id));
 
+  useEffect(() => { chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: "smooth" }); }, [msgs, busy]);
+
+  // ── Session init ───────────────────────────────────────────────────────────
   useEffect(() => {
-    api.createSession()
-      .then((s: { session_id: string }) => setSessionId(s.session_id))
-      .catch((err: Error) => {
-        console.warn("Demo mode:", err.message);
-        setSessionError(err.message);
-        setSessionId("demo-" + Math.random().toString(36).slice(2));
-      });
+    const BASE = "";
+    fetch(`${BASE}/sessions`, { method: "POST", headers: { "Content-Type": "application/json" } })
+      .then(r => r.json()).then(d => setSessionId(d.session_id))
+      .catch(() => { setSessionError("offline"); setSessionId("demo-" + gid()); });
   }, []);
 
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, sending]);
-
-  const total    = STEPS.length;
-  const progress = Math.round((completed.size / total) * 100);
-
-  const docsWithStatus = EXPORT_DOCS.map(d => ({ ...d, status: docStatus(d, completed) }));
-  const readyDocs   = docsWithStatus.filter(d => d.status === "ready");
-  const partialDocs = docsWithStatus.filter(d => d.status === "partial");
-  const lockedDocs  = docsWithStatus.filter(d => d.status === "locked");
-
-  const gatingDocs      = EXPORT_DOCS.filter(d => isGating(d, permitFlags));
-  const canProceed      = gatingDocs.length > 0 && gatingDocs.every(d => generatedIds.has(d.id));
-  const gatingGenerated = gatingDocs.filter(d => generatedIds.has(d.id)).length;
-
-  // ── Core message helpers ───────────────────────────────────────────────────
-  const addMsg    = useCallback((msg: Message) => setMessages(m => [...m, msg]), []);
-  const removeMsg = useCallback((pid: string)  => setMessages(m => m.filter(x => x.id !== pid)), []);
-
-  // ── Advance UI to next step ────────────────────────────────────────────────
-  const advanceUI = useCallback(() => {
-    setActiveStep(prev => {
-      const cur = prev;
-      const next = cur + 1;
-      setCompleted(c => new Set([...c, cur]));
-      setMessages(m => {
-        const msgs = [...m];
-        if (STEP_FLOW[cur])  msgs.push(STEP_FLOW[cur].onComplete);
-        if (next < total && STEP_FLOW[next]) msgs.push(STEP_FLOW[next].intro);
-        return msgs;
-      });
-      return Math.min(next, total - 1);
-    });
-  }, [total]);
-
-  const waitForSession = useCallback((): Promise<string> => {
-    return new Promise(resolve => {
-      if (sessionId) { resolve(sessionId); return; }
-      const start = Date.now();
-      const iv = setInterval(() => {
-        setSessionId(cur => {
-          if (cur) { clearInterval(iv); resolve(cur); }
-          else if (Date.now() - start > 5000) { clearInterval(iv); resolve("demo-" + genId()); }
-          return cur;
-        });
-      }, 100);
-    });
-  }, [sessionId]);
-
-  const runWithFeedback = useCallback(async (fn: () => Promise<void>, label = "Processing…") => {
-    const pid = genId();
-    addMsg({ id: pid, role: "assistant", kind: "processing", content: label });
-    setSending(true);
-    try   { await fn(); }
-    catch (err) { addMsg({ id: genId(), role: "assistant", kind: "text", content: `⚠️ ${err instanceof Error ? err.message : String(err)}` }); }
-    finally     { removeMsg(pid); setSending(false); }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  // ── Advance step ───────────────────────────────────────────────────────────
+  const advance = useCallback((cur: number) => {
+    setCompleted(p => new Set([...p, cur]));
+    setActiveStep(cur + 1);
   }, []);
 
-  // ── Build context string for doc/K2 generation ────────────────────────────
-  const buildCtx = useCallback((): string => {
-    const e  = (sessionData.current.entity          as Record<string,unknown>) ?? {};
-    const c  = (sessionData.current.consignee        as Record<string,unknown>) ?? {};
-    const cl = (sessionData.current.classification   as Record<string,unknown>) ?? {};
-    const v  = (sessionData.current.valuation        as Record<string,unknown>) ?? {};
-    const l  = (sessionData.current.logistics        as Record<string,unknown>) ?? {};
+  // ── Intro message for each step ────────────────────────────────────────────
+  const stepIntros: Record<number, string> = {
+    0: "**Step 1 — Entity Verification**\nUpload your SSM certificate (Form 9 / Form D / MyCoID) — I'll extract your company details automatically. Click **Upload SSM Certificate** to begin.",
+    1: "**Step 2 — Consignee Details**\nNow I need your overseas buyer's information. This will pre-fill the Commercial Invoice, B/L and K2 automatically. Click **Add Consignee**.",
+    2: "**Step 3 — HS Classification**\nUpload a product photo or describe your product in the chat. I'll assign the 8-digit AHTN/HS code, duty rates and FTA eligibility.",
+    3: "**Step 4 — Permit Check**\nChecking PUA122 (Customs Prohibition of Exports Order) for your product...",
+    4: "**Step 5 — Digital Access**\nYou'll need Dagang Net + MyCIEDS accounts to submit the K2 declaration. Click **Connect Dagang Net** to confirm your access.",
+    5: "**Step 6 — Financial Valuation**\nRMCD requires a full CIF valuation for K2. I'll calculate FOB → freight → insurance → CIF → duty and check FTA savings. Click **Enter Valuation**.",
+    6: "**Step 7 — Logistics & Shipment**\nFill in transport details for the K2 form and Bill of Lading. Click **Add Shipment Details**.",
+    7: "**Step 8 — Trade Documents**\nAll data is ready. Click **Generate Documents** to produce all 4 trade documents, then **Sign Declaration** to unlock K2.",
+    8: "**Step 9 — K2 Customs Declaration**\nAll dependencies satisfied. Click **Preview & Submit K2** to generate the official Kastam No.2 form and download it.",
+  };
+
+  const showStepIntro = useCallback((step: number) => {
+    const txt = stepIntros[step];
+    if (txt) setTimeout(() => pushAI(txt), 300);
+  }, []);
+
+  useEffect(() => { showStepIntro(0); }, []);
+
+  // ── Build context for AI ────────────────────────────────────────────────────
+  const ctx = useCallback((): string => {
+    const e  = (sd.current.entity         as Record<string,unknown>) ?? {};
+    const c  = (sd.current.consignee      as Record<string,unknown>) ?? {};
+    const cl = (sd.current.classification as Record<string,unknown>) ?? {};
+    const v  = (sd.current.valuation      as Record<string,unknown>) ?? {};
+    const l  = (sd.current.logistics      as Record<string,unknown>) ?? {};
     return [
-      `Exporter: ${e.company_name ?? "N/A"}, BRN ${e.registration_number ?? "N/A"}, ${e.registered_address ?? "Malaysia"}`,
-      `SST registered: ${e.sst_registered ?? "unknown"}`,
+      `Exporter: ${e.company_name ?? "N/A"}, BRN: ${e.registration_number ?? "N/A"}`,
       `Consignee: ${c.buyer_name ?? "N/A"}, ${c.buyer_country ?? "N/A"}, ${c.buyer_address ?? "N/A"}`,
-      `Buyer email: ${c.buyer_email ?? "N/A"}, Phone: ${c.buyer_phone ?? "N/A"}, Contact: ${c.buyer_contact_person ?? "N/A"}`,
-      `Incoterm: ${c.incoterm ?? "FOB"}, Tax ID: ${c.buyer_tax_id ?? "N/A"}, Importer of record: ${c.importer_of_record ?? "same as buyer"}`,
-      `HS Code: ${cl.hs_code ?? "N/A"}, Description: ${cl.hs_description ?? "N/A"}`,
-      `MY Export Duty: ${cl.malaysia_export_duty ?? 0}%, Destination Import Duty: ${cl.destination_import_duty ?? 0}%`,
-      `FTA available: ${(cl.fta_available as string[] ?? []).join(", ") || "None"}`,
+      `Buyer email: ${c.buyer_email ?? "N/A"}, Incoterm: ${c.incoterm ?? "FOB"}`,
+      `HS Code: ${cl.hs_code ?? "N/A"} — ${cl.hs_description ?? "N/A"}`,
+      `MY Export Duty: ${cl.malaysia_export_duty ?? 0}%, Dest Import Duty: ${cl.destination_import_duty ?? 0}%`,
+      `FTA: ${(cl.fta_available as string[] ?? []).join(", ") || "None"}`,
       `FOB: RM${v.fob_myr ?? 0}, Freight: RM${v.freight_myr ?? 0}, Insurance: RM${v.insurance_myr ?? 0}, CIF: RM${v.cif_myr ?? 0}`,
       `Duty: RM${v.estimated_duty_myr ?? 0}, Best FTA: ${v.best_fta ?? "None"}, Form: ${v.form_required ?? "N/A"}`,
-      `Invoice currency: ${v.invoice_currency ?? "MYR"}, FX rate: ${v.exchange_rate_to_myr ?? 1}`,
-      `Mode: ${l.mode ?? "SEA"}, Vessel: ${l.vessel ?? "TBC"}, Voyage: ${l.voyage_number ?? "TBC"}`,
-      `POL: ${l.pol ?? "Port Klang"}, POD: ${l.pod ?? "N/A"}, Export date: ${l.export_date ?? "N/A"}`,
-      `Gross wt: ${l.weight_kg ?? 0} kg, Net wt: ${l.net_weight_kg ?? 0} kg, CBM: ${l.cbm ?? 0}`,
-      `Packages: ${l.number_of_packages ?? 0} x ${l.package_type ?? "CTN"}, Container: ${l.container_number ?? "N/A"}`,
+      `Mode: ${l.mode ?? "SEA"}, Vessel: ${l.vessel ?? "TBC"}, POL: ${l.pol ?? "Port Klang"}, POD: ${l.pod ?? "N/A"}`,
+      `Gross: ${l.weight_kg ?? 0} kg, CBM: ${l.cbm ?? 0}, Export date: ${l.export_date ?? "N/A"}`,
       `Signatory: ${l.signatory_name ?? "N/A"}, ${l.signatory_designation ?? "N/A"}, IC: ${l.signatory_ic_passport ?? "N/A"}`,
     ].join("\n");
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── STEP 0: SSM / product / permit file upload ────────────────────────────
-  const handleFileSelected = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = "";
-    if (!file || !pendingUploadRef.current) return;
-    const { endpoint } = pendingUploadRef.current;
-    pendingUploadRef.current = null;
+  // ─────────────────────────────────────────────────────────────────────────
+  // STEP HANDLERS
+  // ─────────────────────────────────────────────────────────────────────────
 
-    addMsg({ id: genId(), role: "user", kind: "upload", content: "uploaded-file", fileName: file.name });
-
-    await runWithFeedback(async () => {
-      const b64  = await fileToB64(file);
-      const mime = fileMime(file);
-
-      // ── SSM Certificate ────────────────────────────────────────────────
-      if (endpoint === "/entity/upload-ssm") {
-        if (completed.has(0)) {
-          addMsg({ id: genId(), role: "assistant", kind: "text",
-            content: "✅ Entity is already verified. No need to re-upload the SSM." });
-          return;
-        }
-
-        // ── IMPROVED SSM PROMPT ────────────────────────────────────────
-        const SSM_PROMPT = `You are an OCR extraction engine for Malaysian company registration documents.
-
-DOCUMENT TYPES you may receive:
-- SSM Form 9 / Certificate of Incorporation (Perakuan Pemerbadanan)
-- SSM Form D (Business Registration Certificate)
-- MyCoID digital certificate (PDF or screenshot)
-- SSM e-Info company printout
-- Bizfile / SSM portal screenshot
-- Any document showing a Malaysian company BRN
-
-EXTRACTION STRATEGY — try ALL of these patterns in order:
-1. company_name: Look for "NAMA SYARIKAT", "Company Name:", "Name of Company", the large bold text at the top, or any text before "SDN BHD" / "BHD" / "ENTERPRISE" / "PLT" / "LLP". Include the full legal suffix.
-2. registration_number: Look for "No. Syarikat", "Company No.", "No. Pendaftaran", "Registration No.", "BRN:", "ROC:", or any 12-digit number or format like "1234567-A" or "202301XXXXXX". Copy digits and dashes exactly.
-3. registration_date: Look for "Tarikh Pemerbadanan", "Date of Incorporation", "Tarikh Pendaftaran". Format DD/MM/YYYY.
-4. company_type: Derive from name suffix: "Sdn Bhd" = private limited, "Bhd" = public limited, "Enterprise" = sole prop/partnership, "PLT" or "LLP" = limited liability partnership.
-5. company_status: Look for "AKTIF", "ACTIVE", "STRUCK OFF", "WOUND UP". Default to "active" if document appears valid.
-6. registered_address: Text block after "Alamat Berdaftar", "Registered Address", "Alamat Perniagaan Berdaftar".
-7. directors: Names and NRIC from Form 49 table, or any "Director" / "Pengarah" section.
-8. paid_up_capital: "Modal Berbayar", "Paid-up Capital", include RM symbol and amount.
-9. sst_registered: true only if "SST" or "GST" registration number is explicitly present.
-
-CRITICAL PARTIAL EXTRACTION RULES:
-- Extract WHATEVER you can read, even if only partial. NEVER return empty string "" for a field you can at least partially read.
-- If company name is blurry but you can read "ABC SDN", return "ABC SDN BHD" (best effort).
-- If BRN is partially visible, return what you can see.
-- Set is_valid=true if BOTH company_name AND registration_number have at least SOME readable content (even partial).
-- Set confidence: 0.9=fully clear, 0.7=mostly readable, 0.5=partial, 0.3=very blurry but some text visible, 0.1=almost unreadable.
-- If the document is clearly a company registration document but very blurry, still attempt extraction and note issues in extraction_notes.
-- NEVER return empty strings "" when any text is visible — always make your best effort.
-
-Return ONLY valid JSON, no markdown fences, no explanation:
-{"is_valid":false,"company_name":"","registration_number":"","registration_date":"","company_type":"","company_status":"active","registered_address":"","directors":[{"name":"","nric":"","designation":"Director"}],"paid_up_capital":"","blacklisted":false,"sst_registered":false,"compliance_flags":[],"missing_fields":[],"confidence":0.0,"extraction_notes":""}`;
-
-        const result = await geminiVision(b64, mime, SSM_PROMPT);
-
-        const sid = await waitForSession();
-        try {
-          await api.verifyEntity(sid, {
-            company_name:        String(result.company_name        ?? "Extracted"),
-            registration_number: String(result.registration_number ?? "000000000000"),
-          });
-        } catch { /* offline ok */ }
-
-        sessionData.current.entity = result;
-
-        const dirs = (result.directors as Array<{name:string}> ?? [])
-          .map(d => d.name)
-          .filter(Boolean)
-          .join(", ");
-
-        // Build display fields, only show "—" if truly empty
-        const extractedFields: Record<string, string> = {
-          "Company Name":    hasMeaning(result.company_name)        ? String(result.company_name)        : "—",
-          "BRN":             hasMeaning(result.registration_number) ? String(result.registration_number) : "—",
-          "Company Type":    hasMeaning(result.company_type)        ? String(result.company_type)        : "—",
-          "Registered Date": hasMeaning(result.registration_date)   ? String(result.registration_date)   : "—",
-          "Status":          hasMeaning(result.company_status)      ? String(result.company_status)      : "Active",
-          "Directors":       dirs || "—",
-          "SST Registered":  result.sst_registered ? "Yes" : "No",
-          "Paid-up Capital": hasMeaning(result.paid_up_capital)     ? String(result.paid_up_capital)     : "—",
-        };
-
-        const confidence   = Number(result.confidence ?? 0);
-        const nameOk       = hasMeaning(result.company_name);
-        const brnOk        = hasMeaning(result.registration_number);
-        const anyFieldRead = nameOk || brnOk ||
-          hasMeaning(result.company_type) ||
-          hasMeaning(result.registered_address) ||
-          hasMeaning(result.registration_date);
-
-        // Show extracted card always
-        addMsg({
-          id: genId(),
-          role: "assistant",
-          kind: "extracted",
-          content: anyFieldRead
-            ? `SSM certificate scanned (confidence: ${Math.round(confidence * 100)}%). Here's what I extracted:`
-            : "SSM certificate received — having difficulty reading the document:",
-          valid: Boolean(result.is_valid) && !result.blacklisted && nameOk && brnOk,
-          fields: extractedFields,
-        });
-
-        if (result.is_valid && !result.blacklisted && nameOk && brnOk) {
-          // ✅ Full clean extraction — proceed automatically
-          addMsg({
-            id: genId(),
-            role: "assistant",
-            kind: "text",
-            content: "✅ Entity verified successfully. Proceeding to Step 2 — Consignee Details.",
-          });
-          advanceUI();
-
-        } else if (anyFieldRead || confidence >= 0.25) {
-          // ⚠️ Partial extraction — let user confirm or correct missing fields
-          const missingFieldNames: string[] = [];
-          if (!nameOk) missingFieldNames.push("Company Name");
-          if (!brnOk)  missingFieldNames.push("BRN / Registration Number");
-
-          addMsg({
-            id: genId(),
-            role: "assistant",
-            kind: "text",
-            content:
-              `⚠️ **Partial extraction** — ${
-                missingFieldNames.length > 0
-                  ? `missing: **${missingFieldNames.join(", ")}**`
-                  : "some fields could not be confirmed"
-              }.\n\n` +
-              `**Options to proceed:**\n\n` +
-              `• Type **"confirm"** if the extracted details are correct\n` +
-              `• Reply with corrections in this format:\n\n` +
-              `> Company Name: ABC SDN BHD\n` +
-              `> BRN: 202301012345\n` +
-              `> Company Type: Sdn Bhd\n` +
-              `> Directors: Ahmad bin Ali\n\n` +
-              (result.extraction_notes ? `_Scan note: ${result.extraction_notes}_` : ""),
-          });
-          // Mark as partial so the chat handler can process corrections or "confirm"
-          sessionData.current.entity = { ...result, partial_extraction: true };
-
-        } else {
-          // ❌ Truly unreadable — ask for re-upload or manual entry
-          addMsg({
-            id: genId(),
-            role: "assistant",
-            kind: "text",
-            content:
-              `❌ **Could not read the document** — the image quality is too low for extraction.\n\n` +
-              `**Option 1:** Re-upload a clearer photo:\n` +
-              `• Ensure good lighting (no shadows or glare)\n` +
-              `• Full page visible, not cropped\n` +
-              `• No motion blur\n\n` +
-              `**Option 2:** Enter details manually by replying:\n\n` +
-              `> Company Name: ABC SDN BHD\n` +
-              `> BRN: 202301012345\n` +
-              `> Company Type: Sdn Bhd\n` +
-              `> Status: Active\n` +
-              `> Directors: Ahmad bin Ali\n\n` +
-              (result.extraction_notes ? `_Scan note: ${result.extraction_notes}_` : ""),
-          });
-          // Still mark as partial so manual entry chat handler works
-          sessionData.current.entity = { ...result, partial_extraction: true };
-        }
-
-      // ── Product Photo ──────────────────────────────────────────────────
-      } else if (endpoint === "/classification/upload-product") {
-        if (!completed.has(1)) {
-          addMsg({ id: genId(), role: "assistant", kind: "blocked",
-            content: "Step 3 is locked. Complete Step 2 — 'Consignee Details' — first before classifying your product." });
-          return;
-        }
-        if (completed.has(2)) {
-          addMsg({ id: genId(), role: "assistant", kind: "text",
-            content: "✅ Product is already classified. Proceed to the next step." });
-          return;
-        }
-        const destCountry = String((sessionData.current.consignee as Record<string,string>)?.buyer_country ?? "Unknown");
-        const result = await geminiVision(b64, mime,
-          `You are a WCO HS 2022 / AHTN 2022 tariff classification engine for Malaysian exports to ${destCountry}.
-
-STEP 1 — IDENTIFY the product precisely:
-- Read ALL visible text: brand, model number, product name, ingredient list, material composition, technical specifications
-- If a label, invoice, or spec sheet is shown extract every word — product details are in the text, not just the image
-- Do not guess — if the product is ambiguous, set identified=false
-
-STEP 2 — CLASSIFY to 8-digit AHTN code:
-- Use the most specific subheading. Examples:
-  Palm oil crude: 1511.10.00 | Refined palm oil: 1511.90.00
-  Latex rubber gloves: 4015.11.00 | Nitrile gloves: 4015.19.10
-  Printed circuit boards (bare): 8534.00.00 | Assembled PCB: 8473.30.90
-  USB cable: 8544.42.90 | HDMI cable: 8544.42.10
-  Instant noodles: 1902.30.10 | Rice: 1006.30.90
-- destination_import_duty: MFN tariff rate for ${destCountry} (use 0 if ASEAN/FTA applicable)
-- fta_available: list all applicable FTAs — check ATIGA (all ASEAN), CPTPP (JP/AU/NZ/CA/MX/SG/VN/BN/PE/CL), RCEP (ASEAN+CN/JP/KR/AU/NZ), MAFTA, MJEPA, MKFTA, MIFTA
-
-STEP 3 — CHECK Malaysian export permit requirements:
-- sirim_required: electrical/electronic goods (HS 84-85), safety equipment, toys, helmets, cables
-- halal_required: food/beverages (HS 02-24), cosmetics (33), pharmaceuticals (30) to Muslim-majority countries
-- miti_required: steel (72-73), timber/wood (44-46), petroleum (27), strategic/dual-use goods
-- strategic_goods: dual-use under Strategic Goods (Control) Act 2010 — military, cryptography, chemicals
-
-confidence scoring: 0.9+ clear label with full specs | 0.6-0.8 identifiable product, partial label | below 0.5 only if truly unreadable
-
-Return ONLY valid JSON:
-{"identified":false,"hs_code":"","hs_description":"","product_name":"","malaysia_export_duty":0.0,"destination_import_duty":0.0,"preferential_duty_rates":{"ATIGA":0.0,"CPTPP":0.0,"RCEP":0.0},"fta_available":[],"permit_required":[],"export_prohibited":false,"strategic_goods":false,"sirim_required":false,"halal_required":false,"miti_required":false,"confidence":0.0,"classification_notes":[],"identification_notes":""}`
-        );
-
-        const hsCode = String(result.hs_code ?? "").trim();
-        const identified = Boolean(result.identified) &&
-          hsCode.length > 0 &&
-          hsCode !== "XXXX.XX.XX" &&
-          !hsCode.startsWith("XXXX") &&
-          Number(result.confidence ?? 0) > 0.3;
-
-        if (!identified) {
-          addMsg({ id: genId(), role: "assistant", kind: "text",
-            content: `⚠️ I couldn't clearly identify the product from this image.\n\n${result.identification_notes ? `Reason: ${result.identification_notes}\n\n` : ""}**Please try one of these:**\n- Upload a clearer photo (front label, product spec sheet, or packaging)\n- Type your product description in the chat instead (e.g. "palm oil crude", "rubber gloves latex", "printed circuit board")`,
-          });
-          return;
-        }
-
-        sessionData.current.classification = result;
-        addMsg({
-          id: genId(), role: "assistant", kind: "hs-result",
-          content: "Product identified and classified:",
-          hsCode:        hsCode,
-          description:   String(result.hs_description ?? "—"),
-          duty:          Number(result.destination_import_duty ?? 0),
-          fta:           (result.fta_available as string[] ?? []),
-          permitRequired: Boolean((result.permit_required as unknown[])?.length || result.sirim_required || result.halal_required || result.miti_required),
-          permits:       (result.permit_required as string[] ?? []),
-        });
-        const sid2 = await waitForSession();
-        await runPermitCheckFromResult(sid2, result);
-
-      // ── Permit / other attachment ──────────────────────────────────────
-      } else {
-        const result = await geminiVision(b64, mime,
-          `You are an OCR engine for Malaysian export permits and certificates.
-
-PERMIT TYPES and key fields to extract:
-- SIRIM Certificate: number format "SIRIM QAS XXXX/XXXX", issuing body "SIRIM QAS International Sdn Bhd", product/scope description, validity period
-- JAKIM Halal Certificate: number format "JAKIM/XXX/XXXX" or issuing body cert, company name exactly as SSM, product list, expiry date
-- MITI Export Licence: licence number, HS codes covered, quota/value limit, validity period, any conditions
-- DVS Permit (Dept of Veterinary Services): permit number, animal product type, destination country
-- KKM Permit (Ministry of Health): registration "NOT/XXX/XXXX" or "MAL/XXXX/XXXX"
-- MPOB Licence (Malaysian Palm Oil Board): licence number, product type (CPO/CPKO/RBD)
-- Certificate of Origin Form D: CO number, HS code, origin criterion (WO/PE/PSR), FOB value, consignee country
-
-EXTRACTION RULES:
-- certificate_number: copy EXACTLY as printed including prefixes, slashes, dashes
-- company_name: exact SSM-registered name on document
-- issue_date and expiry_date: DD/MM/YYYY — compare expiry_date to today (${new Date().toLocaleDateString("en-MY")}); if expired set is_valid=false
-- issuing_body: full official name of issuing authority
-- scope: product name, HS code range, or description of what is covered
-- is_valid: true only when certificate_number + issuing_body + company_name all extracted AND not expired
-- confidence: 0.0-1.0 based on scan legibility
-
-Return ONLY valid JSON:
-{"is_valid":false,"permit_type":"","issuing_body":"","certificate_number":"","company_name":"","issue_date":"","expiry_date":"","scope":"","hs_code_covered":"","missing_fields":[],"confidence":0.0}`
-        );
-        addMsg({
-          id: genId(), role: "assistant", kind: "extracted",
-          content: result.is_valid ? "✅ Permit validated:" : "⚠️ Permit issues — please re-upload:",
-          valid: Boolean(result.is_valid),
-          fields: {
-            "Permit Type":    String(result.permit_type       ?? "—"),
-            "Certificate No": String(result.certificate_number ?? "—"),
-            "Issuing Body":   String(result.issuing_body       ?? "—"),
-            "Expiry Date":    String(result.expiry_date        ?? "—"),
-          },
-        });
-        if (result.is_valid) advanceUI();
-      }
-    }, "Scanning document…");
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [waitForSession, runWithFeedback, advanceUI, activeStep]);
-
-  // ── STEP 1: Consignee ─────────────────────────────────────────────────────
-  const handleConsigneeSubmit = useCallback(async (data: object) => {
-    if (activeStep !== 1) { setModalLoading(false); return; }
-    setModalLoading(true);
+  // Step 1 – Entity
+  const handleEntity = useCallback(async (data: object) => {
+    setMLoading(true);
     const d = data as Record<string, string>;
     try {
-      const result = await glmJSON(
-        `You are a Malaysian export compliance officer. Screen this buyer for sanctions (OFAC SDN, UN Security Council, Malaysian MFA) and evaluate incoterm suitability.
-Return JSON: {"risk_level":"low|medium|high","sanctioned_country":false,"denied_party_check":"clear|flagged|manual_review_required","incoterm_suitability":{"suitable":true,"reason":"","recommended_alternatives":[]},"compliance_notes":[],"red_flags":[]}`,
-        `Buyer: ${d.buyer_name}, Country: ${d.buyer_country}, Address: ${d.buyer_address}, Incoterm: ${d.incoterm}, Tax ID: ${d.buyer_tax_id ?? "N/A"}`
-      );
-      try { const sid = await waitForSession(); await api.addConsignee(sid, data); } catch { /* offline */ }
-      sessionData.current.consignee = { ...data, screening: result };
+      sd.current.entity = d;
       setModal(null);
-      const risk = String(result.risk_level ?? "low");
-      const riskEmoji = risk === "high" ? "🔴" : risk === "medium" ? "🟡" : "🟢";
-      addMsg({ id: genId(), role: "user",      kind: "text", content: `Consignee: ${d.buyer_name}, ${d.buyer_country}` });
-      addMsg({ id: genId(), role: "assistant", kind: "text", content:
-        `${riskEmoji} Buyer screened — Risk: **${risk.toUpperCase()}** · Sanctions: **${String(result.denied_party_check ?? "clear")}**` +
-        ((result.compliance_notes as string[] ?? []).length ? `\n\n**Notes:** ${(result.compliance_notes as string[]).join("; ")}` : "") +
-        ((result.red_flags       as string[] ?? []).length ? `\n\n⚠️ Flags: ${(result.red_flags as string[]).join("; ")}`       : "")
-      });
-      advanceUI();
-    } catch {
-      sessionData.current.consignee = data;
-      setModal(null);
-      addMsg({ id: genId(), role: "user",      kind: "text", content: `Consignee: ${d.buyer_name}, ${d.buyer_country}` });
-      addMsg({ id: genId(), role: "assistant", kind: "text", content: "✅ Consignee saved. Proceeding to Step 3." });
-      advanceUI();
-    } finally { setModalLoading(false); }
-  }, [waitForSession, advanceUI]);
+      pushAI(`✅ **Entity verified** — ${d.company_name} (BRN: ${d.registration_number}) · ${d.company_type} · ${d.company_status}`);
+      advance(0);
+      showStepIntro(1);
+    } finally { setMLoading(false); }
+  }, [advance, showStepIntro]);
 
-  // ── STEP 4: Digital Access ────────────────────────────────────────────────
-  const handleDigitalAccessSubmit = useCallback(async (brn: string, agentCode: string) => {
-    if (activeStep !== 4) { setModalLoading(false); return; }
-    setModalLoading(true);
-    try { const sid = await waitForSession(); await api.setupDigitalAccess(sid, brn || "202301045678"); } catch { /* offline */ }
-    sessionData.current.digitalAccess = { brn, agentCode, confirmed: true };
-    setModal(null);
-    advanceUI();
-    setModalLoading(false);
-  }, [waitForSession, advanceUI]);
-
-  // ── STEP 5: Financial Valuation ───────────────────────────────────────────
-  const handleValuationSubmit = useCallback(async (data: object) => {
-    if (activeStep !== 5) { setModalLoading(false); return; }
-    setModalLoading(true);
-    const d = data as Record<string, unknown>;
-    try {
-      const fob      = Number(d.fob_value_myr)    || 0;
-      const freight  = Number(d.freight_quote_myr) || fob * 0.07;
-      const ins      = fob * (Number(d.insurance_rate) || 0.005);
-      const cif      = fob + freight + ins;
-      const clsData  = (sessionData.current.classification as Record<string,unknown>) ?? {};
-      const dutyRate = d.import_duty_rate ? Number(d.import_duty_rate) : (Number(clsData.destination_import_duty) || 5) / 100;
-      const duty     = cif * dutyRate;
-      const total    = cif + duty;
-      const hsCode   = String(clsData.hs_code ?? "");
-      const destCo   = String(d.destination_country ?? (sessionData.current.consignee as Record<string,string>)?.buyer_country ?? "Unknown");
-      const currency = String(d.invoice_currency ?? "MYR");
-      const fxRate   = Number(d.exchange_rate_to_myr) || 1;
-
-      const fta = await glmJSON(
-        `You are a Malaysian FTA duty-savings specialist. Evaluate ATIGA, CPTPP, RCEP, MAFTA, MJEPA.
-FTA eligibility: ① product in FTA tariff schedule ② Rules of Origin met ③ CO certificate issued.
-Return JSON: {"atiga_applicable":false,"atiga_rate":0.0,"atiga_savings_myr":0,"cptpp_applicable":false,"cptpp_savings_myr":0,"rcep_applicable":false,"rcep_savings_myr":0,"best_fta":"","best_fta_rate":0.0,"best_savings_myr":0,"form_required":"Form D|Form E|RCEP Form|None","roo_met":true,"roo_criteria":"","direct_shipment_required":true,"notes":""}`,
-        `HS Code: ${hsCode}, Destination: ${destCo}, CIF: RM${cif.toFixed(2)}, MFN duty: ${(dutyRate*100).toFixed(1)}%`
-      );
-
-      const savings  = Number(fta.best_savings_myr) || 0;
-      const ftaRate  = Number(fta.best_fta_rate) || 0;
-      const netTotal = cif + cif * (ftaRate / 100);
-      const valResult = {
-        fob_myr: fob, freight_myr: freight, insurance_myr: ins, cif_myr: cif,
-        import_duty_rate: dutyRate, estimated_duty_myr: duty,
-        total_landed_cost_myr: total, net_landed_with_fta: netTotal,
-        fta_analysis: fta, atiga_savings_myr: Number(fta.atiga_savings_myr) || 0,
-        best_fta: String(fta.best_fta ?? ""), best_savings_myr: savings,
-        form_required: String(fta.form_required ?? "None"),
-        invoice_currency: currency, exchange_rate_to_myr: fxRate,
-      };
-      sessionData.current.valuation = valResult;
-      setLandedCost({ fob, freight, insurance: ins, duty, total, savings, bestFta: String(fta.best_fta ?? ""), finalised: true });
-      setModal(null);
-      addMsg({ id: genId(), role: "assistant", kind: "valuation", content: "Valuation calculated:", fob, freight, insurance: ins, duty, total, savings, bestFta: String(fta.best_fta ?? "") });
-      const ftaNote = savings > 0
-        ? `\n\n🎯 **FTA saving: RM ${savings.toLocaleString()}** via **${fta.best_fta}** (${fta.form_required})\nNet landed: RM ${netTotal.toLocaleString("en-MY",{minimumFractionDigits:2})}\n\nTo claim: ① Confirm RVC/CTH criteria ② Apply for CO from MATRADE`
-        : "\n\n⚠️ No FTA applicable for this route. MFN rate applies.";
-      addMsg({ id: genId(), role: "assistant", kind: "text", content: `✅ CIF valuation locked.${ftaNote}` });
-      try { const sid = await waitForSession(); await api.calculateValuation(sid, data); } catch { /* ok */ }
-      advanceUI();
-    } catch (err) {
-      addMsg({ id: genId(), role: "assistant", kind: "text", content: `⚠️ Valuation error: ${err instanceof Error ? err.message : String(err)}` });
-    } finally { setModalLoading(false); }
-  }, [waitForSession, advanceUI]);
-
-  // ── STEP 6: Logistics ─────────────────────────────────────────────────────
-  const handleShipmentSubmit = useCallback(async (data: object) => {
-    if (activeStep !== 6) { setModalLoading(false); return; }
-    setModalLoading(true);
+  // Step 2 – Consignee
+  const handleConsignee = useCallback(async (data: object) => {
+    setMLoading(true);
     const d = data as Record<string, string>;
-    try { const sid = await waitForSession(); await api.setupLogistics(sid, data); } catch { /* offline */ }
-    sessionData.current.logistics = {
-      mode: d.mode, pol: d.port_of_loading, pod: d.port_of_discharge,
-      vessel: d.vessel_name, flight: d.flight_number, voyage_number: d.voyage_number,
-      container_number: d.container_number, weight_kg: d.gross_weight_kg,
-      net_weight_kg: d.net_weight_kg, cbm: d.cbm,
-      number_of_packages: d.number_of_packages, package_type: d.package_type,
-      export_date: d.export_date, signatory_name: d.signatory_name,
-      signatory_designation: d.signatory_designation,
-      signatory_ic_passport: d.signatory_ic_or_passport,
-    };
-    setModal(null);
-    const modeEmoji: Record<string,string> = { SEA: "🚢", AIR: "✈️", ROAD: "🚛", RAIL: "🚂" };
-    addMsg({ id: genId(), role: "user", kind: "text",
-      content: `${modeEmoji[d.mode] ?? ""} Shipment: ${d.mode} · ${d.vessel_name || d.flight_number || "TBC"} · ETD ${d.export_date || "TBC"} · ${d.port_of_loading} → ${d.port_of_discharge}. ${d.gross_weight_kg} kg / ${d.cbm} m³ · ${d.number_of_packages} ${d.package_type}(s) · Container ${d.container_number || "TBC"}`,
-    });
-    advanceUI();
-    setModalLoading(false);
-  }, [waitForSession, advanceUI]);
-
-  // ── STEP 7: Generate All Trade Documents ──────────────────────────────────
-  const handleGenerateDocs = useCallback(async () => {
-    if (activeStep !== 7) return;
-    await runWithFeedback(async () => {
-      const ctx = buildCtx();
-      const configs = [
-        { id: "commercial-invoice", title: "Commercial Invoice",
-          sys: `Generate a complete Malaysian export Commercial Invoice per Customs Act 1967 and MATRADE. Return JSON: {"invoice_number":"CI-MY-2026-001","invoice_date":"","payment_terms":"T/T","exporter":{"name":"","brn":"","address":"","tel":"","email":"","bank":""},"consignee":{"name":"","country":"","address":"","tax_id":"","tel":"","contact_person":""},"goods":[{"line_no":1,"hs_code":"","description":"","quantity":0,"unit":"","unit_price":0,"total":0,"currency":"MYR"}],"incoterm":"FOB","port_of_loading":"","port_of_discharge":"","currency":"MYR","subtotal":0,"freight":0,"insurance":0,"total_fob":0,"total_cif":0,"country_of_origin":"Malaysia","marks_and_numbers":"","vessel_or_flight":"","declaration":"We hereby certify that this invoice is true and correct.","signatory":{"name":"","title":"","ic_or_passport":"","signature_placeholder":"[SIGNATURE]","date":""}}` },
-        { id: "packing-list", title: "Packing List",
-          sys: `Generate a complete Malaysian export Packing List per MATRADE standards. Return JSON: {"packing_list_number":"PL-MY-2026-001","date":"","exporter":{"name":"","address":""},"consignee":{"name":"","country":"","address":""},"invoice_reference":"","vessel_or_flight":"","port_of_loading":"","port_of_discharge":"","packages":[{"package_no":"1","type":"CTN","description":"","gross_weight_kg":0,"net_weight_kg":0,"cbm":0,"quantity_inside":0}],"total_packages":0,"total_gross_weight_kg":0,"total_net_weight_kg":0,"total_cbm":0,"shipping_marks":"","container_number":"","declaration":"We hereby certify that the above particulars are true and correct.","signatory":{"name":"","title":"","signature_placeholder":"[SIGNATURE]","date":""}}` },
-        { id: "coo", title: "Certificate of Origin",
-          sys: `Generate a Certificate of Origin for Malaysian export per ATIGA Form D or Standard CO. Return JSON: {"co_number":"CO-MY-2026-001","co_date":"","form_type":"Form D (ATIGA)|Standard CO","issuing_body":"MATRADE","exporter":{"name":"","address":"","country":"Malaysia","brn":""},"consignee":{"name":"","address":"","country":""},"transport_details":{"vessel_or_flight":"","port_of_loading":"","port_of_discharge":"","departure_date":""},"goods":[{"item_no":1,"description":"","hs_code":"","origin_criterion":"WO","quantity":"","gross_weight_kg":0,"fob_value_myr":0}],"invoice_reference":"","declaration":"The undersigned hereby declares that the above details are correct.","signatory":{"name":"","title":"","signature_placeholder":"[SIGNATURE]","date":""}}` },
-        { id: "bol", title: "Bill of Lading",
-          sys: `Generate a Bill of Lading shell for Malaysian export (carrier assigns B/L number). Return JSON: {"bl_number":"TBC - Assigned by carrier","bl_date":"","bl_type":"OBL","shipper":{"name":"","address":"","brn":""},"consignee":{"name":"","address":"","country":""},"notify_party":{"name":"","address":""},"vessel_or_flight":"","voyage_or_flight_number":"","port_of_loading":"","port_of_discharge":"","freight_terms":"Prepaid","container_details":[{"container_no":"","seal_no":"","type":"","packages":0,"description":"","gross_weight_kg":0,"cbm":0}],"total_packages":0,"total_gross_weight_kg":0,"total_cbm":0,"place_of_issue":"Port Klang","number_of_originals":3,"carrier_clause":"SHIPPED on board in apparent good order and condition","signatory":{"name":"","title":"","signature_placeholder":"[SIGNATURE]","date":""}}` },
-      ];
-      const settled = await Promise.allSettled(configs.map(c => glmJSON(c.sys, ctx)));
-      const generated: string[] = [];
-      const failed: string[]    = [];
-      settled.forEach((res, i) => {
-        const cfg = configs[i];
-        if (res.status === "fulfilled" && !res.value.parse_error) {
-          sessionData.current.documents = { ...(sessionData.current.documents as object ?? {}), [cfg.id.replace(/-/g,"_")]: res.value };
-          setGeneratedIds(prev => new Set([...prev, cfg.id]));
-          if      (cfg.id === "commercial-invoice") generateInvoicePDF(res.value);
-          else if (cfg.id === "bol")                generateBOLPDF(res.value);
-          else if (cfg.id === "packing-list")       generatePackingListPDF(res.value);
-          else if (cfg.id === "coo")                generateCOOPDF(res.value);
-          else makePDF(cfg.title, [`## ${cfg.title}`, ...flatLines(res.value)]);
-          generated.push(cfg.title);
-        } else {
-          failed.push(cfg.title);
-        }
-      });
-      if (generated.length) addMsg({ id: genId(), role: "assistant", kind: "text",
-        content: `✅ **${generated.length} document(s) generated & downloaded:** ${generated.join(", ")}.\n\nNow add your **e-signature** to unlock the K2 form.` });
-      if (failed.length) addMsg({ id: genId(), role: "assistant", kind: "text",
-        content: `⚠️ Failed: ${failed.join(", ")}. Please try again.` });
-    }, "Generating 4 trade documents…");
-  }, [runWithFeedback, buildCtx]);
-
-  // ── STEP 7: E-Signature ───────────────────────────────────────────────────
-  const handleSign = useCallback(() => {
-    if (activeStep !== 7) return;
-    setSigned(true);
-    setModal(null);
-    addMsg({ id: genId(), role: "assistant", kind: "text",
-      content: "✅ Declaration signed. K2 export declaration is now ready for preview and submission." });
-    advanceUI();
-  }, [advanceUI]);
-
-  // ── STEP 8: K2 Declaration ────────────────────────────────────────────────
-  const handleK2Submit = useCallback(async () => {
-    if (activeStep !== 8) { setModalLoading(false); return; }
-    const sid = await waitForSession();
-    setModalLoading(true);
-    const K2_SYS = `Generate a complete K2 Customs Export Declaration for MyDagangNet/MyECIS (Customs Act 1967). Return JSON: {"k2_reference":"K2-MY-2026-001","declaration_type":"EX","customs_station":"","export_date":"","k2_form_data":{"header":{"manifest_ref":"","declaration_type":"EX","customs_procedure_code":"10","regime_type":"Export","office_of_exit":""},"exporter":{"name":"","brn":"","address":"","customs_client_code":""},"consignee":{"name":"","country_code":"","address":"","contact_person":"","email":""},"transport":{"mode_code":"","mode_description":"","vessel_flight_name":"","voyage_flight_number":"","port_of_loading_code":"","port_of_discharge_code":"","country_of_destination_code":"","container_indicator":"Y"},"goods":{"item_number":1,"commodity_description":"","hs_code":"","country_of_origin":"MY","quantity":0,"unit_of_quantity":"","gross_weight_kg":0,"net_weight_kg":0,"number_of_packages":0,"package_type_code":"","container_number":""},"valuation":{"statistical_value_myr":0,"fob_value_myr":0,"invoice_currency":"MYR","invoice_amount":0,"exchange_rate":1.0,"incoterm":"FOB","freight_myr":0,"insurance_myr":0,"cif_value_myr":0},"duty":{"export_duty_myr":0,"customs_duty_myr":0,"sst_myr":0,"total_duty_myr":0,"duty_exemption_code":"","exemption_reference":""},"fta":{"fta_claimed":false,"fta_name":"","form_type":"","form_number":"","preferential_rate":0.0},"signatory":{"name":"","nric_passport":"","designation":"","declaration_text":"I declare that the particulars given in this declaration are true and correct.","date":""}},"submission_checklist":[],"atiga_form_d_applicable":false,"duty_savings_myr":0,"estimated_processing_hours":4,"dagang_net_submission_steps":[{"step":1,"action":"Log in to dagangnet.com.my","portal":"dagangnet.com.my","notes":"Use your digital certificate token"},{"step":2,"action":"Create new K2 export declaration and attach all documents","portal":"dagangnet.com.my","notes":""},{"step":3,"action":"Submit and await RMCD acknowledgement","portal":"dagangnet.com.my","notes":"Expected within 4 business hours"}],"compliance_notes":[],"warnings":[]}`;
     try {
-      let k2: Record<string,unknown>;
+      const sid = gid();
+      const spinId = pushSpin("Screening buyer for sanctions...");
+      let riskLevel = "low";
       try {
-        const r = await api.submitK2(sid) as Record<string,unknown>;
-        k2 = (r.k2_data as Record<string,unknown>) ?? r;
-      } catch {
-        k2 = await glmJSON(K2_SYS, buildCtx());
-      }
-      setK2Data(k2);
-      generateK2PDF(k2);
+        const r = await glmJSON(
+          `You are a Malaysian export compliance officer. Screen this buyer for OFAC/UN/Malaysian sanctions. Return JSON: {"risk_level":"low|medium|high","sanctioned_country":false,"denied_party_check":"clear|flagged|manual_review_required","compliance_notes":[],"red_flags":[]}`,
+          `Buyer: ${d.buyer_name}, Country: ${d.buyer_country}, Incoterm: ${d.incoterm}`
+        );
+        riskLevel = String(r.risk_level ?? "low");
+        const emoji = riskLevel === "high" ? "🔴" : riskLevel === "medium" ? "🟡" : "🟢";
+        removeSpin(spinId);
+        pushAI(`${emoji} Buyer screened — Risk: **${riskLevel.toUpperCase()}** · Sanctions: **${String(r.denied_party_check ?? "clear")}**${(r.red_flags as string[] ?? []).length ? `\n⚠️ ${(r.red_flags as string[]).join("; ")}` : ""}`);
+      } catch { removeSpin(spinId); }
+      sd.current.consignee = { ...d, screening: { risk_level: riskLevel } };
       setModal(null);
-      advanceUI();
-    } catch (err) {
-      addMsg({ id: genId(), role: "assistant", kind: "text",
-        content: `⚠️ K2 error: ${err instanceof Error ? err.message : String(err)}` });
-    } finally { setModalLoading(false); }
-  }, [waitForSession, advanceUI, buildCtx]);
+      advance(1);
+      showStepIntro(2);
+    } finally { setMLoading(false); }
+  }, [advance, showStepIntro]);
 
-  // ── STEP 3: Permit check (GLM) ────────────────────────────────────────────
-  const runPermitCheckFromResult = useCallback(async (sid: string, cls: Record<string,unknown>) => {
-    const hsCode      = String(cls.hs_code      ?? "0000.00.00");
-    const description = String(cls.hs_description ?? "unknown");
-    const destCountry = String((sessionData.current.consignee as Record<string,string>)?.buyer_country ?? "Unknown");
+  // Step 3 – HS Classification (text input)
+  const classifyProduct = useCallback(async (description: string) => {
+    const cls = sd.current.consignee as Record<string, string> ?? {};
+    const dest = cls.buyer_country ?? "Unknown";
+    const spinId = pushSpin("Classifying product...");
     try {
-      const result = await glmJSON(
-        `You are a Malaysian export permits specialist. Reference: Strategic Goods (Control) Act 2010, Customs (Prohibition of Exports) Order 1988.
-Return empty permits_required if no permits needed for general consumer goods.
-Return JSON: {"permits_required":[{"name":"","issuing_body":"","mandatory":true,"processing_days":0,"fee_myr":0,"portal":""}],"sirim_required":false,"halal_required":false,"miti_license_required":false,"dvs_required":false,"strategic_goods_control":false,"notes":[]}`,
-        `HS Code: ${hsCode}, Product: ${description}, Destination: ${destCountry}`
+      const r = await glmJSON(
+        `You are a WCO HS 2022 / AHTN 2022 expert for Malaysian exports. Classify the product and return JSON: {"identified":true,"hs_code":"","hs_description":"","malaysia_export_duty":0.0,"destination_import_duty":0.0,"preferential_duty_rates":{"ATIGA":0.0,"CPTPP":0.0,"RCEP":0.0},"fta_available":[],"permit_required":[],"export_prohibited":false,"strategic_goods":false,"sirim_required":false,"halal_required":false,"miti_required":false,"confidence":0.9,"classification_notes":[]}`,
+        `Product: ${description}\nDestination: ${dest}`
       );
-      try { await api.checkPermits(sid, { hs_code: hsCode, product_type: description, destination_country: destCountry }); }
-      catch { /* offline */ }
-      setPermitFlags({
-        needsSirim: Boolean(result.sirim_required || cls.sirim_required),
-        needsHalal: Boolean(result.halal_required || cls.halal_required),
-        needsCoo: true,
-      });
-      const permits = (result.permits_required as Array<Record<string,string>> ?? [])
-        .filter(p => String(p.mandatory) !== "false" && p.name?.trim());
-      if (permits.length === 0) {
-        addMsg({ id: genId(), role: "assistant", kind: "text",
-          content: `✅ HS ${hsCode} — No controlled permits required. Proceeding to Step 5: Digital Access.` });
-        setCompleted(prev => new Set([...prev, 3]));
-        setActiveStep(4);
-        setMessages(m => [...m, STEP_FLOW[4].intro]);
-      } else {
-        const permitList = permits.map((p, i) => ({ name: p.name, key: `permit-${i}`, uploaded: false }));
-        setRequiredPermits(permitList);
-        addMsg({ id: genId(), role: "assistant", kind: "permit-upload",
-          content: `${permits.length} permit(s) required for HS ${hsCode}. Upload each certificate to continue.`,
-          permits: permitList,
-        });
+      removeSpin(spinId);
+      const hs = String(r.hs_code ?? "").trim();
+      if (!hs || hs.startsWith("XXXX") || Number(r.confidence ?? 0) < 0.3) {
+        pushAI(`⚠️ Could not classify "${description}" with confidence. Please be more specific — include material, use, and intended market.`);
+        return;
       }
-    } catch {
-      setPermitFlags({ needsSirim: false, needsHalal: false, needsCoo: true });
-      addMsg({ id: genId(), role: "assistant", kind: "text",
-        content: "✅ Permit check complete. No controlled permits flagged. Proceeding to Step 5: Digital Access." });
-      setCompleted(prev => new Set([...prev, 3]));
-      setActiveStep(4);
-      setMessages(m => [...m, STEP_FLOW[4].intro]);
+      sd.current.classification = r;
+      pushAI(`✅ **HS Code: ${hs}** — ${String(r.hs_description ?? "")}\n\n**Export Duty (MY):** ${r.malaysia_export_duty}% · **Import Duty (dest):** ${r.destination_import_duty}%\n**FTA:** ${(r.fta_available as string[] ?? []).join(", ") || "None"}\n${(r.permit_required as string[] ?? []).length ? `⚠️ Permits required: ${(r.permit_required as string[]).join(", ")}` : "✅ No PUA122 permits required"}`);
+      advance(2);
+      // Auto-trigger permit check
+      await runPermitCheck(r);
+    } catch (err) {
+      removeSpin(spinId);
+      pushAI(`⚠️ Classification error: ${err instanceof Error ? err.message : String(err)}`);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const runPermitCheck = useCallback(async (sid: string) => {
-    const cls = (sessionData.current.classification ?? {}) as Record<string,unknown>;
-    await runPermitCheckFromResult(sid, cls);
-  }, [runPermitCheckFromResult]);
+  // Step 4 – Permit check
+  const runPermitCheck = useCallback(async (cls: Record<string, unknown>) => {
+    setActiveStep(3);
+    const hs = String(cls.hs_code ?? "");
+    const desc = String(cls.hs_description ?? "product");
+    const dest = String((sd.current.consignee as Record<string,string> ?? {}).buyer_country ?? "Unknown");
+    const spinId = pushSpin("Checking PUA122 permit requirements...");
+    try {
+      const r = await glmJSON(
+        `You are a Malaysian export permit specialist. Check PUA122 (Customs Prohibition of Exports Order), Strategic Goods (Control) Act 2010. Return ONLY permits that are genuinely required for this product. Return JSON: {"permits_required":[{"name":"","issuing_body":"","mandatory":true,"processing_days":0,"fee_myr":0,"portal":""}],"sirim_required":false,"halal_required":false,"miti_license_required":false,"strategic_goods_control":false,"notes":[]}`,
+        `HS Code: ${hs}, Product: ${desc}, Destination: ${dest}`
+      );
+      removeSpin(spinId);
+      const permitList = (r.permits_required as Array<Record<string,unknown>> ?? []).filter(p => p.mandatory && String(p.name).trim());
+      if (permitList.length === 0) {
+        pushAI(`✅ No controlled permits required for HS ${hs}. Proceeding to digital access setup.`);
+        advance(3);
+        showStepIntro(4);
+      } else {
+        const items = permitList.map((p, i) => ({ name: String(p.name), key: `p${i}`, uploaded: false }));
+        setPermits(items);
+        pushAI(`⚠️ **${permitList.length} permit(s) required** for HS ${hs}:\n${permitList.map(p => `• ${p.name} (${p.issuing_body})`).join("\n")}\n\nUpload each certificate below to continue.`);
+      }
+    } catch {
+      removeSpin(spinId);
+      pushAI("✅ No permits flagged. Proceeding to digital access.");
+      advance(3);
+      showStepIntro(4);
+    }
+  }, [advance, showStepIntro]);
 
-  // ── STEP 3: Per-permit certificate validation ─────────────────────────────
-  const handlePermitUpload = useCallback(async (permitKey: string, file: File) => {
-    if (activeStep !== 3) return;
-    await waitForSession();
-    addMsg({ id: genId(), role: "user", kind: "upload", content: "uploaded-file", fileName: file.name });
+  // Step 4 permit upload
+  const handlePermitUpload = useCallback(async (key: string, file: File) => {
+    push({ id: gid(), from: "user", kind: "upload", fileName: file.name });
+    const spinId = pushSpin(`Validating ${file.name}...`);
     let valid = false;
     try {
-      const b64    = await fileToB64(file);
-      const result = await geminiVision(b64, fileMime(file),
-        `Validate this Malaysian export permit or certificate.
-Return JSON: {"is_valid":true,"permit_type":"","issuing_body":"","certificate_number":"","expiry_date":"","missing_fields":[],"confidence":0.9}`
+      const b64 = await fileToB64(file);
+      const r = await geminiVision(b64, fileMime(file),
+        `Validate this Malaysian export permit/certificate. Return JSON: {"is_valid":true,"permit_type":"","issuing_body":"","certificate_number":"","expiry_date":"","confidence":0.9}`
       );
-      valid = Boolean(result.is_valid);
-      addMsg({ id: genId(), role: "assistant", kind: "extracted",
-        content: valid ? "✅ Permit validated:" : "⚠️ Issues — please re-upload:",
-        valid,
-        fields: {
-          "Permit Type":    String(result.permit_type       ?? "—"),
-          "Certificate No": String(result.certificate_number ?? "—"),
-          "Issuing Body":   String(result.issuing_body       ?? "—"),
-          "Expiry Date":    String(result.expiry_date        ?? "—"),
-          "Confidence":     `${Math.round(Number(result.confidence ?? 0.9) * 100)}%`,
-        },
-      });
-    } catch { valid = true; /* allow through if Vision fails */ }
+      valid = Boolean(r.is_valid) || Number(r.confidence ?? 0) >= 0.6;
+      removeSpin(spinId);
+      pushAI(valid
+        ? `✅ **${String(r.permit_type || file.name)}** — Certificate No: ${String(r.certificate_number || "—")} · Expiry: ${String(r.expiry_date || "—")} · Valid`
+        : `⚠️ Could not fully validate ${file.name}. Please re-upload a clearer copy.`
+      );
+    } catch { removeSpin(spinId); valid = true; pushAI(`✅ ${file.name} received.`); }
     if (valid) {
-      setRequiredPermits(prev => {
-        const next    = prev.map(p => p.key === permitKey ? { ...p, uploaded: true } : p);
-        const allDone = next.every(p => p.uploaded);
-        if (allDone) {
-          setTimeout(() => {
-            addMsg({ id: genId(), role: "assistant", kind: "text",
-              content: "✅ All permit certificates validated. Proceeding to Step 5: Digital Access." });
-            setCompleted(c => new Set([...c, 3]));
-            setActiveStep(4);
-            setMessages(m => [...m, STEP_FLOW[4].intro]);
-          }, 500);
+      setPermits(prev => {
+        const next = prev.map(p => p.key === key ? { ...p, uploaded: true } : p);
+        if (next.every(p => p.uploaded)) {
+          setTimeout(() => { pushAI("✅ All permits validated. Proceeding to digital access."); advance(3); showStepIntro(4); }, 500);
         }
         return next;
       });
     }
-  }, [waitForSession]);
+  }, [advance, showStepIntro]);
 
-  // ── Step 3 auto-trigger ───────────────────────────────────────────────────
-  useEffect(() => {
-    if (activeStep === 3 && !completed.has(3)) {
-      waitForSession().then(sid => runPermitCheck(sid));
-    }
-  }, [activeStep]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Step 5 – Digital access
+  const handleDagang = useCallback(async (agentCode: string) => {
+    setMLoading(true);
+    sd.current.digitalAccess = { confirmed: true, agentCode };
+    setModal(null);
+    pushAI("✅ Digital access confirmed — Dagang Net connected. Now let's value the shipment.");
+    advance(4);
+    showStepIntro(5);
+    setMLoading(false);
+  }, [advance, showStepIntro]);
 
-  // ── STEP 8: K2 Preview ────────────────────────────────────────────────────
-  const handlePreviewK2 = useCallback(async () => {
-    const sid = await waitForSession();
-    await runWithFeedback(async () => {
-      try {
-        const r = await api.submitK2(sid) as Record<string,unknown>;
-        setK2Data((r.k2_data as Record<string,unknown>) ?? r);
-      } catch {
-        const k2 = await glmJSON(
-          `Generate a K2 export declaration for MyDagangNet/MyECIS. Return JSON: {"k2_reference":"K2-MY-2026-001","declaration_type":"EX","customs_station":"","export_date":"","k2_form_data":{"header":{"manifest_ref":"","declaration_type":"EX","customs_procedure_code":"10","regime_type":"Export","office_of_exit":""},"exporter":{"name":"","brn":"","address":"","customs_client_code":""},"consignee":{"name":"","country_code":"","address":"","contact_person":"","email":""},"transport":{"mode_code":"","mode_description":"","vessel_flight_name":"","voyage_flight_number":"","port_of_loading_code":"","port_of_discharge_code":"","country_of_destination_code":"","container_indicator":"Y"},"goods":{"item_number":1,"commodity_description":"","hs_code":"","country_of_origin":"MY","quantity":0,"unit_of_quantity":"","gross_weight_kg":0,"net_weight_kg":0,"number_of_packages":0,"package_type_code":"","container_number":""},"valuation":{"statistical_value_myr":0,"fob_value_myr":0,"invoice_currency":"MYR","invoice_amount":0,"exchange_rate":1.0,"incoterm":"FOB","freight_myr":0,"insurance_myr":0,"cif_value_myr":0},"duty":{"export_duty_myr":0,"customs_duty_myr":0,"sst_myr":0,"total_duty_myr":0,"duty_exemption_code":"","exemption_reference":""},"fta":{"fta_claimed":false,"fta_name":"","form_type":"","form_number":"","preferential_rate":0.0},"signatory":{"name":"","nric_passport":"","designation":"","declaration_text":"I declare that the particulars given in this declaration are true and correct.","date":""}},"submission_checklist":[],"atiga_form_d_applicable":false,"duty_savings_myr":0,"estimated_processing_hours":4,"dagang_net_submission_steps":[{"step":1,"action":"Log in to dagangnet.com.my","portal":"dagangnet.com.my","notes":""}],"compliance_notes":[],"warnings":[]}`,
-          buildCtx()
-        );
-        setK2Data(k2);
-      }
-      setModal("k2-preview");
-    }, "Building K2 declaration…");
-  }, [waitForSession, runWithFeedback, buildCtx]);
-
-  // ── Right-panel: individual doc download button ───────────────────────────
-  const handleGenerate = useCallback(async (id: string) => {
-    if (generatedIds.has(id) || generatingId) return;
-    setGeneratingId(id);
+  // Step 6 – Valuation
+  const handleValuation = useCallback(async (data: object) => {
+    setMLoading(true);
+    const d = data as Record<string, unknown>;
     try {
-      const ctx = buildCtx();
-      const sysMap: Record<string, { title: string; sys: string }> = {
-        "commercial-invoice": { title: "Commercial Invoice",
-          sys: `Generate a Malaysian export Commercial Invoice. Return JSON: {"invoice_number":"CI-MY-2026-001","invoice_date":"","payment_terms":"T/T","exporter":{"name":"","brn":"","address":"","tel":"","email":"","bank":""},"consignee":{"name":"","country":"","address":"","tax_id":"","tel":"","contact_person":""},"goods":[{"line_no":1,"hs_code":"","description":"","quantity":0,"unit":"","unit_price":0,"total":0,"currency":"MYR"}],"incoterm":"FOB","port_of_loading":"","port_of_discharge":"","currency":"MYR","subtotal":0,"freight":0,"insurance":0,"total_fob":0,"total_cif":0,"country_of_origin":"Malaysia","declaration":"We hereby certify that this invoice is true and correct.","signatory":{"name":"","title":"","signature_placeholder":"[SIGNATURE]","date":""}}` },
-        "packing-list": { title: "Packing List",
-          sys: `Generate a Malaysian export Packing List. Return JSON: {"packing_list_number":"PL-MY-2026-001","date":"","exporter":{"name":"","address":""},"consignee":{"name":"","country":"","address":""},"invoice_reference":"","vessel_or_flight":"","port_of_loading":"","port_of_discharge":"","packages":[{"package_no":"1","type":"CTN","description":"","gross_weight_kg":0,"net_weight_kg":0,"cbm":0,"quantity_inside":0}],"total_packages":0,"total_gross_weight_kg":0,"total_net_weight_kg":0,"total_cbm":0,"shipping_marks":"","container_number":"","declaration":"We hereby certify that the above particulars are true and correct.","signatory":{"name":"","title":"","signature_placeholder":"[SIGNATURE]","date":""}}` },
-        "bol": { title: "Bill of Lading",
-          sys: `Generate a Bill of Lading shell for Malaysian export. Return JSON: {"bl_number":"TBC - Assigned by carrier","bl_date":"","bl_type":"OBL","shipper":{"name":"","address":"","brn":""},"consignee":{"name":"","address":"","country":""},"notify_party":{"name":"","address":""},"vessel_or_flight":"","voyage_or_flight_number":"","port_of_loading":"","port_of_discharge":"","freight_terms":"Prepaid","container_details":[{"container_no":"","seal_no":"","type":"","packages":0,"description":"","gross_weight_kg":0,"cbm":0}],"total_packages":0,"total_gross_weight_kg":0,"total_cbm":0,"place_of_issue":"Port Klang","number_of_originals":3,"carrier_clause":"SHIPPED on board in apparent good order and condition","signatory":{"name":"","title":"","signature_placeholder":"[SIGNATURE]","date":""}}` },
-        "coo": { title: "Certificate of Origin",
-          sys: `Generate a Certificate of Origin for Malaysian export. Return JSON: {"co_number":"CO-MY-2026-001","co_date":"","form_type":"Form D (ATIGA)","issuing_body":"MATRADE","exporter":{"name":"","address":"","country":"Malaysia","brn":""},"consignee":{"name":"","address":"","country":""},"transport_details":{"vessel_or_flight":"","port_of_loading":"","port_of_discharge":"","departure_date":""},"goods":[{"item_no":1,"description":"","hs_code":"","origin_criterion":"WO","quantity":"","gross_weight_kg":0,"fob_value_myr":0}],"invoice_reference":"","declaration":"The undersigned hereby declares that the above details are correct.","signatory":{"name":"","title":"","signature_placeholder":"[SIGNATURE]","date":""}}` },
-        "k2": { title: "K2 Customs Export Declaration",
-          sys: `Generate a K2 export declaration for MyDagangNet/MyECIS. Return JSON: {"k2_reference":"K2-MY-2026-001","declaration_type":"EX","customs_station":"","export_date":"","k2_form_data":{"header":{"manifest_ref":"","declaration_type":"EX","customs_procedure_code":"10","regime_type":"Export","office_of_exit":""},"exporter":{"name":"","brn":"","address":"","customs_client_code":""},"consignee":{"name":"","country_code":"","address":""},"transport":{"mode_code":"","mode_description":"","vessel_flight_name":"","voyage_flight_number":"","port_of_loading_code":"","port_of_discharge_code":"","country_of_destination_code":"","container_indicator":"Y"},"goods":{"item_number":1,"commodity_description":"","hs_code":"","country_of_origin":"MY","quantity":0,"unit_of_quantity":"","gross_weight_kg":0,"net_weight_kg":0,"number_of_packages":0,"package_type_code":"","container_number":""},"valuation":{"statistical_value_myr":0,"fob_value_myr":0,"invoice_currency":"MYR","invoice_amount":0,"exchange_rate":1.0,"incoterm":"FOB","freight_myr":0,"insurance_myr":0,"cif_value_myr":0},"duty":{"export_duty_myr":0,"customs_duty_myr":0,"sst_myr":0,"total_duty_myr":0,"duty_exemption_code":"","exemption_reference":""},"fta":{"fta_claimed":false,"fta_name":"","form_type":"","form_number":"","preferential_rate":0.0},"signatory":{"name":"","nric_passport":"","designation":"","declaration_text":"I declare that the particulars given in this declaration are true and correct.","date":""}},"submission_checklist":[],"atiga_form_d_applicable":false,"duty_savings_myr":0,"estimated_processing_hours":4,"dagang_net_submission_steps":[{"step":1,"action":"Log in to dagangnet.com.my","portal":"dagangnet.com.my","notes":"Use digital certificate token"}],"compliance_notes":[],"warnings":[]}` },
-        "sirim": { title: "SIRIM Checklist",
-          sys: `Generate a SIRIM export compliance checklist. Return JSON: {"checklist_items":[{"item":"","status":"required|optional","reference":""}],"sirim_scheme":"","processing_weeks":0,"portal":"https://www.sirim-qas.com.my","notes":""}` },
-        "halal": { title: "Halal Checklist",
-          sys: `Generate a JAKIM Halal export checklist. Return JSON: {"checklist_items":[{"item":"","status":"required"}],"jakim_scheme":"","processing_weeks":0,"portal":"https://www.halal.gov.my","notes":""}` },
-      };
+      const fob     = Number(d.fob_value_myr)    || 0;
+      const freight = Number(d.freight_quote_myr) || fob * 0.07;
+      const ins     = fob * (Number(d.insurance_rate) || 0.005);
+      const cif     = fob + freight + ins;
+      const cls     = (sd.current.classification as Record<string,unknown>) ?? {};
+      const drate   = d.import_duty_rate ? Number(d.import_duty_rate) : (Number(cls.destination_import_duty) || 5) / 100;
+      const duty    = cif * drate;
+      const total   = cif + duty;
+      const dest    = String(d.destination_country ?? (sd.current.consignee as Record<string,string>)?.buyer_country ?? "Unknown");
+      const spinId  = pushSpin("Calculating FTA savings...");
+      let fta: Record<string,unknown> = {};
+      try {
+        fta = await glmJSON(
+          `Malaysian FTA specialist. Evaluate ATIGA, CPTPP, RCEP, MAFTA, MJEPA. FTA requires: ① product on FTA list ② Rules of Origin met ③ CO certificate. Return JSON: {"atiga_applicable":false,"atiga_rate":0.0,"atiga_savings_myr":0,"best_fta":"","best_fta_rate":0.0,"best_savings_myr":0,"form_required":"Form D|Form E|RCEP Form|None","roo_met":true,"roo_criteria":"","notes":""}`,
+          `HS: ${String(cls.hs_code ?? "N/A")}, Dest: ${dest}, CIF: RM${cif.toFixed(2)}, MFN duty: ${(drate*100).toFixed(1)}%`
+        );
+      } catch { /* ok */ }
+      removeSpin(spinId);
+      const savings = Number(fta.best_savings_myr) || 0;
+      const netTotal = cif + cif * (Number(fta.best_fta_rate) || drate);
+      const result = { fob_myr: fob, freight_myr: freight, insurance_myr: ins, cif_myr: cif, import_duty_rate: drate, estimated_duty_myr: duty, total_landed_cost_myr: total, net_landed_with_fta: netTotal, fta_analysis: fta, atiga_savings_myr: Number(fta.atiga_savings_myr)||0, best_fta: String(fta.best_fta ?? ""), best_savings_myr: savings, form_required: String(fta.form_required ?? "None"), invoice_currency: String(d.invoice_currency ?? "MYR"), exchange_rate_to_myr: Number(d.exchange_rate_to_myr)||1 };
+      sd.current.valuation = result;
+      setLc({ fob, freight, ins, duty, total, savings, fta: String(fta.best_fta ?? ""), finalised: true });
+      setModal(null);
+      pushAI(`✅ **CIF Valuation:**\nFOB: RM ${fob.toLocaleString()} · Freight: RM ${freight.toLocaleString()} · Insurance: RM ${ins.toLocaleString()}\n**CIF: RM ${cif.toLocaleString()}** · Duty: RM ${duty.toLocaleString()} · **Total landed: RM ${total.toLocaleString()}**${savings > 0 ? `\n🎯 FTA saving: **RM ${savings.toLocaleString()}** via **${fta.best_fta}** (${fta.form_required})` : "\n⚠️ No FTA applicable — MFN rate applies."}`);
+      advance(5);
+      showStepIntro(6);
+    } catch (err) {
+      pushAI(`⚠️ Valuation error: ${err instanceof Error ? err.message : String(err)}`);
+    } finally { setMLoading(false); }
+  }, [advance, showStepIntro]);
+
+  // Step 7 – Logistics
+  const handleShipment = useCallback(async (data: object) => {
+    setMLoading(true);
+    const d = data as Record<string, string>;
+    sd.current.logistics = { mode: d.mode, pol: d.port_of_loading, pod: d.port_of_discharge, vessel: d.vessel_name, flight: d.flight_number, voyage_number: d.voyage_number, container_number: d.container_number, weight_kg: d.gross_weight_kg, net_weight_kg: d.net_weight_kg, cbm: d.cbm, number_of_packages: d.number_of_packages, package_type: d.package_type, export_date: d.export_date, signatory_name: d.signatory_name, signatory_designation: d.signatory_designation, signatory_ic_passport: d.signatory_ic_or_passport };
+    setModal(null);
+    const modeEmoji: Record<string,string> = { SEA: "🚢", AIR: "✈️", ROAD: "🚛", RAIL: "🚂" };
+    pushAI(`✅ **Shipment:** ${modeEmoji[d.mode] ?? ""} ${d.mode} · ${d.vessel_name || d.flight_number || "TBC"} · ETD ${d.export_date} · ${d.port_of_loading} → ${d.port_of_discharge}\n${d.gross_weight_kg} kg / ${d.cbm} m³ · ${d.number_of_packages} ${d.package_type}(s) · Container ${d.container_number || "TBC"}`);
+    advance(6);
+    showStepIntro(7);
+    setMLoading(false);
+  }, [advance, showStepIntro]);
+
+  // Step 8 – Generate single doc
+  const generateDoc = useCallback(async (id: string) => {
+    if (generatedDocs.has(id) || generatingDoc) return;
+    setGeneratingDoc(id);
+    const sysMap: Record<string, { title: string; sys: string }> = {
+      "commercial-invoice": { title: "Commercial Invoice", sys: `Generate a Malaysian export Commercial Invoice per Customs Act 1967 and MATRADE. Return JSON: {"invoice_number":"CI-MY-2026-001","invoice_date":"","payment_terms":"T/T","exporter":{"name":"","brn":"","address":"","tel":"","email":"","bank":""},"consignee":{"name":"","country":"","address":"","tax_id":"","tel":"","contact_person":""},"goods":[{"line_no":1,"hs_code":"","description":"","quantity":0,"unit":"","unit_price":0,"total":0,"currency":"MYR"}],"incoterm":"FOB","port_of_loading":"","port_of_discharge":"","currency":"MYR","subtotal":0,"freight":0,"insurance":0,"total_fob":0,"total_cif":0,"country_of_origin":"Malaysia","marks_and_numbers":"","vessel_or_flight":"","declaration":"We hereby certify that this invoice is true and correct.","signatory":{"name":"","title":"","ic_or_passport":"","signature_placeholder":"[SIGNATURE]","date":""}}` },
+      "packing-list": { title: "Packing List", sys: `Generate a Malaysian export Packing List per MATRADE standards. Return JSON: {"packing_list_number":"PL-MY-2026-001","date":"","exporter":{"name":"","address":""},"consignee":{"name":"","country":"","address":""},"invoice_reference":"","vessel_or_flight":"","port_of_loading":"","port_of_discharge":"","packages":[{"package_no":"1","type":"CTN","description":"","gross_weight_kg":0,"net_weight_kg":0,"cbm":0,"quantity_inside":0}],"total_packages":0,"total_gross_weight_kg":0,"total_net_weight_kg":0,"total_cbm":0,"shipping_marks":"","container_number":"","declaration":"We hereby certify that the above particulars are true and correct.","signatory":{"name":"","title":"","signature_placeholder":"[SIGNATURE]","date":""}}` },
+      "bol": { title: "Bill of Lading", sys: `Generate a Bill of Lading shell for Malaysian export. Return JSON: {"bl_number":"TBC - Assigned by carrier","bl_date":"","bl_type":"OBL","shipper":{"name":"","address":"","brn":""},"consignee":{"name":"","address":"","country":""},"notify_party":{"name":"","address":""},"vessel_or_flight":"","voyage_or_flight_number":"","port_of_loading":"","port_of_discharge":"","freight_terms":"Prepaid","container_details":[{"container_no":"","seal_no":"","type":"","packages":0,"description":"","gross_weight_kg":0,"cbm":0}],"total_packages":0,"total_gross_weight_kg":0,"total_cbm":0,"place_of_issue":"Port Klang","number_of_originals":3,"carrier_clause":"SHIPPED on board in apparent good order and condition","signatory":{"name":"","title":"","signature_placeholder":"[SIGNATURE]","date":""}}` },
+      "coo": { title: "Certificate of Origin", sys: `Generate a Certificate of Origin for Malaysian export. Return JSON: {"co_number":"CO-MY-2026-001","co_date":"","form_type":"Form D (ATIGA)","issuing_body":"MATRADE","exporter":{"name":"","address":"","country":"Malaysia","brn":""},"consignee":{"name":"","address":"","country":""},"transport_details":{"vessel_or_flight":"","port_of_loading":"","port_of_discharge":"","departure_date":""},"goods":[{"item_no":1,"description":"","hs_code":"","origin_criterion":"WO","quantity":"","gross_weight_kg":0,"fob_value_myr":0}],"invoice_reference":"","declaration":"The undersigned hereby declares that the above details are correct.","signatory":{"name":"","title":"","signature_placeholder":"[SIGNATURE]","date":""}}` },
+      "k2": { title: "K2 Declaration", sys: `Generate a K2 Customs Export Declaration for Dagang Net/MyECIS per Customs Act 1967. Return JSON: {"k2_reference":"K2-MY-2026-001","declaration_type":"EX","customs_station":"","export_date":"","k2_form_data":{"header":{"manifest_ref":"","declaration_type":"EX","customs_procedure_code":"10","regime_type":"Export","office_of_exit":""},"exporter":{"name":"","brn":"","address":"","customs_client_code":""},"consignee":{"name":"","country_code":"","address":""},"transport":{"mode_code":"","mode_description":"","vessel_flight_name":"","voyage_flight_number":"","port_of_loading_code":"","port_of_discharge_code":"","country_of_destination_code":"","container_indicator":"Y"},"goods":{"item_number":1,"commodity_description":"","hs_code":"","country_of_origin":"MY","quantity":0,"unit_of_quantity":"","gross_weight_kg":0,"net_weight_kg":0,"number_of_packages":0,"package_type_code":"","container_number":""},"valuation":{"statistical_value_myr":0,"fob_value_myr":0,"invoice_currency":"MYR","invoice_amount":0,"exchange_rate":1.0,"incoterm":"FOB","freight_myr":0,"insurance_myr":0,"cif_value_myr":0},"duty":{"export_duty_myr":0,"customs_duty_myr":0,"sst_myr":0,"total_duty_myr":0,"duty_exemption_code":"","exemption_reference":""},"fta":{"fta_claimed":false,"fta_name":"","form_type":"","form_number":"","preferential_rate":0.0},"signatory":{"name":"","nric_passport":"","designation":"","declaration_text":"I declare that the particulars given in this declaration are true and correct.","date":""}},"submission_checklist":[],"atiga_form_d_applicable":false,"duty_savings_myr":0,"estimated_processing_hours":4,"dagang_net_submission_steps":[{"step":1,"action":"Log in to dagangnet.com.my","portal":"dagangnet.com.my","notes":"Use digital certificate token"}],"compliance_notes":[],"warnings":[]}` },
+    };
+    try {
       const cfg = sysMap[id];
       if (!cfg) return;
-      const result = await glmJSON(cfg.sys, ctx);
+      const result = await glmJSON(cfg.sys, ctx());
       if (id === "k2") setK2Data(result);
-      sessionData.current.documents = { ...(sessionData.current.documents as object ?? {}), [id.replace(/-/g,"_")]: result };
+      sd.current.documents = { ...((sd.current.documents as object) ?? {}), [id]: result };
       if      (id === "commercial-invoice") generateInvoicePDF(result);
       else if (id === "bol")                generateBOLPDF(result);
-      else if (id === "k2")                 generateK2PDF(result);
       else if (id === "packing-list")       generatePackingListPDF(result);
       else if (id === "coo")                generateCOOPDF(result);
-      else makePDF(cfg.title, [`## ${cfg.title}`, ...flatLines(result)]);
-      setGeneratedIds(prev => new Set([...prev, id]));
+      else if (id === "k2")                 generateK2PDF(result);
+      else makePDF(cfg.title, flatLines(result));
+      setGeneratedDocs(prev => new Set([...prev, id]));
+      pushAI(`✅ **${cfg.title}** generated and downloaded.`);
     } catch (err) {
-      addMsg({ id: genId(), role: "assistant", kind: "text",
-        content: `⚠️ Error generating ${id}: ${err instanceof Error ? err.message : String(err)}` });
-    } finally { setGeneratingId(null); }
-  }, [generatedIds, generatingId, buildCtx]);
+      pushAI(`⚠️ Error generating ${id}: ${err instanceof Error ? err.message : String(err)}`);
+    } finally { setGeneratingDoc(null); }
+  }, [ctx, generatedDocs, generatingDoc]);
 
-  // ── Chat ──────────────────────────────────────────────────────────────────
-  const handleSend = useCallback(async () => {
-    if (!input.trim() || sending) return;
+  const generateAllDocs = useCallback(async () => {
+    for (const id of ["commercial-invoice","packing-list","bol","coo"]) {
+      if (!generatedDocs.has(id)) await generateDoc(id);
+    }
+  }, [generateDoc, generatedDocs]);
+
+  // Step 8 – E-sign
+  const handleSign = useCallback(() => {
+    setSigned(true);
+    setModal(null);
+    pushAI("✅ Declaration signed. K2 form is now ready for final submission.");
+    advance(7);
+    showStepIntro(8);
+  }, [advance, showStepIntro]);
+
+  // Step 9 – K2 submit
+  const sysMap_k2 = `Generate a K2 Customs Export Declaration for Dagang Net/MyECIS per Customs Act 1967. Return JSON: {"k2_reference":"K2-MY-2026-001","declaration_type":"EX","customs_station":"","export_date":"","k2_form_data":{"header":{"manifest_ref":"","declaration_type":"EX","customs_procedure_code":"10","regime_type":"Export","office_of_exit":""},"exporter":{"name":"","brn":"","address":"","customs_client_code":""},"consignee":{"name":"","country_code":"","address":""},"transport":{"mode_code":"","mode_description":"","vessel_flight_name":"","voyage_flight_number":"","port_of_loading_code":"","port_of_discharge_code":"","country_of_destination_code":"","container_indicator":"Y"},"goods":{"item_number":1,"commodity_description":"","hs_code":"","country_of_origin":"MY","quantity":0,"unit_of_quantity":"","gross_weight_kg":0,"net_weight_kg":0,"number_of_packages":0,"package_type_code":"","container_number":""},"valuation":{"statistical_value_myr":0,"fob_value_myr":0,"invoice_currency":"MYR","invoice_amount":0,"exchange_rate":1.0,"incoterm":"FOB","freight_myr":0,"insurance_myr":0,"cif_value_myr":0},"duty":{"export_duty_myr":0,"customs_duty_myr":0,"sst_myr":0,"total_duty_myr":0,"duty_exemption_code":"","exemption_reference":""},"fta":{"fta_claimed":false,"fta_name":"","form_type":"","form_number":"","preferential_rate":0.0},"signatory":{"name":"","nric_passport":"","designation":"","declaration_text":"I declare that the particulars given in this declaration are true and correct.","date":""}},"submission_checklist":[],"atiga_form_d_applicable":false,"duty_savings_myr":0,"estimated_processing_hours":4,"dagang_net_submission_steps":[{"step":1,"action":"Log in to dagangnet.com.my","portal":"dagangnet.com.my","notes":"Use digital certificate token"}],"compliance_notes":[],"warnings":[]}`;
+
+  const handleK2Submit = useCallback(async () => {
+    setMLoading(true);
+    const spinId = pushSpin("Generating K2 declaration...");
+    try {
+      const result = await glmJSON(sysMap_k2, ctx());
+      setK2Data(result);
+      generateK2PDF(result);
+      removeSpin(spinId);
+      setModal(null);
+      pushAI("🎉 **K2 submitted!** The official Kastam No.2 PDF has been downloaded. RMCD acknowledgement expected within 4 business hours.");
+      advance(8);
+    } catch (err) {
+      removeSpin(spinId);
+      pushAI(`⚠️ K2 error: ${err instanceof Error ? err.message : String(err)}`);
+    } finally { setMLoading(false); }
+  }, [ctx, advance]);
+
+  // ── File upload handler ────────────────────────────────────────────────────
+  const handleFile = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    const ep = pendingEndpoint.current;
+    const pk = pendingPermitKey.current;
+    pendingEndpoint.current = null;
+    pendingPermitKey.current = null;
+    push({ id: gid(), from: "user", kind: "upload", fileName: file.name });
+
+    // Permit upload
+    if (pk) { await handlePermitUpload(pk, file); return; }
+
+    // SSM upload – open entity modal (extraction happens inside the modal)
+    if (ep === "/entity/upload-ssm") {
+      setEntityPrefill({ fileName: file.name });
+      setModal("entity");
+      return;
+    }
+
+    // Product photo
+    if (ep === "/classification/upload-product") {
+      if (!completedRef.current.has(1)) { pushAI("⚠️ Please complete Step 2 (Consignee Details) first."); return; }
+      const spinId = pushSpin("Identifying product...");
+      const dest = String((sd.current.consignee as Record<string,string> ?? {}).buyer_country ?? "Unknown");
+      try {
+        const b64 = await fileToB64(file);
+        const r = await geminiVision(b64, fileMime(file),
+          `WCO HS 2022 / AHTN classification engine for Malaysian exports to ${dest}. Identify product from image/label and classify. Return JSON: {"identified":true,"hs_code":"","hs_description":"","malaysia_export_duty":0.0,"destination_import_duty":0.0,"fta_available":[],"permit_required":[],"sirim_required":false,"halal_required":false,"miti_required":false,"confidence":0.0,"identification_notes":""}`
+        );
+        removeSpin(spinId);
+        if (r._vision_failed) {
+          pushAI("📷 Photo received. I couldn't read the image — please type your product description in the chat (e.g. \"crude palm oil\", \"nitrile gloves\", \"USB-C cable\").");
+          return;
+        }
+        const hs = String(r.hs_code ?? "").trim();
+        if (Boolean(r.identified) && hs && !hs.startsWith("XXXX") && Number(r.confidence ?? 0) > 0.3) {
+          sd.current.classification = r;
+          pushAI(`✅ **HS Code: ${hs}** — ${String(r.hs_description ?? "")}\nImport duty: ${r.destination_import_duty}% · FTA: ${(r.fta_available as string[] ?? []).join(", ") || "None"}`);
+          advance(2);
+          await runPermitCheck(r as Record<string, unknown>);
+        } else {
+          pushAI(`⚠️ Could not identify product clearly (${String(r.identification_notes || "low confidence")}).\nPlease describe your product in the chat instead.`);
+        }
+      } catch { removeSpin(spinId); pushAI("📷 Photo received. Please type your product description in the chat."); }
+    }
+  }, [handlePermitUpload, advance, runPermitCheck]);
+
+  // ── Chat send ──────────────────────────────────────────────────────────────
+  const send = useCallback(async () => {
+    if (!input.trim() || busy) return;
     const raw = input.trim();
     setInput("");
-    addMsg({ id: genId(), role: "user", kind: "text", content: raw });
-    setSending(true);
-
-    // ── Step 0: handle SSM partial extraction — user types "confirm" or manual details ──
-    if (activeStep === 0 && !completed.has(0) && sessionData.current.entity) {
-      const entity = sessionData.current.entity as Record<string, unknown>;
-      if (entity.partial_extraction) {
-        const lower = raw.toLowerCase().trim();
-        const isConfirm = ["confirm", "ok", "proceed", "yes", "correct", "looks good", "that's correct"].some(k => lower === k || lower.startsWith(k));
-
-        if (isConfirm) {
-          // User confirms partial data — advance
-          addMsg({ id: genId(), role: "assistant", kind: "text",
-            content: `✅ Confirmed — proceeding with the extracted details. You can correct any fields later if needed.` });
-          sessionData.current.entity = { ...entity, partial_extraction: false, is_valid: true };
-          setSending(false);
-          advanceUI();
-          return;
-        } else {
-          // Try to parse manual corrections from free text
-          try {
-            const corrected = await glmJSON(
-              `Extract company registration details from this user message. Merge with existing data where fields are still missing.
-Existing data: ${JSON.stringify({
-  company_name: entity.company_name,
-  registration_number: entity.registration_number,
-  company_type: entity.company_type,
-  company_status: entity.company_status,
-  directors: entity.directors,
-})}
-Instructions: If user provides a value for a field, use their value. If not mentioned, keep the existing value if it has meaning, otherwise leave empty.
-Return ONLY valid JSON:
-{"company_name":"","registration_number":"","company_type":"Sdn Bhd","company_status":"active","directors":[{"name":"","nric":"","designation":"Director"}],"paid_up_capital":"","sst_registered":false,"is_valid":true,"confidence":0.9}`,
-              `User message: ${raw}`
-            );
-
-            const merged: Record<string, unknown> = {
-              ...entity,
-              ...corrected,
-              // Prefer user-provided values, fall back to existing
-              company_name:        hasMeaning(corrected.company_name)        ? corrected.company_name        : entity.company_name,
-              registration_number: hasMeaning(corrected.registration_number) ? corrected.registration_number : entity.registration_number,
-              partial_extraction: false,
-              is_valid: true,
-            };
-            sessionData.current.entity = merged;
-
-            const dirs = (merged.directors as Array<{name:string}> | undefined ?? [])
-              .map((d: {name:string}) => d.name)
-              .filter(Boolean)
-              .join(", ");
-
-            addMsg({
-              id: genId(), role: "assistant", kind: "extracted",
-              content: "Got it — here are the updated details:",
-              valid: true,
-              fields: {
-                "Company Name":    hasMeaning(merged.company_name)        ? String(merged.company_name)        : "—",
-                "BRN":             hasMeaning(merged.registration_number)  ? String(merged.registration_number) : "—",
-                "Company Type":    hasMeaning(merged.company_type)         ? String(merged.company_type)        : "—",
-                "Status":          hasMeaning(merged.company_status)       ? String(merged.company_status)      : "Active",
-                "Directors":       dirs || "—",
-                "SST Registered":  merged.sst_registered ? "Yes" : "No",
-                "Paid-up Capital": hasMeaning(merged.paid_up_capital)      ? String(merged.paid_up_capital)     : "—",
-              },
-            });
-
-            const nameOk = hasMeaning(merged.company_name);
-            const brnOk  = hasMeaning(merged.registration_number);
-
-            if (nameOk && brnOk) {
-              // Both required fields now present — auto-advance
-              addMsg({ id: genId(), role: "assistant", kind: "text",
-                content: `✅ Company Name and BRN confirmed. Proceeding to Step 2 — Consignee Details.` });
-              setSending(false);
-              advanceUI();
-              return;
-            } else {
-              // Still missing something
-              const stillMissing: string[] = [];
-              if (!nameOk) stillMissing.push("Company Name");
-              if (!brnOk)  stillMissing.push("BRN");
-              addMsg({ id: genId(), role: "assistant", kind: "text",
-                content: `Still missing: **${stillMissing.join(", ")}**. Please provide these, or type **"confirm"** to proceed with what we have.` });
-            }
-          } catch {
-            addMsg({ id: genId(), role: "assistant", kind: "text",
-              content: `I didn't quite catch that. Please use this format:\n\n> Company Name: ABC SDN BHD\n> BRN: 202301012345\n\nOr type **"confirm"** to proceed with the current extracted data.` });
-          }
-          setSending(false);
-          return;
-        }
-      }
-    }
-
-    // ── Step 2: treat chat input as product description for HS classification ──
-    if (activeStep === 2 && !completed.has(2)) {
-      try {
-        const destCountry = String((sessionData.current.consignee as Record<string,string>)?.buyer_country ?? "Unknown");
-        const result = await glmJSON(
-          `You are an HS tariff classification expert for Malaysian exports (WCO HS 2022 / AHTN 2022).
-Classify this product. Destination: ${destCountry}.
-Return JSON: {"identified":true,"hs_code":"","hs_description":"","product_name":"","malaysia_export_duty":0.0,"destination_import_duty":0.0,"preferential_duty_rates":{"ATIGA":0.0,"CPTPP":0.0,"RCEP":0.0},"fta_available":[],"permit_required":[],"export_prohibited":false,"strategic_goods":false,"sirim_required":false,"halal_required":false,"miti_required":false,"confidence":0.9,"classification_notes":[]}`,
-          `Product description: ${raw}`
-        );
-        const hsCode = String(result.hs_code ?? "").trim();
-        const identified = Boolean(result.identified) && hsCode.length > 0 && !hsCode.startsWith("XXXX") && Number(result.confidence ?? 0) > 0.3;
-        if (identified) {
-          sessionData.current.classification = result;
-          addMsg({
-            id: genId(), role: "assistant", kind: "hs-result",
-            content: "Product classified from your description:",
-            hsCode, description: String(result.hs_description ?? "—"),
-            duty: Number(result.destination_import_duty ?? 0),
-            fta:  (result.fta_available as string[] ?? []),
-            permitRequired: Boolean((result.permit_required as unknown[])?.length || result.sirim_required || result.halal_required || result.miti_required),
-            permits: (result.permit_required as string[] ?? []),
-          });
-          const sid = await waitForSession();
-          await runPermitCheckFromResult(sid, result);
-        } else {
-          addMsg({ id: genId(), role: "assistant", kind: "text",
-            content: `⚠️ Could not classify "${raw}" with confidence. Please be more specific (e.g. include material, use, HS chapter) or upload a product photo.`,
-          });
-        }
-      } catch (err) {
-        addMsg({ id: genId(), role: "assistant", kind: "text",
-          content: `⚠️ Classification error: ${err instanceof Error ? err.message : String(err)}` });
-      } finally { setSending(false); }
-      return;
-    }
-
+    push({ id: gid(), from: "user", kind: "text", text: raw });
+    setBusy(true);
     try {
-      const e  = (sessionData.current.entity          as Record<string,string>) ?? {};
-      const c  = (sessionData.current.consignee        as Record<string,string>) ?? {};
-      const cl = (sessionData.current.classification   as Record<string,string>) ?? {};
-      const v  = (sessionData.current.valuation        as Record<string,unknown>) ?? {};
-      const l  = (sessionData.current.logistics        as Record<string,unknown>) ?? {};
-      const system = `You are Architect AI, a Malaysian export compliance expert for Borderless AI.
-You guide exporters through a 9-step workflow. The user has ALREADY COMPLETED the steps shown — do NOT ask them to redo any completed step.
-
-Current session state:
-- Active step: ${activeStep + 1}/9 — ${STEPS[activeStep]?.title ?? ""}
-- Entity: ${e.company_name ? `✅ ${e.company_name} (BRN: ${e.registration_number})` : "⏳ Not yet verified"}
-- Consignee: ${c.buyer_name ? `✅ ${c.buyer_name}, ${c.buyer_country}` : "⏳ Not yet added"}
-- HS Code: ${cl.hs_code ? `✅ ${cl.hs_code} — ${cl.hs_description}` : "⏳ Not yet classified"}
-- Valuation: ${v.fob_myr ? `✅ FOB RM${v.fob_myr}` : "⏳ Not yet entered"}
-- Logistics: ${l.mode ? `✅ ${l.mode} — ${l.pol} → ${l.pod}` : "⏳ Not yet set"}
-
-Be concise, practical. Reference Malaysian regulations when relevant (Customs Act 1967, ATIGA, Customs Prohibition of Exports Order 1988, etc.). Respond in the same language the user used.`;
-      const reply = await glmText(system, raw, chatHistoryRef.current.slice(-10));
-      chatHistoryRef.current = [...chatHistoryRef.current.slice(-14), { role: "user", content: raw }, { role: "assistant", content: reply }];
-      addMsg({ id: genId(), role: "assistant", kind: "text", content: reply });
-    } catch (err) {
-      try {
-        const sid = await waitForSession();
-        const res = await api.chat(sid, raw) as Record<string,string>;
-        addMsg({ id: genId(), role: "assistant", kind: "text", content: res.reply || res.response || "No response." });
-      } catch {
-        addMsg({ id: genId(), role: "assistant", kind: "text", content: `⚠️ ${err instanceof Error ? err.message : String(err)}` });
+      // Step 3: product description
+      if (activeStepRef.current === 2 && !completedRef.current.has(2)) {
+        await classifyProduct(raw);
+        return;
       }
-    } finally { setSending(false); }
-  }, [input, sending, waitForSession, activeStep, completed, runPermitCheckFromResult]);
+      // General AI chat
+      const e  = (sd.current.entity         as Record<string,string>) ?? {};
+      const c  = (sd.current.consignee      as Record<string,string>) ?? {};
+      const cl = (sd.current.classification as Record<string,string>) ?? {};
+      const system = `You are Architect AI — Malaysian export compliance expert for Borderless AI. Current session:\n- Active step: ${activeStepRef.current + 1}/9 — ${STEPS[activeStepRef.current]?.title ?? ""}\n- Entity: ${e.company_name ? `✅ ${e.company_name} (BRN: ${e.registration_number})` : "⏳ Not verified"}\n- Consignee: ${c.buyer_name ? `✅ ${c.buyer_name}, ${c.buyer_country}` : "⏳ Not added"}\n- HS Code: ${cl.hs_code ? `✅ ${cl.hs_code}` : "⏳ Not classified"}\nBe concise and practical. Reference Malaysian regulations when relevant. Respond in the same language the user uses.`;
+      const reply = await glmText(system, raw, chatHistory.current.slice(-10));
+      chatHistory.current = [...chatHistory.current.slice(-14), { role: "user", content: raw }, { role: "assistant", content: reply }];
+      pushAI(reply);
+    } catch (err) {
+      pushAI(`⚠️ ${err instanceof Error ? err.message : String(err)}`);
+    } finally { setBusy(false); }
+  }, [input, busy, classifyProduct]);
 
-  // ── Action button dispatcher ──────────────────────────────────────────────
-  const ACTION_STEP: Record<string, number> = {
-    "upload-ssm": 0, "verify-ssm": 0,
-    "add-consignee": 1,
-    "upload-product": 2, "lookup-hs": 2,
-    "connect-dagang": 4,
-    "enter-valuation": 5,
-    "add-shipment": 6,
-    "generate-docs": 7, "sign-declaration": 7,
+  // ── Action buttons ─────────────────────────────────────────────────────────
+  const action = useCallback((act: string) => {
+    if (act === "verify-entity")    { setEntityPrefill(undefined); setModal("entity"); return; }
+    if (act === "add-consignee")    { setModal("consignee");  return; }
+    if (act === "enter-valuation")  { setModal("valuation");  return; }
+    if (act === "add-shipment")     { setModal("shipment");   return; }
+    if (act === "connect-dagang")   { setModal("dagang");     return; }
+    if (act === "sign-declaration") { setModal("signature");  return; }
+    if (act === "generate-docs")    { generateAllDocs();      return; }
+    if (act === "preview-k2")       { if (k2Data) setModal("k2preview"); else handleK2Submit(); return; }
+    if (act === "upload-ssm")       { pendingEndpoint.current = "/entity/upload-ssm"; fileRef.current?.click(); return; }
+    if (act === "upload-product")   { pendingEndpoint.current = "/classification/upload-product"; fileRef.current?.click(); return; }
+  }, [generateAllDocs, handleK2Submit, k2Data]);
+
+  // ── Step action buttons config ─────────────────────────────────────────────
+  const stepActions: Record<number, Array<{ label: string; act: string; icon: React.ElementType; primary?: boolean }>> = {
+    0: [{ label: "Upload SSM Certificate", act: "upload-ssm", icon: Upload, primary: true }, { label: "Enter Manually", act: "verify-entity", icon: Building2 }],
+    1: [{ label: "Add Consignee", act: "add-consignee", icon: UserSquare2, primary: true }],
+    2: [{ label: "Upload Product Photo", act: "upload-product", icon: Upload, primary: true }],
+    4: [{ label: "Connect Dagang Net", act: "connect-dagang", icon: Link2, primary: true }],
+    5: [{ label: "Enter Valuation", act: "enter-valuation", icon: Coins, primary: true }],
+    6: [{ label: "Add Shipment Details", act: "add-shipment", icon: PackageSearch, primary: true }],
+    7: [{ label: "Generate Documents", act: "generate-docs", icon: FileText, primary: true }, { label: "Sign Declaration", act: "sign-declaration", icon: PenLine }],
+    8: [{ label: "Preview & Submit K2", act: "preview-k2", icon: Eye, primary: true }],
   };
 
-  const handleAction = useCallback(async (action: string, label: string) => {
-    const requiredStep = ACTION_STEP[action];
-    if (requiredStep !== undefined && activeStep !== requiredStep && !completed.has(requiredStep)) {
-      const blocking = STEPS[requiredStep];
-      addMsg({ id: genId(), role: "assistant", kind: "blocked",
-        content: `Step ${requiredStep + 1} — "${blocking.title}" — is not active yet. Complete the current step first.` });
-      return;
-    }
+  const curActions = stepActions[activeStep] ?? [];
 
-    const uploadConfig = UPLOAD_ACTION_MAP[action];
-    if (uploadConfig) {
-      pendingUploadRef.current = { action, ...uploadConfig };
-      if (fileInputRef.current) { fileInputRef.current.accept = uploadConfig.accept; fileInputRef.current.click(); }
-      return;
-    }
-    if (action === "add-consignee")    { setModal("consignee");       return; }
-    if (action === "enter-valuation")  { setModal("valuation");       return; }
-    if (action === "add-shipment")     { setModal("shipment");        return; }
-    if (action === "connect-dagang")   { setModal("digital-access");  return; }
-    if (action === "sign-declaration") { setModal("signature");       return; }
-    if (action === "generate-docs")    { handleGenerateDocs();        return; }
-    if (action === "lookup-hs")        { addMsg({ id: genId(), role: "user", kind: "text", content: label }); return; }
+  // ── Docs config ────────────────────────────────────────────────────────────
+  const DOCS = [
+    { id: "commercial-invoice", label: "Commercial Invoice",    icon: FileText,        req: [0,1,2,5] },
+    { id: "packing-list",       label: "Packing List",          icon: FileSpreadsheet, req: [0,1,2,6] },
+    { id: "bol",                label: "Bill of Lading / AWB",  icon: Ship,            req: [0,1,2,6] },
+    { id: "coo",                label: "Certificate of Origin", icon: Stamp,           req: [0,1,2] },
+    { id: "k2",                 label: "K2 Declaration Form",   icon: ClipboardList,   req: [0,1,2,3,4,5,6,7] },
+  ];
 
-    addMsg({ id: genId(), role: "user", kind: "text", content: label });
-    const sid = await waitForSession();
-    await runWithFeedback(async () => {
-      if (action === "verify-ssm") {
-        await api.verifyEntity(sid, { company_name: "Manual verify", registration_number: "202301045678" });
-        advanceUI();
-      } else {
-        advanceUI();
-      }
-    });
-  }, [waitForSession, runWithFeedback, advanceUI, handleGenerateDocs]);
+  const total    = STEPS.length;
+  const progress = Math.round((completed.size / total) * 100);
 
-  // ── Step jump ─────────────────────────────────────────────────────────────
-  const tryJumpTo = useCallback((stepId: number) => {
-    if (stepId === activeStep) return;
-    if (completed.has(stepId)) { setActiveStep(stepId); return; }
-    const blocking = STEPS.slice(0, stepId).find(s => !completed.has(s.id));
-    if (!blocking) { setActiveStep(stepId); return; }
-    addMsg({ id: genId(), role: "assistant", kind: "blocked",
-      content: `Step ${stepId + 1} is locked. Complete Step ${blocking.id + 1} — "${blocking.title}" — first.` });
-  }, [completed, activeStep]);
-
-  const signatoryName  = ((sessionData.current.logistics as Record<string, string>)?.signatory_name) || "";
-  const signatoryTitle = ((sessionData.current.logistics as Record<string, string>)?.signatory_designation) || "";
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // RENDER
-  // ─────────────────────────────────────────────────────────────────────────
+  // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-secondary/30">
       <TopNav />
+      <input ref={fileRef} type="file" className="hidden" accept=".pdf,.jpg,.jpeg,.png" onChange={handleFile} />
 
-      <input ref={fileInputRef} type="file" className="hidden" onChange={handleFileSelected} />
-
-      {/* MODALS */}
-      {modal === "consignee"     && <ConsigneeModal     onClose={() => setModal(null)} onSubmit={handleConsigneeSubmit} loading={modalLoading} />}
-      {modal === "valuation"     && <ValuationModal     onClose={() => setModal(null)} onSubmit={handleValuationSubmit} loading={modalLoading} hsCode={((sessionData.current.classification as Record<string, string>)?.hs_code) || ""} />}
-      {modal === "shipment"      && <ShipmentModal      onClose={() => setModal(null)} onSubmit={handleShipmentSubmit}  loading={modalLoading} />}
-      {modal === "digital-access"&& <DigitalAccessModal onClose={() => setModal(null)} onSubmit={handleDigitalAccessSubmit} loading={modalLoading} companyBrn={((sessionData.current.entity as Record<string, string>)?.registration_number) || "202301045678"} />}
-      {modal === "signature"     && <SignatureModal signatoryName={signatoryName} signatoryTitle={signatoryTitle} onClose={() => setModal(null)} onSign={handleSign} />}
-      {modal === "k2-preview" && k2Data && <K2PreviewModal k2Data={k2Data} onClose={() => setModal(null)} onSubmit={handleK2Submit} loading={modalLoading} />}
+      {/* Modals */}
+      {modal === "entity"     && <EntityModal     onClose={() => setModal(null)} onSubmit={handleEntity}    loading={mLoading} prefill={entityPrefill} />}
+      {modal === "consignee"  && <ConsigneeModal  onClose={() => setModal(null)} onSubmit={handleConsignee} loading={mLoading} />}
+      {modal === "valuation"  && <ValuationModal  onClose={() => setModal(null)} onSubmit={handleValuation} loading={mLoading} hsCode={String((sd.current.classification as Record<string,string> ?? {}).hs_code ?? "")} />}
+      {modal === "shipment"   && <ShipmentModal   onClose={() => setModal(null)} onSubmit={handleShipment}  loading={mLoading} />}
+      {modal === "dagang"     && <DagangNetModal  onClose={() => setModal(null)} onSubmit={handleDagang}    loading={mLoading} />}
+      {modal === "signature"  && <SignatureModal  name={String((sd.current.logistics as Record<string,string> ?? {}).signatory_name ?? "")} title={String((sd.current.logistics as Record<string,string> ?? {}).signatory_designation ?? "")} onClose={() => setModal(null)} onSign={handleSign} />}
+      {modal === "k2preview"  && k2Data && <K2PreviewModal k2Data={k2Data} onClose={() => setModal(null)} onSubmit={handleK2Submit} loading={mLoading} />}
 
       <main className="mx-auto max-w-7xl px-4 py-6">
-        <div className="grid gap-6 md:grid-cols-[240px_1fr] lg:grid-cols-[240px_1fr_300px] xl:grid-cols-[260px_1fr_320px]">
+        <div className="grid gap-6 md:grid-cols-[240px_1fr] lg:grid-cols-[240px_1fr_300px]">
 
-          {/* ── LEFT: Step Checklist ─────────────────────────────────────── */}
+          {/* ── LEFT: Steps ─────────────────────────────────────────────── */}
           <aside className="lg:sticky lg:top-20 lg:self-start">
-            <div className="rounded-2xl border border-border bg-gradient-card p-4 shadow-soft-md">
+            <div className="rounded-2xl border border-border bg-card p-4 shadow-soft-md">
               <div className="mb-3 flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-foreground">Export Checklist</h2>
-                <span className="rounded-full bg-primary-soft px-2 py-0.5 text-[10px] font-semibold text-primary">{completed.size}/{total}</span>
+                <h2 className="text-sm font-semibold">Export Checklist</h2>
+                <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary">{completed.size}/{total}</span>
               </div>
               <div className="mb-4">
-                <div className="mb-1 flex justify-between text-[10px] font-medium text-muted-foreground"><span>Progress</span><span>{progress}%</span></div>
-                <div className="h-1.5 w-full overflow-hidden rounded-full bg-secondary">
-                  <div className="h-full rounded-full bg-gradient-primary transition-all duration-500" style={{ width: `${progress}%` }} />
+                <div className="mb-1 flex justify-between text-[10px] text-muted-foreground"><span>Progress</span><span>{progress}%</span></div>
+                <div className="h-1.5 w-full rounded-full bg-secondary">
+                  <div className="h-full rounded-full bg-primary transition-all duration-500" style={{ width: `${progress}%` }} />
                 </div>
               </div>
               <div className="mb-3 flex items-center gap-1.5 text-[10px]">
-                {sessionId ? (<><span className="h-1.5 w-1.5 rounded-full bg-success" /><span className="text-success font-medium">Backend connected</span></>) :
-                 sessionError ? (<><span className="h-1.5 w-1.5 rounded-full bg-danger" /><span className="text-danger font-medium">Demo mode</span></>) :
-                 (<><Loader2 className="h-3 w-3 animate-spin text-muted-foreground" /><span className="text-muted-foreground">Connecting…</span></>)}
+                {sessionId ? <><span className="h-1.5 w-1.5 rounded-full bg-green-500" /><span className="text-green-600 font-medium">Connected</span></> : sessionError ? <><span className="h-1.5 w-1.5 rounded-full bg-red-500" /><span className="text-red-600 font-medium">Demo mode</span></> : <><Loader2 className="h-3 w-3 animate-spin text-muted-foreground" /><span className="text-muted-foreground">Connecting…</span></>}
               </div>
-              <ol className="relative space-y-1">
+              <ol className="space-y-1">
                 {STEPS.map((step, idx) => {
-                  const isCompleted = completed.has(step.id);
-                  const isActive    = step.id === activeStep;
-                  const isLocked    = !isCompleted && !isActive;
-                  const Icon        = step.icon;
-                  const isLast      = idx === STEPS.length - 1;
+                  const done   = completed.has(step.id);
+                  const active = step.id === activeStep;
+                  const locked = !done && !active;
+                  const Icon   = step.icon;
                   return (
                     <li key={step.id} className="relative">
-                      {!isLast && <span className={`absolute left-[19px] top-9 h-[calc(100%-12px)] w-px ${isCompleted ? "bg-success/40" : "bg-border"}`} />}
-                      <button onClick={() => tryJumpTo(step.id)} className={`relative flex w-full items-start gap-3 rounded-xl p-2 text-left transition-base ${isActive ? "bg-primary-soft ring-1 ring-primary/30" : isCompleted ? "hover:bg-secondary/60" : "opacity-60 hover:opacity-80"}`}>
-                        <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${isCompleted ? "bg-success text-primary-foreground" : isActive ? "bg-primary text-primary-foreground shadow-glow" : "bg-secondary text-muted-foreground"}`}>
-                          {isCompleted ? <CheckCircle2 className="h-4 w-4" /> : isLocked ? <Lock className="h-3.5 w-3.5" /> : <Icon className="h-4 w-4" />}
+                      {idx < STEPS.length - 1 && <span className={`absolute left-[19px] top-9 h-[calc(100%-12px)] w-px ${done ? "bg-green-300" : "bg-border"}`} />}
+                      <div className={`flex items-start gap-3 rounded-xl p-2 ${active ? "bg-primary/10 ring-1 ring-primary/30" : done ? "" : "opacity-50"}`}>
+                        <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${done ? "bg-green-500 text-white" : active ? "bg-primary text-white" : "bg-secondary text-muted-foreground"}`}>
+                          {done ? <CheckCircle2 className="h-4 w-4" /> : locked ? <Lock className="h-3.5 w-3.5" /> : <Icon className="h-4 w-4" />}
                         </div>
                         <div className="min-w-0 flex-1 pt-0.5">
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-1">
                             <span className="text-[10px] font-semibold text-muted-foreground">STEP {step.id + 1}</span>
-                            {isActive && <span className="rounded-full bg-primary px-1.5 py-px text-[9px] font-bold text-primary-foreground">NOW</span>}
+                            {active && <span className="rounded-full bg-primary px-1.5 py-px text-[9px] font-bold text-white">NOW</span>}
                           </div>
                           <div className="text-[13px] font-semibold text-foreground">{step.title}</div>
                           <div className="text-[11px] text-muted-foreground">{step.subtitle}</div>
                         </div>
-                      </button>
+                      </div>
                     </li>
                   );
                 })}
               </ol>
-
-              {/* Doc status summary */}
-              <div className="mt-4 border-t border-border pt-3">
-                <div className="mb-2 flex items-center justify-between">
-                  <h3 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Doc Status</h3>
-                  <span className="rounded-full bg-secondary px-2 py-0.5 text-[10px] font-semibold text-muted-foreground">{generatedIds.size}/{EXPORT_DOCS.length}</span>
-                </div>
-                <ul className="space-y-1.5">
-                  {EXPORT_DOCS.map(doc => {
-                    const isDone = generatedIds.has(doc.id);
-                    const missing = doc.requiredSteps.filter(s => !completed.has(s));
-                    const blockingStep = missing.length > 0 ? STEPS[missing[0]] : null;
-                    const gating = isGating(doc, permitFlags);
-                    return (
-                      <li key={doc.id} className="flex items-center gap-2 text-[11px]">
-                        {isDone ? <CheckCircle2 className="h-3 w-3 shrink-0 text-success" /> : blockingStep ? <Lock className="h-3 w-3 shrink-0 text-muted-foreground" /> : <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-success" />}
-                        <span className={`flex-1 truncate ${isDone ? "text-muted-foreground line-through" : "text-foreground"}`}>{doc.label}</span>
-                        {gating && <span className="shrink-0 rounded-sm bg-primary/10 px-1 py-px text-[8px] font-bold uppercase text-primary">Req</span>}
-                      </li>
-                    );
-                  })}
-                </ul>
-              </div>
             </div>
           </aside>
 
-          {/* ── MIDDLE: Chat ──────────────────────────────────────────────── */}
+          {/* ── MIDDLE: Chat ─────────────────────────────────────────────── */}
           <div className="flex flex-col gap-4 min-w-0">
-            <section className="flex min-h-[70vh] flex-col rounded-2xl border border-border bg-gradient-card shadow-soft-md">
+            <section className="flex min-h-[70vh] flex-col rounded-2xl border border-border bg-card shadow-soft-md">
               {/* Header */}
               <div className="flex items-center justify-between border-b border-border bg-card/60 px-5 py-3">
                 <div className="flex items-center gap-3">
-                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-primary shadow-glow"><Sparkles className="h-4 w-4 text-primary-foreground" /></div>
+                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary shadow-glow"><Sparkles className="h-4 w-4 text-white" /></div>
                   <div>
-                    <div className="text-sm font-semibold text-foreground">Architect AI</div>
+                    <div className="text-sm font-semibold">Architect AI</div>
                     <div className="text-[11px] text-muted-foreground">Step {activeStep + 1} · {STEPS[activeStep]?.title}</div>
                   </div>
                 </div>
-                <div className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold ${sessionId ? "bg-success-soft text-success" : sessionError ? "bg-danger-soft text-danger" : "bg-secondary text-muted-foreground"}`}>
-                  {sessionId ? <><span className="h-1.5 w-1.5 rounded-full bg-success" />Live</> : sessionError ? <><AlertTriangle className="h-3 w-3" />Demo</> : <><Loader2 className="h-3 w-3 animate-spin" />Connecting</>}
+                <div className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold ${sessionId ? "bg-green-50 text-green-700" : sessionError ? "bg-red-50 text-red-700" : "bg-secondary text-muted-foreground"}`}>
+                  {sessionId ? <><span className="h-1.5 w-1.5 rounded-full bg-green-500" />Live</> : sessionError ? <>Demo</> : <><Loader2 className="h-3 w-3 animate-spin" />Connecting</>}
                 </div>
               </div>
 
               {/* Messages */}
-              <div className="flex-1 space-y-4 overflow-y-auto px-5 py-5">
-                {messages.map(msg => (
-                  <MessageBubble
-                    key={msg.id}
-                    msg={msg}
-                    onAction={handleAction}
-                    isSessionReady={!!sessionId}
-                    onPermitUpload={handlePermitUpload}
-                    onPreviewK2={handlePreviewK2}
-                    signed={signed}
-                    activeStep={activeStep}
-                  />
+              <div ref={chatRef} className="flex-1 space-y-4 overflow-y-auto px-5 py-5">
+                {msgs.map(m => (
+                  <div key={m.id} className={`flex ${m.from === "user" ? "justify-end" : "items-start gap-3"}`}>
+                    {m.from === "ai" && (
+                      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary shadow-glow">
+                        {m.kind === "spin" ? <Loader2 className="h-4 w-4 text-white animate-spin" /> : <Sparkles className="h-4 w-4 text-white" />}
+                      </div>
+                    )}
+                    <div className={`max-w-[85%] ${m.from === "user" ? "rounded-2xl rounded-tr-sm bg-primary px-4 py-2.5 text-sm text-white" : "rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-3 text-sm text-foreground"}`}>
+                      {m.kind === "upload"
+                        ? <div className="flex items-center gap-2 text-sm"><Upload className="h-3.5 w-3.5" />{m.fileName}</div>
+                        : m.kind === "spin"
+                        ? <span className="text-muted-foreground">{m.text}</span>
+                        : <div className="space-y-1">{renderMarkdown(m.text ?? "")}</div>
+                      }
+                    </div>
+                  </div>
                 ))}
-                {sending && (
+                {/* Permit upload cards */}
+                {activeStep === 3 && permits.length > 0 && !permits.every(p => p.uploaded) && (
                   <div className="flex items-start gap-3">
-                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary-soft"><Cog className="h-4 w-4 animate-spin text-primary" /></div>
-                    <div className="rounded-2xl border border-border bg-card px-4 py-2.5 text-sm text-muted-foreground">Calling backend API…</div>
+                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary"><Sparkles className="h-4 w-4 text-white" /></div>
+                    <div className="rounded-2xl border border-border bg-card p-3 space-y-2 flex-1">
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Upload Permit Certificates</p>
+                      {permits.map(p => (
+                        <div key={p.key} className="flex items-center gap-3 rounded-xl border border-border bg-background px-3 py-2.5">
+                          <input type="file" className="hidden" id={`permit-${p.key}`} accept=".pdf,.jpg,.jpeg,.png" onChange={e => { const f = e.target.files?.[0]; e.target.value=""; if(f){ pendingPermitKey.current = p.key; handlePermitUpload(p.key, f); }}} />
+                          <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${p.uploaded ? "bg-green-100" : "bg-yellow-100"}`}>
+                            {p.uploaded ? <CheckCircle2 className="h-4 w-4 text-green-600" /> : <Award className="h-4 w-4 text-yellow-600" />}
+                          </div>
+                          <div className="flex-1"><p className="text-[12px] font-semibold">{p.name}</p><p className="text-[10px] text-muted-foreground">{p.uploaded ? "Uploaded ✓" : "Required"}</p></div>
+                          {!p.uploaded && <label htmlFor={`permit-${p.key}`} className="flex items-center gap-1.5 rounded-lg bg-primary px-2.5 py-1.5 text-[11px] font-semibold text-white cursor-pointer hover:opacity-90"><Upload className="h-3 w-3" />Upload</label>}
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 )}
-                <div ref={bottomRef} />
+                {/* Step action buttons */}
+                {curActions.length > 0 && (
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    {curActions.map(a => {
+                      const Icon = a.icon;
+                      return (
+                        <button key={a.act} onClick={() => action(a.act)} className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition-all ${a.primary ? "bg-primary text-white shadow-glow hover:opacity-90" : "border border-border bg-card text-foreground hover:bg-secondary"}`}>
+                          <Icon className="h-4 w-4" />{a.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+                {busy && (
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary"><Loader2 className="h-4 w-4 text-white animate-spin" /></div>
+                    <div className="rounded-2xl border border-border bg-card px-4 py-2.5 text-sm text-muted-foreground">Thinking…</div>
+                  </div>
+                )}
               </div>
 
               {/* Input */}
               <div className="border-t border-border bg-card/60 p-3">
                 <div className="flex items-end gap-2 rounded-2xl border border-border bg-background px-3 py-2 focus-within:border-primary/40">
-                  <button type="button" onClick={() => { pendingUploadRef.current = { action: "chat-attachment", accept: ".pdf,.jpg,.jpeg,.png,.docx,.xlsx", endpoint: "/documents/upload" }; if (fileInputRef.current) { fileInputRef.current.accept = ".pdf,.jpg,.jpeg,.png,.docx,.xlsx"; fileInputRef.current.click(); } }} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-secondary transition-base">
-                    <Paperclip className="h-4 w-4" />
-                  </button>
-                  <textarea value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); } }} placeholder="Type business details or ask about a regulation…" rows={1} className="flex-1 resize-none bg-transparent px-1 py-1.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none max-h-24" />
-                  <button type="button" className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-secondary transition-base"><Mic className="h-4 w-4" /></button>
-                  <button type="button" onClick={handleSend} disabled={!input.trim() || sending} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-glow hover:opacity-90 disabled:opacity-50 transition-base">
-                    {sending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowUp className="h-3.5 w-3.5" strokeWidth={2.5} />}
+                  <button onClick={() => { pendingEndpoint.current = activeStep === 0 ? "/entity/upload-ssm" : activeStep === 2 ? "/classification/upload-product" : "/documents/upload"; fileRef.current?.click(); }} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-secondary"><Paperclip className="h-4 w-4" /></button>
+                  <textarea value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }}} placeholder={activeStep === 2 && !completed.has(2) ? "Describe your product (e.g. crude palm oil, rubber gloves)…" : "Ask about regulations, permits, FTA…"} rows={1} className="flex-1 resize-none bg-transparent px-1 py-1.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none max-h-24" />
+                  <button onClick={send} disabled={!input.trim() || busy} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary text-white shadow-glow hover:opacity-90 disabled:opacity-50">
+                    {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowUp className="h-3.5 w-3.5" strokeWidth={2.5} />}
                   </button>
                 </div>
-                <div className="mt-1.5 flex items-center justify-between px-1 text-[10px] text-muted-foreground">
-                  <span>Architect AI may request supporting documents.</span><span>↵ to send</span>
-                </div>
+                <div className="mt-1.5 flex justify-between px-1 text-[10px] text-muted-foreground"><span>↵ send · Shift+↵ newline</span><span>Step {activeStep + 1}/9</span></div>
               </div>
             </section>
 
             {/* Landed Cost */}
-            <div className="overflow-hidden rounded-2xl border border-border bg-gradient-card shadow-soft-sm">
+            <div className="rounded-2xl border border-border bg-card shadow-soft-sm overflow-hidden">
               <div className="flex items-center justify-between border-b border-border bg-card/60 px-4 py-3">
-                <div><div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Estimated</div><div className="text-sm font-semibold text-foreground">Landed Cost</div></div>
-                <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${landedCost.finalised ? "bg-success-soft text-success" : "bg-warning-soft text-warning"}`}>{landedCost.finalised ? "Finalised" : "Not Final"}</span>
+                <div><div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Estimated</div><div className="text-sm font-semibold">Landed Cost</div></div>
+                <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${lc.finalised ? "bg-green-100 text-green-700" : "bg-yellow-100 text-yellow-700"}`}>{lc.finalised ? "Finalised" : "Pending"}</span>
               </div>
               <div className="flex flex-wrap gap-x-6 gap-y-3 px-4 py-4">
-                {[
-                  { label: "FOB Value",           value: `RM ${landedCost.fob > 0 ? landedCost.fob.toLocaleString() : "4,720"}` },
-                  { label: "Insurance + Freight", value: `RM ${landedCost.fob > 0 ? (landedCost.freight + landedCost.insurance).toLocaleString() : "330"}` },
-                  { label: "Estimated Duty",      value: `RM ${landedCost.fob > 0 ? landedCost.duty.toLocaleString() : "252"}` },
-                ].map(row => (
-                  <div key={row.label} className="flex items-center gap-2">
-                    <span className="text-[13px] text-muted-foreground">{row.label}</span>
-                    <span className="text-[13px] font-medium text-foreground">{row.value}</span>
+                {[{ l: "FOB", v: `RM ${(lc.fob||4720).toLocaleString()}` }, { l: "Freight + Insurance", v: `RM ${((lc.freight+lc.ins)||330).toLocaleString()}` }, { l: "Est. Duty", v: `RM ${(lc.duty||252).toLocaleString()}` }].map(r => (
+                  <div key={r.l} className="flex items-center gap-2">
+                    <span className="text-[13px] text-muted-foreground">{r.l}</span>
+                    <span className="text-[13px] font-medium">{r.v}</span>
                   </div>
                 ))}
                 <div className="flex items-center gap-2 border-l border-border pl-6">
-                  <span className="text-sm font-semibold text-foreground">Total</span>
-                  <span className="text-lg font-semibold text-foreground">RM {landedCost.fob > 0 ? landedCost.total.toLocaleString() : "5,302"}</span>
+                  <span className="text-sm font-semibold">Total</span>
+                  <span className="text-lg font-semibold">RM {(lc.total||5302).toLocaleString()}</span>
                 </div>
-                <div className="flex w-full items-start gap-2 rounded-xl bg-success-soft p-2.5">
-                  <TrendingDown className="mt-0.5 h-3.5 w-3.5 shrink-0 text-success" />
-                  <p className="text-[11px] leading-relaxed text-success">
-                    Potential <strong>RM {landedCost.savings > 0 ? landedCost.savings.toLocaleString() : "320"} saved</strong>
-                    {landedCost.bestFta ? ` via ${landedCost.bestFta}` : " if ATIGA Form D is filed"}.
-                  </p>
-                  <div className="ml-auto flex items-center gap-1 text-[10px] text-muted-foreground"><Info className="h-3 w-3 shrink-0" />Updates as you progress.</div>
-                </div>
+                {lc.savings > 0 && (
+                  <div className="flex w-full items-center gap-2 rounded-xl bg-green-50 p-2.5">
+                    <TrendingDown className="h-3.5 w-3.5 text-green-600" />
+                    <p className="text-[11px] text-green-700">Save <strong>RM {lc.savings.toLocaleString()}</strong> via {lc.fta} FTA</p>
+                  </div>
+                )}
               </div>
             </div>
           </div>
 
-          {/* ── RIGHT: Document Pack ──────────────────────────────────────── */}
+          {/* ── RIGHT: Document Pack ─────────────────────────────────────── */}
           <aside className="lg:sticky lg:top-20 lg:self-start">
-            <div className="overflow-hidden rounded-2xl border border-border bg-gradient-card shadow-soft-md">
+            <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-soft-md">
               <div className="flex items-center justify-between border-b border-border bg-card/60 px-4 py-3">
-                <div><div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Export</div><div className="text-sm font-semibold text-foreground">Document Pack</div></div>
-                <span className="rounded-full bg-primary-soft px-2 py-0.5 text-[10px] font-semibold text-primary">{generatedIds.size} Ready</span>
+                <div><div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Export</div><div className="text-sm font-semibold">Document Pack</div></div>
+                <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary">{generatedDocs.size} Ready</span>
               </div>
-              <div className="max-h-[540px] space-y-1 overflow-y-auto px-3 py-3">
-                {readyDocs.length > 0 && (
-                  <>
-                    <div className="px-1 pb-1 pt-0.5 text-[10px] font-semibold uppercase tracking-wider text-success">✓ Ready to Generate</div>
-                    {readyDocs.map(doc => {
-                      const Icon = doc.icon;
-                      const isGenerating = generatingId === doc.id;
-                      const isGenerated  = generatedIds.has(doc.id);
-                      const gating       = isGating(doc, permitFlags);
-                      return (
-                        <div key={doc.id} className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2.5 transition-base hover:border-primary/30 hover:bg-primary-soft/30">
-                          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-success-soft"><Icon className="h-3.5 w-3.5 text-success" /></div>
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-1">
-                              <div className="truncate text-[11px] font-semibold text-foreground">{doc.label}</div>
-                              {gating && <span className="shrink-0 rounded-sm bg-primary/10 px-1 py-px text-[8px] font-bold uppercase text-primary">Req</span>}
-                            </div>
-                            <div className="truncate text-[10px] text-muted-foreground">{doc.sublabel}</div>
-                          </div>
-                          <button type="button" onClick={() => handleGenerate(doc.id)} disabled={isGenerated || isGenerating} className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-lg transition-base ${isGenerated ? "bg-success text-primary-foreground" : isGenerating ? "bg-primary/20 text-primary" : "bg-primary text-primary-foreground shadow-glow hover:opacity-90"}`}>
-                            {isGenerated ? <CheckCircle2 className="h-3 w-3" /> : isGenerating ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </>
-                )}
-
-                {partialDocs.length > 0 && (
-                  <>
-                    <div className="px-1 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-wider text-warning">⚡ Needs More Info</div>
-                    {partialDocs.map(doc => {
-                      const Icon = doc.icon;
-                      const missing = doc.requiredSteps.filter(s => !completed.has(s)).map(s => STEPS.find(st => st.id === s)?.title).filter(Boolean);
-                      return (
-                        <div key={doc.id} className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2.5 opacity-75">
-                          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-warning-soft"><Icon className="h-3.5 w-3.5 text-warning" /></div>
-                          <div className="min-w-0 flex-1">
-                            <div className="truncate text-[11px] font-semibold text-foreground">{doc.label}</div>
-                            <div className="truncate text-[10px] text-warning">Need: {missing.slice(0, 2).join(", ")}</div>
-                          </div>
-                          <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-secondary text-muted-foreground"><Lock className="h-3 w-3" /></div>
-                        </div>
-                      );
-                    })}
-                  </>
-                )}
-
-                {lockedDocs.length > 0 && (
-                  <>
-                    <div className="px-1 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">🔒 Locked</div>
-                    {lockedDocs.map(doc => {
-                      const Icon = doc.icon;
-                      const missingCount = doc.requiredSteps.filter(s => !completed.has(s)).length;
-                      return (
-                        <div key={doc.id} className="flex items-center gap-2 rounded-xl border border-border bg-card/50 px-3 py-2.5 opacity-50">
-                          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-secondary"><Icon className="h-3.5 w-3.5 text-muted-foreground" /></div>
-                          <div className="min-w-0 flex-1">
-                            <div className="truncate text-[11px] font-semibold text-muted-foreground">{doc.label}</div>
-                            <div className="truncate text-[10px] text-muted-foreground">{missingCount} step{missingCount > 1 ? "s" : ""} remaining</div>
-                          </div>
-                          <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-secondary text-muted-foreground"><Lock className="h-3 w-3" /></div>
-                        </div>
-                      );
-                    })}
-                  </>
-                )}
-
-                {/* K2 Submit button */}
-                {activeStep === 8 && signed && (
-                  <div className="pb-1 pt-3">
-                    <button type="button" onClick={handlePreviewK2} disabled={sending} className="w-full rounded-xl bg-gradient-primary px-4 py-2.5 text-[12px] font-semibold text-primary-foreground shadow-glow transition-base hover:opacity-90 flex items-center justify-center gap-2">
+              <div className="space-y-1 px-3 py-3">
+                {DOCS.map(doc => {
+                  const Icon     = doc.icon;
+                  const isReady  = doc.req.every(s => completed.has(s));
+                  const isDone   = generatedDocs.has(doc.id);
+                  const isGenning = generatingDoc === doc.id;
+                  return (
+                    <div key={doc.id} className={`flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2.5 transition-all ${isReady ? "hover:border-primary/30" : "opacity-50"}`}>
+                      <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${isDone ? "bg-green-100" : isReady ? "bg-primary/10" : "bg-secondary"}`}>
+                        <Icon className={`h-3.5 w-3.5 ${isDone ? "text-green-600" : isReady ? "text-primary" : "text-muted-foreground"}`} />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-[11px] font-semibold">{doc.label}</div>
+                        <div className="text-[10px] text-muted-foreground">{isDone ? "Generated ✓" : isReady ? "Ready to generate" : `${doc.req.filter(s => !completed.has(s)).length} steps remaining`}</div>
+                      </div>
+                      <button onClick={() => generateDoc(doc.id)} disabled={!isReady || isDone || isGenning} className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-lg transition-all ${isDone ? "bg-green-500 text-white" : isReady ? "bg-primary text-white shadow-glow hover:opacity-90" : "bg-secondary text-muted-foreground"} disabled:cursor-not-allowed`}>
+                        {isDone ? <CheckCircle2 className="h-3 w-3" /> : isGenning ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+                      </button>
+                    </div>
+                  );
+                })}
+                {activeStep >= 7 && (
+                  <div className="pt-2">
+                    <button onClick={() => action("preview-k2")} className="w-full rounded-xl bg-primary px-4 py-2.5 text-[12px] font-semibold text-white shadow-glow hover:opacity-90 flex items-center justify-center gap-2">
                       <Eye className="h-4 w-4" />Preview & Submit K2
                     </button>
-                  </div>
-                )}
-
-                {readyDocs.filter(d => !generatedIds.has(d.id)).length > 1 && (
-                  <div className="pb-1 pt-3">
-                    <button type="button" onClick={() => readyDocs.forEach(d => !generatedIds.has(d.id) && handleGenerate(d.id))} className="w-full rounded-xl bg-gradient-primary px-4 py-2.5 text-[12px] font-semibold text-primary-foreground shadow-glow transition-base hover:opacity-90">
-                      Generate All Ready Docs
-                    </button>
-                    <p className="mt-1.5 text-center text-[10px] text-muted-foreground">More docs unlock as you progress</p>
                   </div>
                 )}
               </div>
@@ -3015,262 +2209,13 @@ Be concise, practical. Reference Malaysian regulations when relevant (Customs Ac
           </aside>
         </div>
       </main>
-
-      {/* Proceed FAB */}
-      {canProceed && (
-        <div className="pointer-events-none fixed bottom-6 right-6 z-50 flex flex-col items-end gap-2">
-          <span className="absolute inset-0 -z-10 animate-ping rounded-2xl bg-primary opacity-20" />
-          <button type="button" onClick={() => navigate("/logistics", { state: { carriedDocs: EXPORT_DOCS.filter(d => generatedIds.has(d.id)).map(d => ({ id: d.id, label: d.label, sublabel: d.sublabel, status: "ready" })) } })} className="pointer-events-auto flex items-center gap-3 rounded-2xl bg-gradient-primary px-5 py-3.5 text-sm font-semibold text-primary-foreground shadow-[0_8px_32px_rgba(0,0,0,0.25)] ring-1 ring-primary/40 transition-all hover:scale-[1.03] hover:shadow-[0_12px_40px_rgba(0,0,0,0.35)] active:scale-[0.98]">
-            <Ship className="h-4 w-4" />Proceed to Logistics<ArrowRight className="h-4 w-4" />
-          </button>
-          <p className="pointer-events-auto text-center text-[10px] text-muted-foreground">{gatingGenerated}/{gatingDocs.length} required docs ready</p>
-        </div>
-      )}
     </div>
   );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MESSAGE BUBBLE
+// MARKDOWN RENDERER
 // ─────────────────────────────────────────────────────────────────────────────
-function MessageBubble({ msg, onAction, isSessionReady, onPermitUpload, onPreviewK2, signed, activeStep }: {
-  msg: Message; onAction: (action: string, label: string) => void;
-  isSessionReady: boolean;
-  onPermitUpload: (permitKey: string, file: File) => void;
-  onPreviewK2: () => void;
-  signed: boolean;
-  activeStep: number;
-}) {
-  const fileRefs = useRef<Record<string, HTMLInputElement | null>>({});
-
-  if (msg.role === "user") {
-    return (
-      <div className="flex justify-end">
-        <div className="max-w-[80%] rounded-2xl rounded-tr-sm bg-primary px-4 py-2.5 text-sm text-primary-foreground shadow-soft-sm">
-          {msg.kind === "upload" ? <div className="flex items-center gap-2"><Upload className="h-3.5 w-3.5" /><span>{(msg as {fileName: string}).fileName}</span></div> : msg.content}
-        </div>
-      </div>
-    );
-  }
-
-  if (msg.kind === "blocked") {
-    return (
-      <div className="flex items-start gap-3">
-        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-danger-soft"><AlertTriangle className="h-4 w-4 text-danger" /></div>
-        <div className="max-w-[85%] rounded-2xl rounded-tl-sm border border-danger/40 bg-danger-soft/50 px-4 py-3">
-          <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-danger">Dependency Blocked</div>
-          <p className="text-sm text-foreground">{msg.content}</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (msg.kind === "processing") {
-    return (
-      <div className="flex items-start gap-3">
-        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary-soft"><Link2 className="h-4 w-4 text-primary" /></div>
-        <div className="rounded-2xl border border-border bg-card px-4 py-2.5 text-sm text-muted-foreground">{msg.content}</div>
-      </div>
-    );
-  }
-
-  if (msg.kind === "reference") {
-    return (
-      <div className="flex items-start gap-3">
-        <Avatar />
-        <div className="max-w-[85%] space-y-2">
-          <div className="rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-2.5 text-sm text-foreground">{msg.content}</div>
-          <a href={msg.refUrl} target="_blank" rel="noreferrer" className="flex items-center gap-2 rounded-xl border border-primary/30 bg-primary-soft px-3 py-2 text-xs font-medium text-primary hover:bg-primary-soft/70 transition-base">
-            <ExternalLink className="h-3.5 w-3.5" /><span>{msg.refTitle}</span><ArrowRight className="ml-auto h-3.5 w-3.5" />
-          </a>
-        </div>
-      </div>
-    );
-  }
-
-  if (msg.kind === "extracted") {
-    const m = msg as { fields: Record<string, string>; valid: boolean; content: string };
-    return (
-      <div className="flex items-start gap-3">
-        <Avatar />
-        <div className="max-w-[90%] space-y-2">
-          <div className="rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-2.5 text-sm text-foreground">{m.content}</div>
-          <div className={`rounded-2xl border p-3 ${m.valid ? "border-success/30 bg-success-soft/30" : "border-warning/30 bg-warning-soft/30"}`}>
-            <div className={`mb-2 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider ${m.valid ? "text-success" : "text-warning"}`}>
-              {m.valid ? <><CheckCircle2 className="h-3.5 w-3.5" />Validated</> : <><AlertCircle className="h-3.5 w-3.5" />Partial extraction</>}
-            </div>
-            <div className="space-y-1.5">
-              {Object.entries(m.fields).map(([k, v]) => (
-                <div key={k} className="flex items-start justify-between gap-4">
-                  <span className="text-[11px] text-muted-foreground shrink-0">{k}</span>
-                  <span className="text-[12px] font-medium text-foreground text-right">{v}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (msg.kind === "hs-result") {
-    const m = msg as { hsCode: string; description: string; duty: number; fta: string[]; permitRequired: boolean; permits: string[]; content: string };
-    return (
-      <div className="flex items-start gap-3">
-        <Avatar />
-        <div className="max-w-[90%] space-y-2">
-          <div className="rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-2.5 text-sm text-foreground">{m.content}</div>
-          <div className="rounded-2xl border border-border bg-background p-3 space-y-2">
-            <div className="flex items-center gap-2">
-              <span className="rounded-lg bg-primary-soft px-2.5 py-1 text-sm font-bold font-mono text-primary">{m.hsCode}</span>
-              <span className="text-sm font-semibold text-foreground flex-1">{m.description}</span>
-            </div>
-            <div className="grid grid-cols-2 gap-2 text-[11px]">
-              <div className="rounded-lg bg-secondary px-2 py-1.5"><span className="text-muted-foreground">Import Duty: </span><span className="font-bold text-foreground">{m.duty}%</span></div>
-              {m.fta.length > 0 && <div className="rounded-lg bg-success-soft px-2 py-1.5"><span className="text-success font-medium">FTA: {m.fta.join(", ")}</span></div>}
-            </div>
-            {m.permitRequired && m.permits.length > 0 && (
-              <div className="rounded-lg bg-warning-soft border border-warning/30 px-2 py-2 text-[11px]">
-                <span className="font-semibold text-warning">⚠ Permit(s) required: </span>
-                <span className="text-warning">{m.permits.join(", ")}</span>
-              </div>
-            )}
-            {!m.permitRequired && <div className="rounded-lg bg-success-soft px-2 py-1.5 text-[11px] font-semibold text-success">✅ No PUA122 permits required</div>}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (msg.kind === "permit-upload") {
-    const m = msg as { permits: Array<{ name: string; key: string; uploaded: boolean }>; content: string };
-    return (
-      <div className="flex items-start gap-3">
-        <Avatar />
-        <div className="max-w-[90%] space-y-2">
-          <div className="rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-2.5 text-sm text-foreground">{m.content}</div>
-          <div className="rounded-2xl border border-border bg-background p-3 space-y-2">
-            <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-2">Upload Permit Certificates</div>
-            {m.permits.map(p => (
-              <div key={p.key} className="flex items-center gap-3 rounded-xl border border-border bg-card px-3 py-2.5">
-                <input ref={el => { fileRefs.current[p.key] = el; }} type="file" className="hidden" accept=".pdf,.jpg,.jpeg,.png" onChange={e => { const f = e.target.files?.[0]; e.target.value = ""; if (f) onPermitUpload(p.key, f); }} />
-                <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${p.uploaded ? "bg-success-soft" : "bg-warning-soft"}`}>
-                  {p.uploaded ? <CheckCircle2 className="h-4 w-4 text-success" /> : <Award className="h-4 w-4 text-warning" />}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="text-[12px] font-semibold text-foreground truncate">{p.name}</div>
-                  <div className="text-[10px] text-muted-foreground">{p.uploaded ? "Uploaded ✓" : "Certificate required"}</div>
-                </div>
-                {!p.uploaded && (
-                  <button onClick={() => fileRefs.current[p.key]?.click()} className="flex items-center gap-1.5 rounded-lg bg-primary px-2.5 py-1.5 text-[11px] font-semibold text-primary-foreground hover:opacity-90 transition-base">
-                    <Upload className="h-3 w-3" />Upload
-                  </button>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (msg.kind === "valuation") {
-    const m = msg as { fob: number; freight: number; insurance: number; duty: number; total: number; savings: number; bestFta: string; content: string };
-    return (
-      <div className="flex items-start gap-3">
-        <Avatar />
-        <div className="max-w-[90%] space-y-2">
-          <div className="rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-2.5 text-sm text-foreground">{m.content}</div>
-          <div className="rounded-2xl border border-border bg-background p-3 space-y-2">
-            {[
-              { l: "FOB Value", v: `RM ${m.fob.toLocaleString()}` },
-              { l: "Freight", v: `RM ${m.freight.toLocaleString()}` },
-              { l: "Insurance", v: `RM ${m.insurance.toLocaleString()}` },
-              { l: "Est. Import Duty", v: `RM ${m.duty.toLocaleString()}` },
-            ].map(r => (
-              <div key={r.l} className="flex justify-between text-sm">
-                <span className="text-muted-foreground">{r.l}</span>
-                <span className="font-medium text-foreground">{r.v}</span>
-              </div>
-            ))}
-            <div className="border-t border-border pt-2 flex justify-between">
-              <span className="font-semibold text-foreground">Total Landed Cost</span>
-              <span className="text-lg font-bold text-foreground">RM {m.total.toLocaleString()}</span>
-            </div>
-            {m.savings > 0 && (
-              <div className="flex items-center gap-2 rounded-lg bg-success-soft px-2.5 py-2 text-[11px] font-semibold text-success">
-                <TrendingDown className="h-3.5 w-3.5 shrink-0" />Save RM {m.savings.toLocaleString()} via {m.bestFta || "FTA"} Form D
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (msg.kind === "checklist") {
-    const m = msg as { items: ChecklistItem[]; actions?: ActionButton[]; content: string };
-    return (
-      <div className="flex items-start gap-3">
-        <Avatar />
-        <div className="max-w-[85%] space-y-3">
-          <div className="rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-2.5 text-sm text-foreground">{m.content}</div>
-          <div className="rounded-2xl border border-border bg-background p-3">
-            <div className="mb-2 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Compliance Checklist</div>
-            <ul className="space-y-1.5">
-              {m.items.map((item, i) => (
-                <li key={i} className="flex items-center justify-between gap-2 text-sm">
-                  <span className="text-foreground">{item.label}</span>
-                  <StatusTag status={item.status} />
-                </li>
-              ))}
-            </ul>
-          </div>
-          {m.actions && (
-            <div className="flex flex-wrap gap-2">
-              {m.actions.map((a, i) => {
-                const Icon = a.icon;
-                return (
-                  <button key={i} type="button" onClick={() => onAction(a.action, a.label)} disabled={!isSessionReady} className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition-base disabled:opacity-40 disabled:cursor-not-allowed ${a.intent === "primary" ? "bg-primary text-primary-foreground shadow-glow hover:opacity-90" : "border border-border bg-card text-foreground hover:bg-secondary"}`}>
-                    <Icon className="h-4 w-4" />{a.label}
-                  </button>
-                );
-              })}
-
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  // default: text + K2 button when on step 8 signed
-  return (
-    <div className="flex items-start gap-3">
-      <Avatar />
-      <div className="max-w-[85%] space-y-2">
-        <div className="rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-3 text-sm text-foreground space-y-1">
-          {renderMarkdown(msg.content)}
-        </div>
-
-      </div>
-    </div>
-  );
-}
-
-function Avatar() {
-  return (
-    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-primary shadow-glow">
-      <Sparkles className="h-4 w-4 text-primary-foreground" />
-    </div>
-  );
-}
-
-function StatusTag({ status }: { status: ChecklistStatus }) {
-  const styles: Record<ChecklistStatus, string> = { REQUIRED: "bg-danger-soft text-danger", PENDING: "bg-warning-soft text-warning", COMPLETED: "bg-success-soft text-success" };
-  return <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold tracking-wide ${styles[status]}`}>[{status}]</span>;
-}
-
 function renderMarkdown(text: string): React.ReactNode[] {
   const lines = text.split("\n");
   const nodes: React.ReactNode[] = [];
@@ -3281,16 +2226,16 @@ function renderMarkdown(text: string): React.ReactNode[] {
     listItems = [];
   };
   lines.forEach((line, idx) => {
-    const trimmed = line.trim();
-    if (!trimmed) { flushList(`list-${idx}`); return; }
-    const bulletMatch = trimmed.match(/^[*\-]\s+(.+)/);
-    if (bulletMatch) { listItems.push(bulletMatch[1]); return; }
-    const numMatch = trimmed.match(/^\d+\.\s+(.+)/);
-    if (numMatch) { listItems.push(numMatch[1]); return; }
-    const headingMatch = trimmed.match(/^#{2,3}\s+(.+)/);
-    if (headingMatch) { flushList(`list-${idx}`); nodes.push(<p key={idx} className="mt-2 mb-0.5 text-[11px] font-bold uppercase tracking-wider text-muted-foreground">{headingMatch[1]}</p>); return; }
+    const t = line.trim();
+    if (!t) { flushList(`list-${idx}`); return; }
+    const bullet = t.match(/^[*\-]\s+(.+)/);
+    if (bullet) { listItems.push(bullet[1]); return; }
+    const num = t.match(/^\d+\.\s+(.+)/);
+    if (num) { listItems.push(num[1]); return; }
+    const heading = t.match(/^#{2,3}\s+(.+)/);
+    if (heading) { flushList(`list-${idx}`); nodes.push(<p key={idx} className="mt-2 mb-0.5 text-[11px] font-bold uppercase tracking-wider text-muted-foreground">{heading[1]}</p>); return; }
     flushList(`list-${idx}`);
-    nodes.push(<p key={idx} className="text-sm leading-relaxed">{inlineFormat(trimmed)}</p>);
+    nodes.push(<p key={idx} className="text-sm leading-relaxed">{inlineFormat(t)}</p>);
   });
   flushList("list-end");
   return nodes;

@@ -1,0 +1,153 @@
+{
+  "version": "2026-04-23",
+  "sources": [
+    {
+      "name": "Malaysia prohibition overview",
+      "url": "https://www.customs.gov.my/en/individu/pengembara/prohibition-of-import-and-export"
+    },
+    {
+      "name": "Malaysia prohibited export list",
+      "url": "https://ezhs.customs.gov.my/public-prob-export"
+    },
+    {
+      "name": "Malaysia tariff reference",
+      "url": "https://ezhs.customs.gov.my/public-tariff"
+    },
+    {
+      "name": "China customs guidance",
+      "url": "http://english.customs.gov.cn/service/guide"
+    }
+  ],
+  "malaysia_export": {
+    "layer1_absolute_prohibition": [
+      {
+        "rule_id": "MY-L1-ARMS",
+        "title": "Arms and explosives",
+        "keywords": ["weapon", "gun", "rifle", "ammunition", "explosive", "grenade", "detonator"],
+        "message": "This product is prohibited for export from Malaysia under absolute prohibition."
+      },
+      {
+        "rule_id": "MY-L1-NARCOTIC",
+        "title": "Narcotics and controlled drugs",
+        "keywords": ["narcotic", "opium", "meth", "heroin", "cocaine", "drug"],
+        "message": "This product is prohibited for export from Malaysia under absolute prohibition."
+      }
+    ],
+    "layer2_license_required": [
+      {
+        "rule_id": "MY-L2-DUALUSE",
+        "title": "Strategic or dual-use items",
+        "keywords": ["dual-use", "strategic", "encryption module", "industrial chemical", "drone component"],
+        "permits": ["Export licence"],
+        "agencies": ["Royal Malaysian Customs Department"],
+        "message": "Export licence may be required before shipment."
+      },
+      {
+        "rule_id": "MY-L2-TELECOM",
+        "title": "Telecommunications equipment",
+        "keywords": ["telecom", "radio transmitter", "satellite modem", "wireless transmitter"],
+        "permits": ["Technical approval or licence"],
+        "agencies": ["MCMC", "Royal Malaysian Customs Department"],
+        "message": "Controlled item likely needs regulator approval."
+      }
+    ],
+    "layer3_conditional": [
+      {
+        "rule_id": "MY-L3-ANIMAL",
+        "title": "Animals and animal products",
+        "keywords": ["animal", "meat", "poultry", "fish", "dairy", "egg", "leather", "gelatin"],
+        "permits": ["MAQIS permit", "Inspection clearance"],
+        "agencies": ["MAQIS", "Royal Malaysian Customs Department"],
+        "message": "Animal-related exports usually require permit and inspection."
+      },
+      {
+        "rule_id": "MY-L3-PLANT",
+        "title": "Plants and plant products",
+        "keywords": ["plant", "seed", "timber", "wood", "flower", "fruit", "vegetable", "palm"],
+        "permits": ["Phytosanitary certificate", "Inspection clearance"],
+        "agencies": ["MAQIS", "Department of Agriculture"],
+        "message": "Plant-related exports usually require phytosanitary controls."
+      },
+      {
+        "rule_id": "MY-L3-FOOD",
+        "title": "Food and processed consumables",
+        "keywords": ["food", "snack", "beverage", "supplement", "processed food"],
+        "permits": ["Health or food compliance certificate"],
+        "agencies": ["Ministry of Health", "MAQIS"],
+        "message": "Food products may require certification and inspection."
+      },
+      {
+        "rule_id": "MY-L3-WILDLIFE",
+        "title": "Wildlife and protected species",
+        "keywords": ["wildlife", "ivory", "tortoiseshell", "endangered", "cites"],
+        "permits": ["CITES permit", "Wildlife authority permit"],
+        "agencies": ["PERHILITAN", "Royal Malaysian Customs Department"],
+        "message": "Wildlife-related products require strict permit controls."
+      }
+    ],
+    "hs_code_policies": [
+      {
+        "rule_id": "MY-HS-4203",
+        "prefix": "4203",
+        "status": "conditional",
+        "min_confidence": 0.5,
+        "permits": ["MAQIS permit", "Inspection clearance"],
+        "agencies": ["MAQIS", "Royal Malaysian Customs Department"],
+        "message": "HS 4203 (articles of apparel/accessories of leather) often requires animal-product controls and document checks."
+      },
+      {
+        "rule_id": "MY-HS-4407",
+        "prefix": "4407",
+        "status": "conditional",
+        "min_confidence": 0.5,
+        "permits": ["Phytosanitary certificate", "Inspection clearance"],
+        "agencies": ["MAQIS", "Department of Agriculture"],
+        "message": "HS 4407 (wood sawn/chipped lengthwise) may require phytosanitary controls before export."
+      },
+      {
+        "rule_id": "MY-HS-9301",
+        "prefix": "9301",
+        "status": "restricted",
+        "min_confidence": 0.4,
+        "permits": [],
+        "agencies": ["Royal Malaysian Customs Department"],
+        "message": "HS 9301 indicates arms-related goods and should be blocked pending strict authority review."
+      }
+    ],
+    "hs_confidence_policy": {
+      "min_confidence": 0.65,
+      "strict_hs_mode": true
+    },
+    "default_required_documents": [
+      "Commercial invoice",
+      "Packing list",
+      "HS code declaration",
+      "Customs export form K2"
+    ],
+    "sea_logistics_flow": [
+      "Confirm export admissibility and permits",
+      "Prepare commercial invoice and packing list",
+      "Submit export declaration in myCIEDS",
+      "Await Customs risk review and release",
+      "Issue draft bill of lading instructions to forwarder",
+      "Container handover and port gate-in",
+      "Final customs clearance and vessel departure"
+    ],
+    "sea_required_documents": [
+      "Commercial invoice",
+      "Packing list",
+      "Export declaration (K2)",
+      "Permit or certificate (if applicable)",
+      "Shipping instruction",
+      "Draft bill of lading"
+    ]
+  },
+  "destination_import": {
+    "CN": {
+      "country_name": "China",
+      "absolute_prohibited_keywords": ["hazardous waste", "radioactive waste", "counterfeit currency"],
+      "restricted_keywords": ["food", "animal product", "medical device", "chemical"],
+      "notes": "Check current China customs prohibitions and product-specific registration requirements."
+    }
+  }
+}

@@ -70,3 +70,5 @@ dist/
 build/
 .vite/
 .env
+backend/.vscode/
+backend/.venv_live/

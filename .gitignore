@@ -1,3 +1,41 @@
+# Environment
+.env
+.env.*
+backend/.env
+backend/.env.*
+!.env.example
+!backend/.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+backend/.venv/
+backend/venv/
+
+# Build and packaging
+build/
+dist/
+*.egg-info/
+
+# Editor and OS files
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+.DS_Store
+
 # Logs
 logs
 *.log
@@ -7,23 +45,10 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-# Node
 node_modules
 dist
 dist-ssr
 *.local
-
-# Vite cache
-.vite/
-
-# Env files
-.env
-.env.*
-
-# Python
-.venv/
-__pycache__/
-*.pyc
 
 # Editor directories and files
 .vscode/*
@@ -35,3 +60,15 @@ __pycache__/
 *.njsproj
 *.sln
 *.sw?
+
+# Supabase and local artifacts
+backend/.supabase/
+
+node_modules/
+frontend/node_modules/
+dist/
+build/
+.vite/
+.env
+backend/.vscode/
+backend/.venv_live/

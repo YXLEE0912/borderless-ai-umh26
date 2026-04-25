@@ -1,5 +1,7 @@
 # 🌏 Borderless AI 
 
+**recorded pitching video** :
+
 **Borderless AI** is a modular, agentic workflow system designed to navigate the complexities of cross-border trade. By leveraging AI to bridge language gaps and regulatory hurdles, we provide a seamless path for SMEs to scale from local markets to global stages.
 
 ---

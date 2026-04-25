@@ -51,6 +51,10 @@ class EntityVerifyRequest(BaseModel):
     registration_number: str
     director_nric: Optional[str] = None
 
+# FIX: models/__init__.py imports EntityVerificationRequest (old name) as an
+# alias. Keep both names so nothing breaks regardless of which is used.
+EntityVerificationRequest = EntityVerifyRequest
+
 
 class EntityVerifyResponse(BaseModel):
     session_id: str

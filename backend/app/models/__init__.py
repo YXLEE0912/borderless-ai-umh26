@@ -47,7 +47,9 @@ from .consignee import (
 )
 
 # Step 3 — HS Classification
-from .hs_classification import (
+# FIX: was importing from .hs_classification which does not exist.
+# The actual model file is hs_code.py.
+from .hs_code import (
     FTAEligibilityResult,
     HSAlternative,
     HSAlternativesResult,

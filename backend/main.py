@@ -11,21 +11,29 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import APIRouter
 from pydantic import BaseModel
+from fastapi.responses import StreamingResponse
 from typing import Optional
 import os, uuid, asyncio
 from datetime import datetime
 
 # ── Import all routers ────────────────────────────────────────────────────────
-from app.routes.entity_route          import router as entity_router
-from app.routes.consignee_route       import router as consignee_router
-from app.routes.hs_route              import router as hs_router
-from app.routes.permit_route          import router as permit_router
-from app.routes.digital_access_route  import router as digital_access_router
-from app.routes.valuation_route       import router as valuation_router
-from app.routes.logistics_route       import router as logistics_router
-from app.routes.document_route        import router as document_router
-from app.routes.customs_route         import router as customs_router
+from app.routes.entity_route             import router as entity_router
+from app.routes.consignee_route          import router as consignee_router
+from app.routes.permit_route             import router as permit_router
+from app.routes.digital_access_route    import router as digital_access_router
+from app.routes.valuation_route          import router as valuation_router
+from app.routes.logistics_route          import router as logistics_router
+from app.routes.document_route           import router as document_router
+from app.routes.customs_route            import router as customs_router
+from app.routes.hs_search_route          import router as hs_search_router
+# FIX: hs_classification_route replaces hs_route — do NOT import both.
+# hs_route.py registered POST /classification/hs-code, and so does
+# hs_classification_route.py. Registering both causes a silent duplicate
+# where only the last-registered handler runs.
+from app.routes.hs_classification_route import router as hs_classification_router
+
 from glmservice import get_glm
+
 
 # ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(
@@ -70,20 +78,25 @@ def _new_session() -> dict:
     }
 
 # ── Register routers ──────────────────────────────────────────────────────────
-app.include_router(entity_router)          # Step 1
-app.include_router(consignee_router)       # Step 2
-app.include_router(hs_router)              # Step 3
-app.include_router(permit_router)          # Step 4
-app.include_router(digital_access_router)  # Step 5
-app.include_router(valuation_router)       # Step 6
-app.include_router(logistics_router)       # Step 7
-app.include_router(document_router)        # Step 8
-app.include_router(customs_router)         # Step 9
+app.include_router(entity_router)            # Step 1  — /entity
+app.include_router(consignee_router)         # Step 2  — /consignee
+# Step 3 — /classification  (hs_classification_route is the full hybrid version;
+#           hs_route.py is the old simple version — do NOT register both)
+app.include_router(hs_classification_router) # Step 3  — /classification/hs-code
+app.include_router(permit_router)            # Step 4  — /permits
+app.include_router(digital_access_router)   # Step 5  — /digital-access
+app.include_router(valuation_router)         # Step 6  — /valuation
+app.include_router(logistics_router)         # Step 7  — /logistics
+app.include_router(document_router)          # Step 8  — /trade-docs
+app.include_router(customs_router)           # Step 9  — /customs
+app.include_router(hs_search_router)         # Util    — /hs/search
+
 
 # ── Health ────────────────────────────────────────────────────────────────────
 @app.get("/health", tags=["Health"])
 async def health():
     return {"status": "ok", "service": "Borderless AI Trade Platform"}
+
 
 # ── Sessions ──────────────────────────────────────────────────────────────────
 @app.post("/sessions", tags=["Sessions"])
@@ -96,27 +109,27 @@ async def create_session():
 async def get_session(session_id: str):
     session = _sessions.get(session_id)
     if not session:
-        # Return a fresh stub so frontend doesn't crash on first load
         session = _new_session()
         session["session_id"] = session_id
         _sessions[session_id] = session
     return session
 
+
 # ── Checklist ─────────────────────────────────────────────────────────────────
 @app.get("/checklist/{session_id}", tags=["Checklist"])
 async def get_checklist(session_id: str):
-    session = _sessions.get(session_id, {})
+    session   = _sessions.get(session_id, {})
     checklist = session.get("checklist", {})
     steps = [
-        {"step": 1, "label": "Entity Verification",    "key": "entity_verification"},
-        {"step": 2, "label": "Consignee Details",       "key": "consignee"},
-        {"step": 3, "label": "HS Classification",       "key": "classification"},
-        {"step": 4, "label": "Special Permits",         "key": "permits"},
-        {"step": 5, "label": "Digital Access Setup",    "key": "digital_access"},
-        {"step": 6, "label": "Financial Valuation",     "key": "financial_valuation"},
-        {"step": 7, "label": "Logistics Setup",         "key": "logistics"},
-        {"step": 8, "label": "Trade Documents",         "key": "documents"},
-        {"step": 9, "label": "K2 Customs Declaration",  "key": "k2"},
+        {"step": 1, "label": "Entity Verification",   "key": "entity_verification"},
+        {"step": 2, "label": "Consignee Details",      "key": "consignee"},
+        {"step": 3, "label": "HS Classification",      "key": "classification"},
+        {"step": 4, "label": "Special Permits",        "key": "permits"},
+        {"step": 5, "label": "Digital Access Setup",   "key": "digital_access"},
+        {"step": 6, "label": "Financial Valuation",    "key": "financial_valuation"},
+        {"step": 7, "label": "Logistics Setup",        "key": "logistics"},
+        {"step": 8, "label": "Trade Documents",        "key": "documents"},
+        {"step": 9, "label": "K2 Customs Declaration", "key": "k2"},
     ]
     items = []
     for s in steps:
@@ -134,10 +147,11 @@ async def get_checklist(session_id: str):
         "items":        items,
     }
 
+
 # ── Document status ───────────────────────────────────────────────────────────
 @app.get("/documents/status/{session_id}", tags=["Documents"])
 async def get_doc_status(session_id: str):
-    session = _sessions.get(session_id, {})
+    session   = _sessions.get(session_id, {})
     docs_data = session.get("documents", {})
     doc_names = [
         "commercial_invoice",
@@ -160,6 +174,7 @@ async def get_doc_status(session_id: str):
         })
     return {"session_id": session_id, "documents": docs}
 
+
 # ── Landed cost ────────────────────────────────────────────────────────────────
 @app.get("/landed-cost/{session_id}", tags=["Valuation"])
 async def get_landed_cost(session_id: str):
@@ -173,13 +188,13 @@ async def get_landed_cost(session_id: str):
         }
     return {"session_id": session_id, "available": True, **landed}
 
+
 # ── Chat ──────────────────────────────────────────────────────────────────────
 class ChatRequest(BaseModel):
     session_id: str
     message: str
     stream: bool = False
 
-from fastapi.responses import StreamingResponse
 
 @app.post("/chat", tags=["Chat"])
 async def chat(req: ChatRequest):
@@ -229,6 +244,7 @@ Always be concise, practical, and cite specific portals or regulations when rele
         )
 
     return {"session_id": req.session_id, "reply": reply, "stream": False}
+
 
 # ── Debug ─────────────────────────────────────────────────────────────────────
 @app.get("/debug/env", tags=["Health"])

@@ -2,6 +2,24 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import Optional, Dict, Any
 import sys, os, asyncio
 
+DOCUMENT_PATCH = """
+from app.engines.validation_engine import ValidationEngine
+ 
+@router.post("/generate")
+async def generate_documents(session_id: str = Query(...)):
+ 
+    session   = _sessions.get(session_id, {})
+    checklist = session.get("checklist", {})
+ 
+    # ── Gate: all upstream steps must be done ─────────────────────────────
+    errors = ValidationEngine.validate_session_for_documents(checklist)
+    if errors:
+        raise HTTPException(status_code=422, detail=errors)
+ 
+    # ── rest of existing code unchanged ────────────────────────────────────
+    ...
+"""
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from glmservice import get_glm
 

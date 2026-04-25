@@ -12,6 +12,37 @@ from pydantic import BaseModel
 from typing import Optional, Literal
 import sys, os
 
+LOGISTICS_PATCH = """
+from app.engines.validation_engine import ValidationEngine
+ 
+@router.post("/setup")
+async def setup_logistics(req: LogisticsRequest):
+ 
+    # ── Local validation ───────────────────────────────────────────────────
+    errors = (
+        ValidationEngine.validate_logistics(
+            mode               = req.mode,
+            port_of_loading    = req.port_of_loading,
+            port_of_discharge  = req.port_of_discharge,
+            gross_weight_kg    = req.gross_weight_kg,
+            cbm                = req.cbm,
+            export_date        = req.export_date,
+            vessel_name        = req.vessel_name,
+            flight_number      = req.flight_number,
+        )
+        + ValidationEngine.validate_signatory(
+            name           = req.signatory_name,
+            ic_or_passport = req.signatory_ic_or_passport,
+            designation    = req.signatory_designation,
+        )
+    )
+    if errors:
+        raise HTTPException(status_code=422, detail=errors)
+ 
+    # ── rest of existing code unchanged ────────────────────────────────────
+    ...
+"""
+ 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from glmservice import get_glm
 

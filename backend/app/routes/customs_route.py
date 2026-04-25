@@ -11,8 +11,28 @@ ADDED: signatory IC/passport + designation + declaration statement
 from fastapi import APIRouter, HTTPException, Query
 import sys, os
 
+
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from glmservice import get_glm
+
+CUSTOMS_PATCH = """
+from app.engines.validation_engine import ValidationEngine
+ 
+@router.post("/submit-k2")
+async def submit_k2(session_id: str = Query(...)):
+ 
+    session   = _sessions.get(session_id, {})
+    checklist = session.get("checklist", {})
+ 
+    # ── Gate: all 8 prior steps must be done ─────────────────────────────
+    errors = ValidationEngine.validate_session_for_k2(checklist)
+    if errors:
+        raise HTTPException(status_code=422, detail=errors)
+ 
+    # ── rest of existing code unchanged ────────────────────────────────────
+    ...
+"""
 
 router = APIRouter(prefix="/customs", tags=["Customs Submission"])
 

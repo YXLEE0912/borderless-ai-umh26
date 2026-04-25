@@ -11,6 +11,29 @@ from pydantic import BaseModel
 from typing import Optional
 import sys, os
 
+CONSIGNEE_PATCH = """
+from app.engines.validation_engine import ValidationEngine
+ 
+@router.post("/add")
+async def add_consignee(req: ConsigneeRequest):
+ 
+    # ── Local validation ───────────────────────────────────────────────────
+    errors = (
+        ValidationEngine.validate_consignee(
+            buyer_name     = req.buyer_name,
+            buyer_country  = req.buyer_country,
+            buyer_address  = req.buyer_address,
+            incoterm       = req.incoterm,
+        )
+        + ValidationEngine.validate_buyer_email(req.buyer_email)
+    )
+    if errors:
+        raise HTTPException(status_code=422, detail=errors)
+ 
+    # ── rest of existing code unchanged ────────────────────────────────────
+    ...
+"""
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from glmservice import get_glm
 

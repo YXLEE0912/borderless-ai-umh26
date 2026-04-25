@@ -15,11 +15,9 @@ export default defineConfig({
   server: {
     port: 5173,
 
-    // ── Proxy: forwards /sessions, /entity, /chat etc. → FastAPI backend ──
-    // This eliminates CORS issues during local development.
-    // Every request NOT starting with /assets or /@vite is forwarded.
+    // ── Proxy: forwards all backend routes → FastAPI on :8000 ─────────────
+    // Eliminates CORS issues during local development.
     proxy: {
-      // All backend routes — add more prefixes here if needed
       "/sessions":       { target: "http://localhost:8000", changeOrigin: true },
       "/chat":           { target: "http://localhost:8000", changeOrigin: true },
       "/entity":         { target: "http://localhost:8000", changeOrigin: true },
@@ -36,6 +34,7 @@ export default defineConfig({
       "/landed-cost":    { target: "http://localhost:8000", changeOrigin: true },
       "/health":         { target: "http://localhost:8000", changeOrigin: true },
       "/debug":          { target: "http://localhost:8000", changeOrigin: true },
+      "/hs":             { target: "http://localhost:8000", changeOrigin: true }, // HS code search
     },
   },
 });

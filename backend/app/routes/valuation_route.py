@@ -11,6 +11,28 @@ from pydantic import BaseModel
 from typing import Optional
 import sys, os
 
+VALUATION_PATCH = """
+from app.engines.validation_engine import ValidationEngine
+ 
+@router.post("/calculate")
+async def calculate_valuation(req: ValuationRequest):
+ 
+    # ── Local validation ───────────────────────────────────────────────────
+    errors = ValidationEngine.validate_valuation(
+        fob_value_myr     = req.fob_value_myr,
+        currency          = req.invoice_currency,
+        exchange_rate     = req.exchange_rate_to_myr,
+        insurance_rate    = req.insurance_rate,
+        freight_quote_myr = req.freight_quote_myr,
+    )
+    if errors:
+        raise HTTPException(status_code=422, detail=errors)
+ 
+    # ── rest of existing code unchanged ────────────────────────────────────
+    ...
+"""
+ 
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from glmservice import get_glm
 

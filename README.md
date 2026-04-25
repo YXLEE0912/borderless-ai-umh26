@@ -3,27 +3,34 @@
 **Borderless AI** is a modular, agentic workflow system designed to navigate the complexities of cross-border trade. By leveraging AI to bridge language gaps and regulatory hurdles, we provide a seamless path for SMEs to scale from local markets to global stages.
 
 ---
+## 🌶️ The Story
+Meet **Kak Siti**. She makes the best *Sambal Belacan* in Muar. Her fans in Singapore and Australia want to buy it, but Kak Siti is stuck. 
+* *What is an HS Code?* * *Does her sambal need a permit for Singapore?* * *How much will shipping and customs tax cost?*
 
-## 🚀 The Three-Phase Framework
-Our system is built on **Modular Decoupling**, allowing users to follow a complete "Guided Journey" or use specific modules as standalone microservices.
-
-### 1. Product Admission Scanner ("Can I sell this?")
-* **Focus:** Instant feasibility check for specific goods.
-* **Core Tech:** Manglish-Powered AI Vision & Reasoning.
-* **Functionality:** Supports multi-modal input (Image + Text). It identifies legal export/import status and flags necessary local registrations (e.g., SSM).
-* **Interconnectivity:** Passes parameters (category, name) directly to Phase 2.
-
-### 2. Compliance Architect ("How do I prepare?")
-* **Focus:** Strategic business planning and document roadmap.
-* **Core Tech:** Trade Dependency Graph & Agentic Reasoning.
-* **Functionality:** Generates a step-by-step compliance roadmap. Maps dependencies (e.g., "Document B is required before applying for Permit A") to guide startups through paperwork.
-
-### 3. Logistics & Tax Execution ("How much will it cost?")
-* **Focus:** Tactical execution and fulfillment.
-* **Core Tech:** Living Artifact Payload.
-* **Functionality:** Accepts document uploads to calculate precise Shipping Fees and Customs Taxes. Provides direct redirection to 3PL platforms for immediate booking.
+Usually, Kak Siti would need a consultant. With **Borderless AI**, she just needs her smartphone.
 
 ---
+
+## 🚀 The Three-Phase Framework
+We’ve built a modular, agentic workflow that guides Kak Siti from her kitchen to the world.
+
+### 📸 Phase 1: The Product Admission Scanner
+**"Boleh export sambal ni ke SG tak?"**
+* **Input:** Kak Siti takes a photo of her sambal jar and asks a question in **Manglish**.
+* **AI Vision & Reasoning:** Using **Z.AI GLM**, the system identifies the product, extracts ingredients, and determines the **HS Code (2103.90)**.
+* **Instant Check:** It flags that while it is "Food-Grade," it requires specific labeling for Singapore.
+
+### 📝 Phase 2: The Compliance Architect
+**"What documents do I need?"**
+* **Agentic Roadmap:** The AI generates a step-by-step document checklist.
+* **Auto-Fill:** It uses the product data from Phase 1 to draft a **Commercial Invoice** and **Packing List** automatically.
+* **Trade Graph:** It maps out dependencies (e.g., "You need the SSM registration before applying for the Export Permit").
+
+### 🚢 Phase 3: Logistics & Tax Execution
+**"How much is the total cost?"**
+* **Landed Cost Calculation:** The system calculates the estimated **Customs Duties** and **SST/GST**.
+* **Booking:** It provides a direct redirection to logistics platforms for immediate booking based on the weight and destination.
+
 
 ## 🏗 Technical Architecture
 
@@ -88,3 +95,7 @@ Standard trade tools are built for logistics giants. **Borderless AI** is built 
 
 ---
 
+## 👥 The Team: [50_Gurliessssssss]
+*Submitted for UMHackathon 2026*
+
+---

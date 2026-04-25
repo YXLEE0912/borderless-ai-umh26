@@ -45,23 +45,10 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-# Node
 node_modules
 dist
 dist-ssr
 *.local
-
-# Vite cache
-.vite/
-
-# Env files
-.env
-.env.*
-
-# Python
-.venv/
-__pycache__/
-*.pyc
 
 # Editor directories and files
 .vscode/*
@@ -72,7 +59,6 @@ __pycache__/
 *.ntvs*
 *.njsproj
 *.sln
-<<<<<<< HEAD
 *.sw?
 
 # Supabase and local artifacts
@@ -84,6 +70,3 @@ dist/
 build/
 .vite/
 .env
-=======
-*.sw?
->>>>>>> architect-ai

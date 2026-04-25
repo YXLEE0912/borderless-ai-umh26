@@ -1,11 +1,9 @@
-import { useState } from "react";
 import TopNav from "@/components/TopNav";
 import { Link } from "react-router-dom";
 import {
-  ScanLine, Map, Calculator, ArrowRight, Sparkles,
-  CheckCircle2, ChevronDown, User, MapPin, Phone, Mail
+  ScanLine, Map, Calculator, ArrowRight, Sparkles, TrendingUp,
+  CheckCircle2, Clock, Globe, Truck, ShieldCheck
 } from "lucide-react";
-import { LiveTradeIntelligence } from "@/components/LiveTradeIntelligence";
 
 type ModuleCard = {
   id: string;
@@ -22,7 +20,7 @@ type ModuleCard = {
 const modules: ModuleCard[] = [
   {
     id: "scan",
-    title: "Product Scanner",
+    title: "Scan Product",
     description: "Check if your product can be exported.",
     icon: ScanLine,
     cta: "Start Scan",
@@ -33,7 +31,7 @@ const modules: ModuleCard[] = [
   },
   {
     id: "plan",
-    title: "Compliance Architect",
+    title: "Plan Export",
     description: "Get step-by-step compliance guidance.",
     icon: Map,
     cta: "Start Planning",
@@ -44,7 +42,7 @@ const modules: ModuleCard[] = [
   },
   {
     id: "ship",
-    title: "Logistics & Tax Executor",
+    title: "Calculate & Ship",
     description: "Upload documents and get final cost.",
     icon: Calculator,
     cta: "Start Execution",
@@ -57,17 +55,17 @@ const modules: ModuleCard[] = [
 
 const accentClasses = {
   primary: {
-    iconBg: "bg-[hsl(221,83%,96%)] text-[hsl(221,83%,53%)]",
+    iconBg: "bg-primary-soft text-primary",
     glow: "from-primary/20 via-primary/5 to-transparent",
     button: "bg-primary text-primary-foreground hover:bg-primary/90 shadow-glow",
-    chip: "bg-[hsl(221,83%,96%)] text-[hsl(221,83%,53%)]",
+    chip: "bg-primary/10 text-primary",
     ring: "group-hover:ring-primary/20",
   },
   accent: {
-    iconBg: "bg-[hsl(152,76%,95%)] text-[hsl(160,84%,39%)]",
+    iconBg: "bg-accent-soft text-accent",
     glow: "from-accent/20 via-accent/5 to-transparent",
     button: "bg-accent text-accent-foreground hover:bg-accent/90 shadow-accent-glow",
-    chip: "bg-[hsl(152,76%,95%)] text-[hsl(160,84%,39%)]",
+    chip: "bg-accent/10 text-accent",
     ring: "group-hover:ring-accent/20",
   },
   violet: {
@@ -79,135 +77,12 @@ const accentClasses = {
   },
 } as const;
 
-const shipmentsData = [
-  {
-    id: "Sambal Nyonya 200g",
-    dest: "🇸🇬 Singapore",
-    status: "Cleared",
-    color: "success" as const,
-    progress: 100,
-    consignee: {
-      name: "Wei Liang Tan",
-      company: "FreshMart SG Pte Ltd",
-      address: "12 Jurong Gateway Rd, Singapore 608928",
-      phone: "+65 9123 4567",
-      email: "weiliang@freshmart.sg",
-    },
-  },
-  {
-    id: "Rattan Side Table",
-    dest: "🇦🇺 Australia",
-    status: "In transit",
-    color: "warning" as const,
-    progress: 55,
-    consignee: {
-      name: "James Holden",
-      company: "Artisan Home AU",
-      address: "88 George St, Sydney NSW 2000, Australia",
-      phone: "+61 2 9988 7766",
-      email: "j.holden@artisanhome.com.au",
-    },
-  },
-  {
-    id: "Batik Silk Scarves",
-    dest: "🇯🇵 Japan",
-    status: "Pre-clearance",
-    color: "primary" as const,
-    progress: 30,
-    consignee: {
-      name: "Yuki Nakamura",
-      company: "Kyoto Fashion House",
-      address: "4-2 Shijo Dori, Kyoto 600-8001, Japan",
-      phone: "+81 75 221 0088",
-      email: "y.nakamura@kyotofashion.jp",
-    },
-  },
+const stats = [
+  { label: "Active shipments", value: "12", trend: "+3", icon: Truck },
+  { label: "Markets opened", value: "27", trend: "+5", icon: Globe },
+  { label: "Compliance score", value: "98%", trend: "+2.1%", icon: ShieldCheck },
+  { label: "Avg. clearance time", value: "2.4d", trend: "−18%", icon: Clock },
 ];
-
-const RecentShipments = () => {
-  const [openId, setOpenId] = useState<string | null>(null);
-
-  return (
-    <div className="rounded-2xl border border-border bg-card p-6 shadow-xs">
-      <div className="flex items-center justify-between">
-        <h3 className="text-base font-semibold text-foreground">Recent shipments</h3>
-        <button className="text-xs font-medium text-primary hover:underline">View all</button>
-      </div>
-      <div className="mt-5 flex flex-col gap-2">
-        {shipmentsData.map((row) => {
-          const isOpen = openId === row.id;
-          return (
-            <div key={row.id} className="rounded-xl border border-border overflow-hidden">
-              {/* Clickable header */}
-              <button
-                onClick={() => setOpenId(isOpen ? null : row.id)}
-                className="w-full flex items-center justify-between px-4 py-3.5 hover:bg-muted/40 transition-colors"
-              >
-                <div className="text-left">
-                  <div className="text-sm font-medium text-foreground">{row.id}</div>
-                  <div className="text-xs text-muted-foreground">{row.dest} · ETA 4 days</div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${
-                    row.color === "success" ? "bg-success-soft text-success" :
-                    row.color === "warning" ? "bg-warning-soft text-warning" :
-                    "bg-primary-soft text-primary"
-                  }`}>
-                    {row.status}
-                  </span>
-                  <ChevronDown className={`h-4 w-4 text-muted-foreground transition-transform duration-200 ${isOpen ? "rotate-180" : ""}`} />
-                </div>
-              </button>
-
-              {/* Expandable content */}
-              {isOpen && (
-                <div className="px-4 pb-4 border-t border-border">
-                  <div className="mt-3 rounded-lg border border-border bg-muted/30 p-3">
-                    <div className="mb-2 flex items-center justify-between">
-                      <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-                        Consignee (Buyer)
-                      </span>
-                      <span className="rounded-full border border-border px-2 py-0.5 text-[10px] text-muted-foreground">
-                        Verified Importer
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 text-xs text-muted-foreground">
-                      <div className="flex items-start gap-1.5">
-                        <User className="mt-0.5 h-3 w-3 shrink-0" />
-                        <div>
-                          <div className="font-medium text-foreground">{row.consignee.name}</div>
-                          <div>{row.consignee.company}</div>
-                        </div>
-                      </div>
-                      <div className="flex items-start gap-1.5">
-                        <MapPin className="mt-0.5 h-3 w-3 shrink-0" />
-                        <span>{row.consignee.address}</span>
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        <Phone className="h-3 w-3 shrink-0" />
-                        <span>{row.consignee.phone}</span>
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        <Mail className="h-3 w-3 shrink-0" />
-                        <span className="truncate">{row.consignee.email}</span>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-muted">
-                    <div
-                      className="h-full rounded-full bg-primary transition-all"
-                      style={{ width: `${row.progress}%` }}
-                    />
-                  </div>
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-};
 
 const Index = () => {
   return (
@@ -230,6 +105,35 @@ const Index = () => {
               Turn global trade into a simple, guided process.
             </p>
           </div>
+          <div className="flex items-center gap-2 rounded-2xl border border-border bg-card px-4 py-3 shadow-soft-sm">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-success-soft">
+              <TrendingUp className="h-5 w-5 text-success" />
+            </div>
+            <div className="leading-tight">
+              <div className="text-[13px] text-muted-foreground">This quarter</div>
+              <div className="text-base font-semibold text-foreground">RM 184,520 saved <span className="text-success">↑ 24%</span></div>
+            </div>
+          </div>
+        </section>
+
+        {/* Stats strip */}
+        <section className="mb-10 grid grid-cols-2 gap-3 lg:grid-cols-4">
+          {stats.map((s, i) => (
+            <div
+              key={s.label}
+              className="rounded-2xl border border-border bg-gradient-card p-5 shadow-xs animate-fade-in-up"
+              style={{ animationDelay: `${i * 60}ms` }}
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-[12px] font-medium uppercase tracking-wider text-muted-foreground">{s.label}</span>
+                <s.icon className="h-4 w-4 text-muted-foreground" />
+              </div>
+              <div className="mt-3 flex items-baseline gap-2">
+                <span className="text-3xl font-semibold tracking-tight text-foreground">{s.value}</span>
+                <span className="text-[12px] font-medium text-success">{s.trend}</span>
+              </div>
+            </div>
+          ))}
         </section>
 
         {/* Module cards */}
@@ -239,6 +143,9 @@ const Index = () => {
               <h2 className="text-xl font-semibold text-foreground">Start a new workflow</h2>
               <p className="mt-1 text-sm text-muted-foreground">Three guided modules, one continuous export journey.</p>
             </div>
+            <button className="hidden items-center gap-1 text-sm font-medium text-primary hover:underline md:inline-flex">
+              View all modules <ArrowRight className="h-4 w-4" />
+            </button>
           </div>
 
           <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
@@ -252,12 +159,16 @@ const Index = () => {
                   className="group relative overflow-hidden rounded-2xl border border-border bg-gradient-card p-7 shadow-soft-sm ring-1 ring-transparent transition-smooth hover:-translate-y-1 hover:shadow-soft-xl animate-fade-in-up"
                   style={{ animationDelay: `${200 + i * 100}ms` }}
                 >
+                  {/* glow */}
                   <div className={`pointer-events-none absolute -right-20 -top-20 h-56 w-56 rounded-full bg-gradient-to-br ${a.glow} blur-2xl transition-smooth group-hover:scale-110`} />
 
                   <div className="relative flex items-start justify-between">
                     <div className={`flex h-14 w-14 items-center justify-center rounded-2xl ${a.iconBg} ring-8 ring-transparent transition-base ${a.ring}`}>
                       <Icon className="h-7 w-7" strokeWidth={2} />
                     </div>
+                    <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold tracking-wide ${a.chip}`}>
+                      {m.step}
+                    </span>
                   </div>
 
                   <div className="relative mt-7">
@@ -289,10 +200,45 @@ const Index = () => {
         </section>
 
         {/* Recent activity */}
-        <section className="mt-10 grid grid-cols-1 gap-5 lg:grid-cols-2">
-          <RecentShipments />
-          <div className="rounded-2xl border border-border bg-card shadow-xs overflow-hidden max-h-[320px]">
-            <LiveTradeIntelligence />
+        <section className="mt-10 grid grid-cols-1 gap-5 lg:grid-cols-3">
+          <div className="rounded-2xl border border-border bg-card p-6 shadow-xs lg:col-span-2">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-semibold text-foreground">Recent shipments</h3>
+              <button className="text-xs font-medium text-primary hover:underline">View all</button>
+            </div>
+            <div className="mt-5 divide-y divide-border">
+              {[
+                { product: "Sambal Nyonya 200g", dest: "🇸🇬 Singapore", status: "Cleared", color: "success" },
+                { product: "Rattan Side Table", dest: "🇦🇺 Australia", status: "In transit", color: "warning" },
+                { product: "Batik Silk Scarves", dest: "🇯🇵 Japan", status: "Pre-clearance", color: "primary" },
+              ].map((row) => (
+                <div key={row.product} className="flex items-center justify-between py-3.5">
+                  <div>
+                    <div className="text-sm font-medium text-foreground">{row.product}</div>
+                    <div className="text-xs text-muted-foreground">{row.dest} · ETA 4 days</div>
+                  </div>
+                  <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${
+                    row.color === "success" ? "bg-success-soft text-success" :
+                    row.color === "warning" ? "bg-warning-soft text-warning" :
+                    "bg-primary-soft text-primary"
+                  }`}>
+                    {row.status}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="relative overflow-hidden rounded-2xl border border-border bg-gradient-primary p-6 text-primary-foreground shadow-glow">
+            <div className="absolute -right-10 -top-10 h-40 w-40 rounded-full bg-white/10 blur-2xl" />
+            <Sparkles className="h-6 w-6 opacity-80" />
+            <h3 className="mt-4 text-lg font-semibold leading-tight">New: ASEAN tariff updates</h3>
+            <p className="mt-2 text-sm leading-relaxed text-primary-foreground/80">
+              ATIGA reductions detected for 4 of your active SKUs. Estimated savings: RM 12,400.
+            </p>
+            <button className="mt-5 inline-flex items-center gap-1.5 rounded-lg bg-white/15 px-3.5 py-2 text-sm font-medium backdrop-blur transition-base hover:bg-white/25">
+              Review impact <ArrowRight className="h-3.5 w-3.5" />
+            </button>
           </div>
         </section>
       </main>

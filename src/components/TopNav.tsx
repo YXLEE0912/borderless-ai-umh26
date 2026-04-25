@@ -174,6 +174,9 @@ const TopNav = () => {
             >
               <Search className="h-4 w-4" />
               <span className="flex-1 text-left">Search products, HS codes, markets…</span>
+              <kbd className="pointer-events-none inline-flex h-5 select-none items-center gap-1 rounded border border-border bg-background px-1.5 font-mono text-[10px] font-medium text-muted-foreground">
+                <span className="text-xs">⌘</span>K
+              </kbd>
             </button>
 
             <button
@@ -328,6 +331,7 @@ const TopNav = () => {
                   <DropdownMenuItem onClick={() => navigate("/settings")}>
                     <Settings className="mr-2 h-4 w-4" />
                     <span>Settings</span>
+                    <DropdownMenuShortcutInline>⌘,</DropdownMenuShortcutInline>
                   </DropdownMenuItem>
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
@@ -366,15 +370,15 @@ const TopNav = () => {
             </CommandItem>
             <CommandItem onSelect={() => runCommand(() => navigate("/scan"))}>
               <ScanLine className="mr-2 h-4 w-4" />
-              <span>Product Scanner</span>
+              <span>Scan Product</span>
             </CommandItem>
             <CommandItem onSelect={() => runCommand(() => navigate("/assistant"))}>
               <Sparkles className="mr-2 h-4 w-4" />
-              <span>Compliance Architect</span>
+              <span>AI Assistant</span>
             </CommandItem>
             <CommandItem onSelect={() => runCommand(() => navigate("/logistics"))}>
               <Truck className="mr-2 h-4 w-4" />
-              <span>Logistics & Tax Executor</span>
+              <span>Logistics & Tax</span>
             </CommandItem>
           </CommandGroup>
           <CommandSeparator />
